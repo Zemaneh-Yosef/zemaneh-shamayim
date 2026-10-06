@@ -1,0 +1,14 @@
+[Unit]
+Description=zmanim-sky-server: download the latest GFS cycle
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=zmanim-sky
+WorkingDirectory=/opt/zmanim-sky-server
+Environment=ZMANIM_SKY_CONFIG=/opt/zmanim-sky-server/config.json
+ExecStart=/opt/zmanim-sky-server/venv/bin/python fetch_gfs.py
+# a full cycle is a few hundred requests with a polite delay between them
+TimeoutStartSec=2h
+Nice=10

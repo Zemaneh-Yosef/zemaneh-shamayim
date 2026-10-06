@@ -1,0 +1,89 @@
+{
+ "about": "Sky-meter readings for light_pollution.measurements.file (copy to <data_dir>/sky-measurements.json and add your own). Each: lat, lon, date (YYYY-MM-DD, or YYYY-MM / YYYY), and sqm (mag/arcsec^2 at the zenith; or artificialMcdM2). Take readings on clear, moonless nights after astronomical twilight, away from direct lights, and average a few. These 12 are the Ramon Crater dark-sky park's 2020 monitoring sites.",
+ "measurements": [
+  {
+   "lat": 30.6189,
+   "lon": 34.81357,
+   "date": "2020",
+   "sqm": 20.65,
+   "note": "Ramon Crater site 1, near Mitzpe Ramon; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.59282,
+   "lon": 34.87196,
+   "date": "2020",
+   "sqm": 21.38,
+   "note": "Ramon Crater site 2, near Geves campground; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.59138,
+   "lon": 34.83286,
+   "date": "2020",
+   "sqm": 21.31,
+   "note": "Ramon Crater site 3, core area; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.57405,
+   "lon": 34.78879,
+   "date": "2020",
+   "sqm": 21.24,
+   "note": "Ramon Crater site 4, core area; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.55365,
+   "lon": 34.7055,
+   "date": "2020",
+   "sqm": 21.47,
+   "note": "Ramon Crater site 5, core area; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.49467,
+   "lon": 34.65222,
+   "date": "2020",
+   "sqm": 21.59,
+   "note": "Ramon Crater site 6, darkest point; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.59261,
+   "lon": 34.91555,
+   "date": "2020",
+   "sqm": 21.48,
+   "note": "Ramon Crater site 7, near Be'erot campground; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.61323,
+   "lon": 34.91979,
+   "date": "2020",
+   "sqm": 21.39,
+   "note": "Ramon Crater site 8, minimal lighting area; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.68516,
+   "lon": 34.94722,
+   "date": "2020",
+   "sqm": 21.45,
+   "note": "Ramon Crater site 9, minimal lighting area; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.65931,
+   "lon": 34.9548,
+   "date": "2020",
+   "sqm": 21.51,
+   "note": "Ramon Crater site 10, near campground; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.63268,
+   "lon": 34.99281,
+   "date": "2020",
+   "sqm": 21.54,
+   "note": "Ramon Crater site 11, minimal lighting area; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  },
+  {
+   "lat": 30.61759,
+   "lon": 34.84144,
+   "date": "2020",
+   "sqm": 21.18,
+   "note": "Ramon Crater site 12, near the road; Israel Nature and Parks Authority, Ramon Crater International Dark Sky Park 2020 annual report (SQM-L)"
+  }
+ ]
+}

@@ -1,0 +1,365 @@
+"""build_areas.py + areas.py + serve.py area=auto, without network: every source is a local fixture
+placed in the download cache under the name build_areas.py would give the real download.
+
+    python3 tests/test_areas.py [--la PATH_TO_REAL_la-times.geojson]
+"""
+from __future__ import annotations
+
+import argparse
+import gzip
+import json
+import re
+import sys
+import tempfile
+import threading
+import urllib.error
+import urllib.request
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE.parent))
+
+import shapefile  # noqa: E402  (pyshp)
+
+import areas  # noqa: E402
+import build_areas  # noqa: E402
+import serve  # noqa: E402
+import terrain  # noqa: E402
+from common import load_config  # noqa: E402
+
+
+def sq(s, w, n, e):
+    """A closed rectangle ring as (lon, lat) pairs, counter-clockwise."""
+    return [(w, s), (e, s), (e, n), (w, n), (w, s)]
+
+
+def cache_name(url: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", url.split("://", 1)[1])[-150:]
+
+
+def write_shp(path: Path, fields, rows):
+    """rows: (record values, list of rings)"""
+    base = path.parent / "fixture_shp"             # pyshp would read dots in the cache name as an extension
+    w = shapefile.Writer(str(base), shapeType=shapefile.POLYGON)
+    for name, typ, size in fields:
+        w.field(name, typ, size=size)
+    for rec, rings in rows:
+        # shapefile outer rings are clockwise
+        w.poly([list(reversed(r)) for r in rings[:1]] + [list(r) for r in rings[1:]])
+        w.record(*rec)
+    w.close()
+    import zipfile
+    with zipfile.ZipFile(path, "w") as z:
+        for ext in (".shp", ".shx", ".dbf"):
+            z.write(str(base) + ext, base.name + ext)
+
+
+def feature(props, rings):
+    return {"type": "Feature", "properties": props,
+            "geometry": {"type": "Polygon", "coordinates": [[list(p) for p in r] for r in rings]}}
+
+
+def write_osm(path: Path):
+    import osmium
+    from osmium.osm.mutable import Node, Relation, Way
+    nodes, ways, rels = [], [], []
+    nid = [0]
+
+    def way(wid, ring, tags=None):
+        ids = []
+        for lon, lat in ring[:-1] if ring[0] == ring[-1] else ring:
+            nid[0] += 1
+            nodes.append(Node(id=nid[0], location=(lon, lat), version=1))
+            ids.append(nid[0])
+        if ring[0] == ring[-1]:
+            ids.append(ids[0])
+        ways.append(Way(id=wid, nodes=ids, tags=tags or {}, version=1))
+        return ids
+
+    def rel(rid, tags, members):
+        rels.append(Relation(id=rid, members=members, tags={"type": "boundary", **tags}, version=1))
+
+    outer = sq(31.70, 35.10, 31.85, 35.25)
+    a_ids = way(101, outer[:3])                     # two halves of the outer ring, sharing end nodes
+    b_ids = []
+    for lon, lat in outer[3:-1]:
+        nid[0] += 1
+        nodes.append(Node(id=nid[0], location=(lon, lat), version=1))
+        b_ids.append(nid[0])
+    ways.append(Way(id=102, nodes=[a_ids[-1]] + b_ids + [a_ids[0]], version=1))
+    way(103, sq(31.80, 35.20, 31.81, 35.21))
+    rel(1, {"boundary": "administrative", "admin_level": "8", "name": "ירושלים", "name:en": "Jerusalem",
+            "source": "Israel Ministry of Interior"}, [("w", 101, "outer"), ("w", 102, "outer"), ("w", 103, "inner")])
+    way(104, sq(31.80, 35.21, 31.82, 35.23))
+    rel(2, {"boundary": "administrative", "admin_level": "10", "name:en": "Ramat Shlomo"}, [("w", 104, "outer")])
+    way(3, sq(31.77, 35.20, 31.78, 35.21), {"place": "neighbourhood", "name:en": "Rehavia"})
+    way(105, sq(31.55, 35.05, 31.69, 35.25))
+    rel(4, {"boundary": "administrative", "admin_level": "8", "name": "מועצה אזורית גוש עציון",
+            "name:en": "Gush Etzion Regional Council"}, [("w", 105, "outer")])
+    way(5, sq(31.650, 35.120, 31.660, 35.130), {"place": "village", "name:en": "Alon Shvut"})
+    way(106, sq(32.83, 35.07, 32.85, 35.09))
+    rel(6, {"boundary": "administrative", "admin_level": "8", "name:en": "Kiryat Motzkin"}, [("w", 106, "outer")])
+    way(107, sq(32.82, 35.08, 32.83, 35.10))
+    rel(7, {"boundary": "administrative", "admin_level": "8", "name:en": "Kiryat Bialik"}, [("w", 107, "outer")])
+    way(108, sq(32.0, 34.9, 32.01, 34.91), {"building": "yes"})        # not a boundary: ignored
+    if path.exists():
+        path.unlink()
+    w = osmium.SimpleWriter(str(path))
+    for o in nodes:
+        w.add_node(o)
+    for o in sorted(ways, key=lambda x: x.id):
+        w.add_way(o)
+    for o in sorted(rels, key=lambda x: x.id):
+        w.add_relation(o)
+    w.close()
+
+
+def make_fixtures(cache: Path, la_src: Path | None):
+    cache.mkdir(parents=True, exist_ok=True)
+    y = 2024
+    tiger = lambda layer, fips: build_areas.TIGER_URL.format(year=y, layer_uc=layer.upper(), fips=fips, layer=layer)
+    # one state: "New York" = a box around NYC and Long Island
+    write_shp(cache / cache_name(tiger("state", "us")), [("STATEFP", "C", 2), ("NAME", "C", 40)],
+              [(("36", "New York"), [sq(40.4, -74.4, 41.3, -72.0)])])
+    # places: New York city (covered completely by NTAs -> pruned), a village, a CDP
+    write_shp(cache / cache_name(tiger("place", "36")),
+              [("GEOID", "C", 7), ("NAME", "C", 40), ("NAMELSAD", "C", 60), ("CLASSFP", "C", 2)],
+              [(("3651000", "New York", "New York city", "C1"), [sq(40.70, -74.00, 40.74, -73.80)]),
+               (("3630367", "Great Neck Plaza", "Great Neck Plaza village", "C5"), [sq(40.78, -73.73, 40.79, -73.72)]),
+               (("3630356", "Great Neck Gardens", "Great Neck Gardens CDP", "U1"), [sq(40.80, -73.73, 40.81, -73.72)])])
+    # county subdivision: the Town of North Hempstead around both
+    write_shp(cache / cache_name(tiger("cousub", "36")),
+              [("GEOID", "C", 10), ("NAME", "C", 40), ("NAMELSAD", "C", 60), ("COUSUBFP", "C", 5)],
+              [(("3605951000", "North Hempstead", "North Hempstead town", "51000"),
+                [sq(40.76, -73.76, 40.83, -73.68)])])
+    # NYC NTAs: two halves of "New York city"
+    nta = {"type": "FeatureCollection", "features": [
+        feature({"nta2020": "QN0801", "ntaname": "Kew Gardens Hills", "boroname": "Queens"},
+                [sq(40.70, -73.90, 40.74, -73.80)]),
+        feature({"nta2020": "QN0802", "ntaname": "Forest Hills", "boroname": "Queens"},
+                [sq(40.70, -74.00, 40.74, -73.90)])]}
+    (cache / "nyc-nta2020.geojson").write_text(json.dumps(nta))
+    if la_src and la_src.exists():
+        (cache / "la-times-neighborhoods.geojson").write_bytes(la_src.read_bytes())
+    else:
+        la = {"type": "FeatureCollection", "features": [
+            feature({"name": "Encino"}, [sq(34.126, -118.53, 34.186, -118.468)])]}
+        (cache / "la-times-neighborhoods.geojson").write_text(json.dumps(la))
+    # Israel: an OpenStreetMap extract (.osm.pbf, like Geofabrik's): Jerusalem as a boundary relation of
+    # two ways with a hole, two neighbourhoods, a regional council (must be ignored), a village inside it,
+    # and two towns (matched by name)
+    write_osm(cache / build_areas.GEOFABRIK_URL.rsplit("/", 1)[1])
+    # CBS statistical areas 2022 (one page of the service's GeoJSON): Jerusalem's two sub-quarters
+    # (11 made of two statistical areas), and Safed without sub-quarters (its statistical areas are used)
+    sa = lambda code, town, stat, rova, sub, ring: feature(
+        {"SEMEL_YISHUV": code, "SHEM_YISHUV_ENGLISH": town, "SHEM_YISHUV": "", "STAT_2022": stat,
+         "ROVA": rova, "TAT_ROVA": sub, "COD_TIFKUD": 1}, [ring])
+    cbs = {"type": "FeatureCollection", "features": [
+        sa(3000, "JERUSALEM", 111, 1, 11, sq(31.70, 35.10, 31.775, 35.175)),
+        sa(3000, "JERUSALEM", 112, 1, 11, sq(31.70, 35.175, 31.775, 35.25)),
+        sa(3000, "JERUSALEM", 121, 1, 12, sq(31.775, 35.10, 31.85, 35.25)),
+        sa(8000, "ZEFAT", 1, None, None, sq(32.95, 35.48, 32.97, 35.50)),
+        sa(8000, "ZEFAT", 2, None, None, sq(32.97, 35.48, 32.99, 35.50)),
+        sa(1234, "SMALLTOWN", 1, None, None, sq(32.95, 35.50, 32.97, 35.52)),
+        # a regional council's land outside its localities (5500s) and an unnamed area (9900+): ignored
+        sa(5526, "MATTE YEHUDA", 1, None, None, sq(31.40, 34.80, 31.60, 35.05)),
+        sa(9920, "9920", 1, None, None, sq(31.40, 35.30, 31.45, 35.35)),
+        # Dimona: a residential area and a remote industrial one (function code 2), left out of its outline
+        dict(sa(2200, "DIMONA", 1, None, None, sq(31.06, 35.02, 31.08, 35.04)),
+             properties={"SEMEL_YISHUV": 2200, "SHEM_YISHUV_ENGLISH": "DIMONA", "STAT_2022": 1, "COD_TIFKUD": 1}),
+        feature({"SEMEL_YISHUV": 2200, "SHEM_YISHUV_ENGLISH": "DIMONA", "STAT_2022": 2, "COD_TIFKUD": 2},
+                [sq(31.00, 35.14, 31.01, 35.15)]),
+        # Beit El, where chaiTable's point is wrong (inside Safed)
+        sa(3574, "BET EL", 1, None, None, sq(31.93, 35.21, 31.95, 35.23))]}
+    (cache / "cbs-statistical-areas-2022-all-0.geojson").write_text(json.dumps(cbs))
+    # a geoBoundaries-style country file
+    gbf = {"type": "FeatureCollection", "features": [
+        feature({"shapeID": "FRA-1", "shapeName": "Paris 4e Arrondissement"}, [sq(48.85, 2.35, 48.86, 2.37)]),
+        feature({"shapeID": "FRA-2", "shapeName": "Nantes"}, [sq(47.18, -1.64, 47.29, -1.47)]),
+        # a sliver 1 m wide: collapses when simplified to 25 m, must be dropped (not crash the build)
+        feature({"shapeID": "FRA-3", "shapeName": "Sliver"},
+                [[(2.350, 48.860), (2.355, 48.860), (2.360, 48.860), (2.360, 48.86001),
+                  (2.355, 48.86001), (2.350, 48.86001), (2.350, 48.860)]])]}
+    (cache / "gb-FRA-ADM5.geojson").write_text(json.dumps(gbf))
+
+
+CHAI = [
+    {"info": {"title": "USA"}, "metroAreas": [
+        {"name": "Queens_area_NY", "bounds": {"n": 40.745, "s": 40.695, "e": -73.79, "w": -74.01}},
+        {"name": "Great_Neck_area_NY", "bounds": {"n": 40.82, "s": 40.77, "e": -73.70, "w": -73.75}},
+        {"name": "Encino_point_CA", "bounds": {"n": 34.15, "s": 34.15, "e": -118.50, "w": -118.50}}]},
+    {"info": {"title": "Eretz Yisrael (Neighborhoods)"}, "metroAreas": [
+        {"name": "Jerusalem", "bounds": {"n": 31.86, "s": 31.69, "e": 35.26, "w": 35.09}},
+        {"name": "Safed", "bounds": {"n": 32.99, "s": 32.95, "e": 35.52, "w": 35.48}}]},
+    {"info": {"title": "Eretz Yisrael (Cities)"}, "metroAreas": [
+        {"name": "Alon Shvut", "bounds": {"n": 31.6551, "s": 31.6550, "e": 35.1251, "w": 35.1250}},
+        {"name": "Kfar Etzion", "bounds": {"n": 31.6001, "s": 31.6000, "e": 35.1001, "w": 35.1000}},
+        {"name": "Kiriat-yam-mozkin-bialik", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}},
+        {"name": "Smalltown", "bounds": {"n": 30.0001, "s": 30.0, "e": 35.0001, "w": 35.0}},   # wrong point
+        {"name": "Zefat", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}},                        # no location
+        {"name": "Smalltown point", "bounds": {"n": 32.9601, "s": 32.96, "e": 35.5101, "w": 35.51}},
+        {"name": "Beit El", "bounds": {"n": 32.9601, "s": 32.96, "e": 35.4901, "w": 35.49}},     # inside Safed
+        {"name": "Dimonah", "bounds": {"n": 31.0701, "s": 31.07, "e": 35.0301, "w": 35.03}},
+        {"name": "Tzuba", "bounds": {"n": 31.5001, "s": 31.50, "e": 34.9001, "w": 34.90}},       # council land
+        {"name": "Nowhere", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}}]},
+    {"info": {"title": "France"}, "metroAreas": [
+        {"name": "Paris", "bounds": {"n": 48.87, "s": 48.84, "e": 2.38, "w": 2.34}},
+        {"name": "Nantes", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}}]},
+]
+
+OVERRIDES = {"Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik": {"names": ["Kiryat Yam", "Kiryat Motzkin", "Kiryat Bialik"]},
+             "France/Nantes": {"names": ["Nantes"]}}
+
+
+def check_build(tmp: Path, la: Path | None) -> Path:
+    cache = tmp / "cache"
+    make_fixtures(cache, la)
+    (tmp / "chai.json").write_text(json.dumps(CHAI))
+    (tmp / "ov.json").write_text(json.dumps(OVERRIDES))
+    (tmp / "config.json").write_text(json.dumps({"data_dir": str(tmp / "data")}))
+    assert build_areas.main(["--config", str(tmp / "config.json"), "--chai", str(tmp / "chai.json"),
+                             "--cache", str(cache), "--overrides", str(tmp / "ov.json")]) == 0
+    out = tmp / "data" / "areas.json"
+    data = json.loads(out.read_text())
+    ids = {a["id"] for a in data["areas"]}
+    report = (tmp / "data" / "areas_report.txt").read_text()
+    print(report)
+
+    # NYC: the NTAs replace "New York city" (fully covered); Great Neck: village + CDP + the town around them
+    assert {"nyc-nta:QN0801", "nyc-nta:QN0802"} <= ids, ids
+    assert "us-place:3651000" not in ids, "New York city should be pruned: its NTAs cover it"
+    assert {"us-place:3630367", "us-place:3630356", "us-cousub:3605951000"} <= ids, ids
+    assert "la:encino" in ids, ids
+    # Israel: CBS sub-quarters for the Neighborhoods list (Safed: statistical areas, a small town: none);
+    # OpenStreetMap neighbourhoods are not used; never the regional council
+    assert {"cbs-subq:3000-11", "cbs-subq:3000-12", "cbs-stat:8000-1", "cbs-stat:8000-2"} <= ids, ids
+    assert not any(i.startswith("cbs-stat:1234") for i in ids), ids
+    # CBS locality outlines: Smalltown by its point, by name (a wrong point), Zefat by name (no location)
+    assert "cbs-loc:1234" in ids and "cbs-loc:8000" in ids, ids
+    assert "Smalltown: the chaiTable point is in no official unit; matched by name -> Smalltown" in report
+    assert "Zefat: no location in chaiTable.json; matched by name -> Zefat" in report
+    assert "cbs-loc:3000" not in ids, "Jerusalem's outline is covered by its sub-quarters"
+    assert not {"cbs-loc:5526", "cbs-loc:9920"} & ids, "council land and unnamed areas are not localities"
+    assert any(u["place"] == "Eretz Yisrael (Cities)/Tzuba" for u in data["unresolved"]), data["unresolved"]
+    assert "cbs-loc:3574" in ids and "the chaiTable point is in Zefat, but the name matches Bet El" in report
+    dim = next(a for a in data["areas"] if a["id"] == "cbs-loc:2200")
+    assert dim["bbox"] == [31.06, 35.02, 31.08, 35.04], dim["bbox"]
+    assert {"osm:w5", "osm:r6", "osm:r7"} <= ids and not {"osm:r2", "osm:w3"} & ids, ids
+    assert "osm:r1" not in ids, "Jerusalem is covered by its sub-quarters, so the city itself is dropped"
+    assert "osm:r4" not in ids, "regional councils must not become areas"
+    unresolved = {u["place"]: u["reason"] for u in data["unresolved"]}
+    assert "Eretz Yisrael (Cities)/Nowhere" in unresolved, unresolved
+    assert "Eretz Yisrael (Cities)/Kfar Etzion" in unresolved, "only a regional council there: unresolved"
+    assert "Kiryat Yam -> NO MATCH" in unresolved["Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik"]
+    assert "gb-FRA5:FRA-2" in ids and "gb-FRA5:FRA-1" in ids, ids
+    assert "gb-FRA5:FRA-3" not in ids and "dropped Sliver" in report, "slivers are dropped and reported"
+    q11 = next(a for a in data["areas"] if a["id"] == "cbs-subq:3000-11")
+    assert len(q11["polygons"]) == 2 and q11["name"] == "Jerusalem, sub-quarter 11", q11
+    assert q11["places"] == ["Eretz Yisrael (Neighborhoods)/Jerusalem"]
+    return out
+
+
+def check_lookup(path: Path):
+    idx = areas.AreaIndex(path)
+    f = lambda la, lo: (idx.find(la, lo) or {}).get("id")
+    assert f(40.72, -73.85) == "nyc-nta:QN0801"
+    assert f(40.72, -73.95) == "nyc-nta:QN0802"
+    assert f(40.785, -73.725) == "us-place:3630367"           # village beats the town around it
+    assert f(40.77, -73.75) == "us-cousub:3605951000"         # outside any village / CDP: the town
+    assert f(34.15, -118.50) == "la:encino"
+    assert f(31.81, 35.22) == "cbs-subq:3000-12"              # CBS sub-quarter
+    assert f(31.75, 35.20) == "cbs-subq:3000-11"              # the second statistical area of sub-quarter 11
+    assert f(32.96, 35.49) == "cbs-stat:8000-1"               # Safed: statistical area
+    assert f(31.655, 35.125) == "osm:w5"                      # village
+    assert f(31.60, 35.10) is None                            # regional council only
+    assert f(0, 0) is None
+    print(f"lookup ok ({len(idx)} areas)")
+
+
+def check_server(tmp: Path, path: Path):
+    cfg_path = tmp / "srv.json"
+    cfg_path.write_text(json.dumps({"data_dir": str(tmp / "data"), "areas": {"file": str(path)},
+                                    "terrain": {"tiles_dir": str(tmp / "tiles"), "max_area_radius_km": 30}}))
+    cfg = load_config(str(cfg_path))
+    calls = []
+
+    def fake_horizon_set(tiles, lat, lon, **kw):
+        calls.append((lat, lon, kw.get("bbox"), kw.get("radius_km")))
+        return {"mode": "vantage" if kw.get("bbox") or kw.get("radius_km") else "point", "points": []}
+
+    terrain.horizon_set = fake_horizon_set
+    serve.Handler.store = serve.Store(cfg)
+    serve.Handler.horizons = serve.Horizons(cfg)
+    serve.Handler.areas = areas.AreaIndex(path)
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+    def get(u):
+        r = urllib.request.urlopen(urllib.request.Request(base + u, headers={"Accept-Encoding": "gzip"}))
+        body = r.read()
+        return json.loads(gzip.decompress(body) if r.headers.get("Content-Encoding") == "gzip" else body)
+
+    a = get("/v1/area?lat=40.72&lon=-73.85")["area"]
+    assert a["id"] == "nyc-nta:QN0801" and "polygons" not in a, a
+    try:
+        urllib.request.urlopen(base + "/v1/area?lat=0&lon=0")
+        raise AssertionError("expected 404")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+    # two different points in the same NTA -> the same computation (cached once), over the NTA's box
+    h1 = get("/v1/horizon?lat=40.72&lon=-73.85&area=auto")
+    h2 = get("/v1/horizon?lat=40.73&lon=-73.82&area=auto&radius_km=0.8")
+    assert h1["area"]["id"] == h2["area"]["id"] == "nyc-nta:QN0801"
+    assert len(calls) == 1, calls
+    assert calls[0][2] == [40.7, -73.9, 40.74, -73.8], calls
+    # sub-quarter 12 (9 km from centre to corner) is over the user-bbox cap (3 km) but within the area cap
+    h3 = get("/v1/horizon?lat=31.80&lon=35.15&area=auto")
+    assert h3["area"]["id"] == "cbs-subq:3000-12" and calls[-1][2] == [31.775, 35.1, 31.85, 35.25], calls[-1]
+    # no area: the request as given (here a 0.8 km radius around the point)
+    h4 = get("/v1/horizon?lat=31.60&lon=35.10&area=auto&radius_km=0.8")
+    assert h4["area"] is None and "no official area" in h4["areaNote"], h4
+    assert calls[-1][:2] == (31.6, 35.1) and calls[-1][3] == 0.8, calls[-1]
+    # a client's own bbox still has the 3 km cap
+    try:
+        urllib.request.urlopen(base + "/v1/horizon?bbox=31.7,35.1,31.85,35.25")
+        raise AssertionError("expected 400")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+    # over the area cap: falls back
+    serve.Handler.store.cfg["terrain"]["max_area_radius_km"] = 5
+    h5 = get("/v1/horizon?lat=31.80&lon=35.15&area=auto")
+    assert h5["area"] is None and "over terrain.max_area_radius_km" in h5["areaNote"], h5
+    st = get("/v1/status")
+    assert st["areas"]["count"] == len(serve.Handler.areas), st
+    srv.shutdown()
+    print("server ok:", len(calls), "horizon computations")
+
+
+def check_download_progress():
+    """Big downloads log a progress bar and still return every byte."""
+    import io
+
+    class R(io.BytesIO):
+        headers = {"Content-Length": str(25_000_000)}
+    body = bytes(range(256)) * (25_000_000 // 256) + b"x" * (25_000_000 % 256)
+    assert build_areas.read_with_progress(R(body), "test") == body
+    print("download progress ok")
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--la", help="real los-angeles.geojson (LA Times Mapping L.A.) to test with")
+    args = ap.parse_args(argv)
+    with tempfile.TemporaryDirectory() as d:
+        tmp = Path(d)
+        path = check_build(tmp, Path(args.la) if args.la else None)
+        check_lookup(path)
+        check_server(tmp, path)
+        check_download_progress()
+    print("all area tests passed")
+
+
+if __name__ == "__main__":
+    main()

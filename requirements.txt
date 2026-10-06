@@ -1,0 +1,6 @@
+numpy>=1.22
+eccodes>=2.37   # ships its own ecCodes library on Linux (no system package needed)
+netCDF4>=1.6   # reads NOAA's reanalysis climatology files (build_prior.py)
+pyshp>=2.3   # build_areas.py only: reads the US Census shapefiles
+osmium>=4.0  # build_areas.py only: reads the OpenStreetMap extract for Israel
+rasterio>=1.3  # dem_layers.py (builds merged bare-earth tiles) and light_pollution.py (reads the atlas tiles); bundles GDAL
