@@ -189,7 +189,7 @@ def make_fixtures(cache: Path, la_src: Path | None):
           "us-hou-0.geojson": {"OBJECTID": 7, "Name": "MEYERLAND AREA"},
           "us-dal-0.geojson": {"OBJECTID": 3, "DISTRICT": "13"},
           "us-phx-0.geojson": {"OBJECTID": 1, "ANID": 9, "NAME": "NORTH MOUNTAIN"},
-          "us-sd-0.geojson": {"OBJECTID": 2, "CPCODE": 40, "CPNAME": "TORREY PINES"},
+          "us-sd-0.geojson": {"objectid": 2, "cpcode": 40, "cpname": "TORREY PINES"},
           "us-aus.geojson": {"objectid": "1", "gis_id": "19.0", "planning_area_name": "HANCOCK"},
           "us-sea-0.geojson": {"OBJECTID": 5, "S_HOOD": "Seward Park", "L_HOOD": "Rainier Valley",
                                "S_HOOD_ALT_NAMES": ""},
