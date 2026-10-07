@@ -191,12 +191,13 @@ def fc(*feats):
 
 def write_statcan_csd(path: Path, rows):
     """A zipped shapefile like Statistics Canada's lcsd000b21a_e.zip: EPSG:3347 (Lambert, metres) with its
-    .prj, a UTF-8 .cpg, and accented names. rows: (CSDUID, CSDNAME, CSDTYPE, lon/lat ring)."""
+    .prj, an .xml, no .cpg, and accented names in Windows-1252 (the encoding is found from the bytes).
+    rows: (CSDUID, CSDNAME, CSDTYPE, lon/lat ring)."""
     import zipfile
     from rasterio.crs import CRS
     from rasterio.warp import transform
     base = path.parent / "fixture_csd"
-    w = shapefile.Writer(str(base), shapeType=shapefile.POLYGON, encoding="utf-8")
+    w = shapefile.Writer(str(base), shapeType=shapefile.POLYGON, encoding="cp1252")
     for name, size in (("CSDUID", 7), ("CSDNAME", 100), ("CSDTYPE", 3), ("PRUID", 2)):
         w.field(name, "C", size=size)
     for uid, name, typ, ring in rows:
@@ -208,7 +209,7 @@ def write_statcan_csd(path: Path, rows):
         for ext in (".shp", ".shx", ".dbf"):
             z.write(str(base) + ext, "lcsd000b21a_e" + ext)
         z.writestr("lcsd000b21a_e.prj", CRS.from_epsg(3347).to_wkt(morph_to_esri_dialect=True))
-        z.writestr("lcsd000b21a_e.cpg", "UTF-8")
+        z.writestr("lcsd000b21a_e.xml", "<metadata/>")
 
 
 def make_canada_fixtures(cache: Path):
@@ -331,7 +332,10 @@ def check_build(tmp: Path, la: Path | None) -> Path:
     assert by_id["statcan-csd:3519028"]["name"] == "Vaughan, ON"
     assert by_id["statcan-csd:3519028"]["kind"] == "city (CY)", by_id["statcan-csd:3519028"]
     assert "ca-mtl:6" in ids and "ca-mtl:52" not in ids and "statcan-csd:2466058" in ids, ids
-    assert by_id["statcan-csd:2466058"]["name"] == "Côte-Saint-Luc, QC"
+    assert by_id["statcan-csd:2466058"]["name"] == "Côte-Saint-Luc, QC", by_id["statcan-csd:2466058"]["name"]
+    assert by_id["statcan-csd:2466023"]["name"] == "Montréal, QC", by_id["statcan-csd:2466023"]["name"]
+    assert build_areas.dbf_encoding(b"\0" * 8 + (32).to_bytes(2, "little") + b"\0" * 22 + "Lévis".encode()) == "utf-8"
+    assert (tmp / "cache" / "lcsd000b21a_e-unzipped" / "x.shp").exists(), "unpacked once, read from disk"
     assert "statcan-csd:5915022" not in ids, "census subdivisions far from every place are left out"
     s, w, n, e = by_id["statcan-csd:3519028"]["bbox"]                    # reprojected back to lon/lat
     assert abs(s - 43.75) < 1e-4 and abs(w + 79.60) < 1e-3 and abs(n - 43.90) < 1e-4 and abs(e + 79.40) < 1e-3, (s, w, n, e)
