@@ -69,11 +69,12 @@ CBS_PAGE = 2000                                   # the service's maxRecordCount
 CBS_HOOD_CITIES = [3000, 4000, 2610, 6700, 8000]
 GEOFABRIK_URL = "https://download.geofabrik.de/asia/israel-and-palestine-latest.osm.pbf"   # daily, ~150 MB
 
-# Canada. Statistics Canada 2021 census subdivisions (the municipalities), cartographic boundaries
-# (shoreline-clipped), from its ArcGIS service; layer 9 = CSD. Open Government Licence - Canada.
-STATCAN_CSD_URL = ("https://geo.statcan.gc.ca/geo_wa/rest/services/2021/Cartographic_boundary_files/"
-                   "MapServer/9/query")
-STATCAN_PAGE = 1000
+# Canada. Statistics Canada 2021 census subdivisions (the municipalities): the cartographic boundary file
+# (shoreline-clipped), one shapefile for the whole country in Statistics Canada Lambert (EPSG:3347),
+# reprojected here. Open Government Licence - Canada. (Its ArcGIS query service is not reliable enough.)
+STATCAN_CSD_URL = ("https://www12.statcan.gc.ca/census-recensement/2021/geo/sip-pis/boundary-limites/"
+                   "files-fichiers/lcsd000b21a_e.zip")
+STATCAN_MARGIN_DEG = (0.1, 0.15)    # CSDs within ~10 km of a place's box are kept (lat, lon)
 CA_PROVINCES = {"10": "NL", "11": "PE", "12": "NS", "13": "NB", "24": "QC", "35": "ON", "46": "MB",
                 "47": "SK", "48": "AB", "59": "BC", "60": "YT", "61": "NT", "62": "NU"}
 CSD_TYPES = {"CY": "city", "C": "city", "T": "town", "TV": "town", "VL": "village", "V": "ville",
@@ -456,15 +457,30 @@ def read_shapefile(path: Path) -> list[dict]:
         shp = next(n for n in z.namelist() if n.lower().endswith(".shp"))
         base = shp[:-4]
         names = {n.lower(): n for n in z.namelist()}
+        cpg = names.get((base + ".cpg").lower())
+        enc = shapefile_encoding(z.read(cpg).decode("ascii", "replace") if cpg else "")
         rd = shapefile.Reader(shp=io.BytesIO(z.read(shp)), dbf=io.BytesIO(z.read(names[(base + ".dbf").lower()])),
-                              encoding="utf-8", encodingErrors="replace")
+                              encoding=enc, encodingErrors="replace")
     else:
-        rd = shapefile.Reader(str(path), encoding="utf-8", encodingErrors="replace")
+        cpg = path.with_suffix(".cpg")
+        enc = shapefile_encoding(cpg.read_text(errors="replace") if cpg.exists() else "")
+        rd = shapefile.Reader(str(path), encoding=enc, encodingErrors="replace")
     fields = [f[0] for f in rd.fields[1:]]
     out = []
     for sr in rd.iterShapeRecords():
         out.append({"properties": dict(zip(fields, sr.record)), "geometry": sr.shape.__geo_interface__})
     return out
+
+
+def shapefile_encoding(cpg: str) -> str:
+    """The text encoding a .cpg names (e.g. Statistics Canada's), UTF-8 when there is none."""
+    import codecs
+    c = cpg.strip().lower()
+    c = {"ansi 1252": "cp1252", "1252": "cp1252"}.get(c, c)
+    try:
+        return codecs.lookup(c).name if c else "utf-8"
+    except LookupError:
+        return "utf-8"
 
 
 def read_features(path: Path) -> list[dict]:
@@ -594,24 +610,27 @@ class Sources:
                                                   check=lambda b: json.loads(b)["features"]))
         return city_units(feats, spec)
 
-    # Canada: Statistics Canada 2021 census subdivisions near the places (one query per place box)
+    # Canada: Statistics Canada 2021 census subdivisions near the places (one download for the country)
     def statcan_csd(self, spec, boxes=()):
-        if spec.get("path"):
-            feats = read_features(self.fetch.path(spec["path"]))
-        else:
-            feats, seen = [], set()
-            for b in boxes:
-                box = statcan_envelope(b)
-                for f in self.arcgis(spec.get("url", STATCAN_CSD_URL), statcan_cache_name(b),
-                                     STATCAN_PAGE, offset_deg=0.0001,      # ~10 m; areas are simplified to 25
-                                     extra={"geometry": box, "geometryType": "esriGeometryEnvelope",
-                                            "inSR": 4326, "spatialRel": "esriSpatialRelIntersects"}):
-                    uid = (f.get("properties") or {}).get("CSDUID")
-                    if uid not in seen:
-                        seen.add(uid)
-                        feats.append(f)
-            log.info("Statistics Canada: %d census subdivisions", len(feats))
-        return statcan_units(feats)
+        path = self.fetch.path(spec.get("path") or spec.get("url", STATCAN_CSD_URL), name="lcsd000b21a_e.zip")
+        feats = read_shapefile(path)
+        prj = shapefile_prj(path)
+        dl, dw = STATCAN_MARGIN_DEG
+        near = [(s - dl, w - dw, n + dl, e + dw) for s, w, n, e in boxes]
+        kept = []
+        for f in feats:
+            geo = to_lonlat(f.get("geometry"), prj)
+            polys = geojson_polys(geo)
+            if not polys:
+                continue
+            xs = [x for p in polys for x, _ in p[0]]
+            ys = [y for p in polys for _, y in p[0]]
+            if near and not any(s <= max(ys) and n >= min(ys) and w <= max(xs) and e >= min(xs)
+                                for s, w, n, e in near):
+                continue
+            kept.append({"properties": f["properties"], "geometry": geo})
+        log.info("Statistics Canada: %d of %d census subdivisions near the places", len(kept), len(feats))
+        return statcan_units(kept)
 
     # US Census TIGER/Line
     def us_states(self, boxes) -> list[str]:
@@ -700,14 +719,33 @@ class Sources:
         return cbs_locality_units(self.cbs_features(spec))
 
 
-def statcan_envelope(box) -> str:
-    """A place's box plus ~10 km, as the service's "west,south,east,north" envelope."""
-    s, w, n, e = box
-    return f"{w - 0.15:.2f},{s - 0.1:.2f},{e + 0.15:.2f},{n + 0.1:.2f}"
+def shapefile_prj(path: Path) -> str:
+    """The .prj (coordinate system, WKT) beside a zipped or plain shapefile, or ""."""
+    if path.suffix == ".zip":
+        z = zipfile.ZipFile(path)
+        prj = next((n for n in z.namelist() if n.lower().endswith(".prj")), None)
+        return z.read(prj).decode("utf-8", "replace") if prj else ""
+    p = path.with_suffix(".prj")
+    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
 
 
-def statcan_cache_name(box) -> str:
-    return "statcan-csd2021-" + statcan_envelope(box).replace(",", "_")
+def to_lonlat(geom: dict | None, prj: str) -> dict | None:
+    """A GeoJSON geometry in a projected coordinate system (its .prj WKT) brought to lon/lat (WGS 84)."""
+    if not geom or not prj or prj.lstrip().upper().startswith("GEOGCS"):
+        return geom
+    from rasterio.crs import CRS                                # bundles PROJ; in requirements.txt
+    from rasterio.warp import transform
+    src = CRS.from_wkt(prj)
+
+    def ring(r):
+        xs, ys = transform(src, "EPSG:4326", [p[0] for p in r], [p[1] for p in r])
+        return [(x, y) for x, y in zip(xs, ys)]
+
+    if geom["type"] == "Polygon":
+        return {"type": "Polygon", "coordinates": [ring(r) for r in geom["coordinates"]]}
+    if geom["type"] == "MultiPolygon":
+        return {"type": "MultiPolygon", "coordinates": [[ring(r) for r in p] for p in geom["coordinates"]]}
+    return None
 
 
 def arcgis_check(body: bytes):

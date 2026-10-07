@@ -189,31 +189,48 @@ def fc(*feats):
     return {"type": "FeatureCollection", "features": list(feats)}
 
 
+def write_statcan_csd(path: Path, rows):
+    """A zipped shapefile like Statistics Canada's lcsd000b21a_e.zip: EPSG:3347 (Lambert, metres) with its
+    .prj, a UTF-8 .cpg, and accented names. rows: (CSDUID, CSDNAME, CSDTYPE, lon/lat ring)."""
+    import zipfile
+    from rasterio.crs import CRS
+    from rasterio.warp import transform
+    base = path.parent / "fixture_csd"
+    w = shapefile.Writer(str(base), shapeType=shapefile.POLYGON, encoding="utf-8")
+    for name, size in (("CSDUID", 7), ("CSDNAME", 100), ("CSDTYPE", 3), ("PRUID", 2)):
+        w.field(name, "C", size=size)
+    for uid, name, typ, ring in rows:
+        xs, ys = transform("EPSG:4326", "EPSG:3347", [p[0] for p in ring], [p[1] for p in ring])
+        w.poly([list(reversed(list(zip(xs, ys))))])              # shapefile outer rings are clockwise
+        w.record(uid, name, typ, uid[:2])
+    w.close()
+    with zipfile.ZipFile(path, "w") as z:
+        for ext in (".shp", ".shx", ".dbf"):
+            z.write(str(base) + ext, "lcsd000b21a_e" + ext)
+        z.writestr("lcsd000b21a_e.prj", CRS.from_epsg(3347).to_wkt(morph_to_esri_dialect=True))
+        z.writestr("lcsd000b21a_e.cpg", "UTF-8")
+
+
 def make_canada_fixtures(cache: Path):
-    """Canada: StatCan census subdivisions (one ArcGIS answer per place box) and every city layer, each in
-    its own field names. Toronto and Halifax are covered completely by their neighbourhoods / communities."""
-    csd = lambda uid, name, typ, ring: feature({"OBJECTID": int(uid), "CSDUID": uid, "CSDNAME": name,
-                                               "CSDTYPE": typ, "PRUID": uid[:2]}, [ring])
-    toronto = CA_BOXES["Toronto_area_ON"]
-    (cache / f"{build_areas.statcan_cache_name(toronto)}-0.geojson").write_text(json.dumps(fc(
-        csd("3520005", "Toronto", "C", sq(43.60, -79.60, 43.80, -79.20)),
-        csd("3519028", "Vaughan", "CY", sq(43.75, -79.60, 43.90, -79.40)))))
-    halifax = CA_BOXES["Halifax_area_NS"]
-    (cache / f"{build_areas.statcan_cache_name(halifax)}-0.geojson").write_text(json.dumps(fc(
-        csd("1209034", "Halifax", "RGM", sq(44.40, -64.00, 45.20, -62.50)))))
-    montreal = CA_BOXES["Montreal_area_QC"]
-    (cache / f"{build_areas.statcan_cache_name(montreal)}-0.geojson").write_text(json.dumps(fc(
-        csd("2466023", "Montréal", "V", sq(45.45, -73.70, 45.60, -73.50)),
-        csd("2466058", "Côte-Saint-Luc", "V", sq(45.46, -73.68, 45.47, -73.66)))))
+    """Canada: Statistics Canada's census subdivision file (projected, for the whole country) and every
+    city layer, each in its own field names. Toronto and Halifax are covered completely by their
+    neighbourhoods / communities."""
+    write_statcan_csd(cache / "lcsd000b21a_e.zip", [
+        ("3520005", "Toronto", "C", sq(43.60, -79.60, 43.80, -79.20)),
+        ("3519028", "Vaughan", "CY", sq(43.75, -79.60, 43.90, -79.40)),
+        ("1209034", "Halifax", "RGM", sq(44.40, -64.00, 45.20, -62.50)),
+        ("2466023", "Montréal", "V", sq(45.45, -73.70, 45.60, -73.50)),
+        ("2466058", "Côte-Saint-Luc", "V", sq(45.46, -73.68, 45.47, -73.66)),
+        ("5915022", "Vancouver", "CY", sq(49.20, -123.22, 49.31, -123.02))])     # far from every place
     (cache / "ca-tor.geojson").write_text(json.dumps(fc(
-        feature({"AREA_SHORT_CODE": 34, "AREA_NAME": "Bathurst Manor"}, [sq(43.60, -79.60, 43.80, -79.40)]),
-        feature({"AREA_SHORT_CODE": 173, "AREA_NAME": "North Toronto"}, [sq(43.60, -79.40, 43.80, -79.20)]))))
+        feature({"AREA_SHORT_CODE": 34, "AREA_NAME": "Bathurst Manor"}, [sq(43.59, -79.61, 43.81, -79.40)]),
+        feature({"AREA_SHORT_CODE": 173, "AREA_NAME": "North Toronto"}, [sq(43.59, -79.40, 43.81, -79.19)]))))
     (cache / "ca-mtl.geojson").write_text(json.dumps(fc(
         feature({"CODEID": 6, "NOM": "Outremont", "TYPE": "Arrondissement"}, [sq(45.51, -73.62, 45.53, -73.59)]),
         feature({"CODEID": 52, "NOM": "Côte-Saint-Luc", "TYPE": "Ville liée"}, [sq(45.46, -73.68, 45.47, -73.66)]))))
     (cache / "ca-hfx-0.geojson").write_text(json.dumps(fc(
-        feature({"OBJECTID": 1, "GSA_KEY": 101, "GSA_NAME": "HALIFAX"}, [sq(44.40, -64.00, 45.20, -63.58)]),
-        feature({"OBJECTID": 2, "GSA_KEY": 102, "GSA_NAME": "DARTMOUTH"}, [sq(44.40, -63.58, 45.20, -62.50)]))))
+        feature({"OBJECTID": 1, "GSA_KEY": 101, "GSA_NAME": "HALIFAX"}, [sq(44.39, -64.01, 45.21, -63.58)]),
+        feature({"OBJECTID": 2, "GSA_KEY": 102, "GSA_NAME": "DARTMOUTH"}, [sq(44.39, -63.58, 45.21, -62.49)]))))
     far = lambda k: [sq(60.0 + k, -100.0, 60.01 + k, -99.99)]      # nowhere near the places
     (cache / "ca-ott-0.geojson").write_text(json.dumps(fc(feature({"ONS_ID": 3001, "ONS_Name": "Glebe"}, far(0)))))
     (cache / "ca-ham-0.geojson").write_text(json.dumps(fc(feature(
@@ -315,6 +332,9 @@ def check_build(tmp: Path, la: Path | None) -> Path:
     assert by_id["statcan-csd:3519028"]["kind"] == "city (CY)", by_id["statcan-csd:3519028"]
     assert "ca-mtl:6" in ids and "ca-mtl:52" not in ids and "statcan-csd:2466058" in ids, ids
     assert by_id["statcan-csd:2466058"]["name"] == "Côte-Saint-Luc, QC"
+    assert "statcan-csd:5915022" not in ids, "census subdivisions far from every place are left out"
+    s, w, n, e = by_id["statcan-csd:3519028"]["bbox"]                    # reprojected back to lon/lat
+    assert abs(s - 43.75) < 1e-4 and abs(w + 79.60) < 1e-3 and abs(n - 43.90) < 1e-4 and abs(e + 79.40) < 1e-3, (s, w, n, e)
     assert "statcan-csd:2466023" in ids, "Montréal city: its arrondissements cover only part of it here"
     # the other cities' layers loaded with their own field names (no source failed)
     assert "failed" not in report and "UNRESOLVED Canada" not in report, report
