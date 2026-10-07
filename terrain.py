@@ -45,6 +45,11 @@ import numpy as np
 
 log = logging.getLogger("terrain")
 
+# Bump when a change here alters the horizons computed from the same terrain data (selection, sampling,
+# floors, ...): it is part of serve.py's cache key, so cached horizons are recomputed. Version 1 leaves the
+# key as it always was, so existing caches stay valid.
+ALGO_VERSION = 1
+
 R_EARTH = 6371008.8
 K_SELECT = 0.13
 REFF = R_EARTH / (1 - K_SELECT)
