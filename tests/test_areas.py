@@ -190,7 +190,10 @@ def make_fixtures(cache: Path, la_src: Path | None):
           "us-dal-0.geojson": {"OBJECTID": 3, "DISTRICT": "13"},
           "us-phx-0.geojson": {"OBJECTID": 1, "ANID": 9, "NAME": "NORTH MOUNTAIN"},
           "us-sd-0.geojson": {"OBJECTID": 2, "CPCODE": 40, "CPNAME": "TORREY PINES"},
-          "us-aus.geojson": {"objectid": "1", "gis_id": "19.0", "planning_area_name": "HANCOCK"}}
+          "us-aus.geojson": {"objectid": "1", "gis_id": "19.0", "planning_area_name": "HANCOCK"},
+          "us-sea-0.geojson": {"OBJECTID": 5, "S_HOOD": "Seward Park", "L_HOOD": "Rainier Valley",
+                               "S_HOOD_ALT_NAMES": ""},
+          "us-bal-0.geojson": {"OBJECTID": 60, "Name": "Cheswolde"}}
     for k, (fname, props) in enumerate(us.items()):
         (cache / fname).write_text(json.dumps(fc(feature(props, far(k)))))
 
@@ -283,7 +286,8 @@ CHAI = [
         {"name": k, "bounds": {"s": b[0], "w": b[1], "n": b[2], "e": b[3]}} for k, b in CA_BOXES.items()]},
 ]
 
-OVERRIDES = {"Eretz Yisrael (Cities)/Smalltown Old": {"names": [["Nonexistent Spelling", "Smalltown"]]},
+OVERRIDES = {"_extra": {"USA": [{"name": "Gardens_area_NY", "point": [40.805, -73.725]}]},   # not in chaiTable
+             "Eretz Yisrael (Cities)/Smalltown Old": {"names": [["Nonexistent Spelling", "Smalltown"]]},
              "Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik": {"names": ["Kiryat Yam", "Kiryat Motzkin", "Kiryat Bialik"]},
              "France/Nantes": {"names": ["Nantes"]}}
 
@@ -327,6 +331,8 @@ def check_build(tmp: Path, la: Path | None) -> Path:
     unresolved = {u["place"]: u["reason"] for u in data["unresolved"]}
     assert "Eretz Yisrael (Cities)/Nowhere" in unresolved, unresolved
     assert "Eretz Yisrael (Cities)/Kfar Etzion" in unresolved, "only a regional council there: unresolved"
+    assert "USA/Gardens_area_NY" in next(a for a in data["areas"] if a["id"] == "us-place:3630356")["places"], \
+        "an _extra place gets its official unit like a chaiTable place"
     assert "Nonexistent Spelling / Smalltown -> Smalltown (1.0)" in report, "best of the alternative spellings"
     assert "Eretz Yisrael (Cities)/Smalltown Old" in next(a for a in data["areas"] if a["id"] == "cbs-loc:1234")["places"]
     assert "Kiryat Yam -> NO MATCH" in unresolved["Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik"]
@@ -371,7 +377,8 @@ def check_build(tmp: Path, la: Path | None) -> Path:
         us_names.update({u.id: u.name for u in build_areas.city_units(f["features"], spec)})
     assert us_names == {"us-chi:50": "West Ridge, Chicago", "us-hou:7": "Meyerland Area, Houston",
                         "us-dal:13": "Council District 13, Dallas", "us-phx:9": "North Mountain, Phoenix",
-                        "us-sd:40": "Torrey Pines, San Diego", "us-aus:1": "Hancock, Austin"}, us_names
+                        "us-sd:40": "Torrey Pines, San Diego", "us-aus:1": "Hancock, Austin",
+                        "us-sea:5": "Seward Park, Seattle", "us-bal:60": "Cheswolde, Baltimore"}, us_names
     assert "failed" not in (tmp / "data" / "areas_report.txt").read_text()
 
     # --only rebuilds some countries and keeps the rest of the file; --replace writes only those countries
