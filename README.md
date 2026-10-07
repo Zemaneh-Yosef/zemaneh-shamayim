@@ -276,6 +276,8 @@ The areas come from `areas.json`, built by `build_areas.py` from the Chai Tables
 | rest of the US | incorporated places and census-designated places, then county subdivisions (towns) | US Census TIGER/Line |
 | Israel | municipal jurisdictions; locality outlines for villages inside regional councils. Regional councils are never an area | OpenStreetMap, whose `admin_level=8` boundaries are the Ministry of Interior's: Geofabrik's daily Israel and Palestine extract (one download) |
 | Israel, the places under "Eretz Yisrael (Neighborhoods)" (Beit Shemesh, Haifa, Jerusalem, Safed, Tiberias) | sub-quarters (תת-רובע; cities of 40,000+), or statistical areas for a listed city without them | Central Bureau of Statistics, statistical areas 2022 (downloaded from its ArcGIS service) |
+| Toronto, Montreal, Ottawa, Hamilton, Halifax, Calgary, Edmonton, Winnipeg | the city's own neighbourhoods: Toronto's 158 neighbourhoods, Montreal's arrondissements, Ottawa Neighbourhood Study Gen 3, Hamilton's planning units, Halifax's communities, Calgary's community districts, Edmonton's and Winnipeg's neighbourhoods | each city's open-data portal (see `PLANS["Canada"]` in `build_areas.py`) |
+| rest of Canada | 2021 census subdivisions (municipalities); amalgamated cities such as Halifax (~190 km) or Ottawa (~55 km) are far over the area cap, hence the layers above | Statistics Canada cartographic boundary files (its ArcGIS service, one query per place) |
 | other countries | the municipal level (communes, comuni, local authority districts, ...; see `PLANS` in `build_areas.py`) | geoBoundaries (national statistics / mapping agencies) |
 
 ```sh
@@ -456,7 +458,9 @@ contributors (Nominatim), GeoNames.
 
 * Official areas: NYC Department of City Planning (Neighborhood Tabulation Areas), Los Angeles Times
   "Mapping L.A.", US Census Bureau TIGER/Line, Israel Central Bureau of Statistics (statistical areas 2022), Israel Ministry of Interior boundaries via
-  OpenStreetMap contributors (ODbL, extract by Geofabrik), and geoBoundaries (CC BY 4.0 / per-country licences; see each
+  OpenStreetMap contributors (ODbL, extract by Geofabrik), Statistics Canada (2021 Census boundary files,
+  Open Government Licence - Canada), the cities of Toronto, Ottawa, Hamilton, Calgary, Edmonton and Winnipeg,
+  Halifax Regional Municipality and Ville de Montréal (CC BY 4.0) under their open-data licences, and geoBoundaries (CC BY 4.0 / per-country licences; see each
   area's `source`).
 
 ## Caveats
