@@ -1243,6 +1243,27 @@ def to_area(u: Unit, tol_m: float) -> dict | None:
             "places": [], "bbox": bbox, "radiusKm": round(half_diagonal_km(bbox), 2), "polygons": polys}
 
 
+def merge_previous(out: dict, old: dict, rebuilt: set[str]) -> int:
+    """A build with --only covers some countries: add the previous file's areas and unresolved places of every
+    other country (an area shared across countries keeps the other countries' places). Returns how many
+    areas came from the old file."""
+    country = lambda place: place.split("/", 1)[0]
+    by_id = {a["id"]: a for a in out["areas"]}
+    kept = 0
+    for a in old.get("areas", []):
+        places = [p for p in a.get("places", []) if country(p) not in rebuilt]
+        if not places:
+            continue
+        if a["id"] in by_id:
+            by_id[a["id"]]["places"] += [p for p in places if p not in by_id[a["id"]]["places"]]
+        else:
+            by_id[a["id"]] = dict(a, places=places)
+            kept += 1
+    out["areas"] = sorted(by_id.values(), key=lambda a: a["id"])
+    out["unresolved"] = [u for u in old.get("unresolved", []) if country(u["place"]) not in rebuilt] + out["unresolved"]
+    return kept
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config")
@@ -1251,13 +1272,19 @@ def main(argv=None) -> int:
     ap.add_argument("--cache", help="download cache, default <data_dir>/area-sources")
     ap.add_argument("--sources", help="JSON {country title: [source, ...]} replacing PLANS entries")
     ap.add_argument("--overrides", default=str(HERE / "areas_overrides.json"))
-    ap.add_argument("--only", action="append", help="chaiTable country title (repeatable)")
+    ap.add_argument("--only", action="append", help="chaiTable country title (repeatable); the other countries' "
+                    "areas already in the output file are kept")
+    ap.add_argument("--replace", action="store_true", help="with --only: write only those countries, dropping "
+                    "every other area in the output file")
     ap.add_argument("--simplify-m", type=float, default=25.0)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
     out, report = build(args, cfg)
     dest = Path(args.out or Path(cfg["data_dir"]) / "areas.json")
+    if args.only and not args.replace and dest.exists():
+        kept = merge_previous(out, json.loads(dest.read_text(encoding="utf-8")), set(args.only))
+        log.info("kept %d areas of the other countries from %s (--replace to drop them)", kept, dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(".tmp")
     tmp.write_text(json.dumps(out, separators=(",", ":"), ensure_ascii=False))
