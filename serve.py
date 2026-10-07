@@ -306,8 +306,11 @@ class Horizons:
 
     def compute(self, q: dict, max_bbox_km: float | None = None) -> bytes:
         p = self.params(q, max_bbox_km)
-        # the terrain source list is part of the key, so changing it recomputes (no key change without it)
-        key_src = {**p, "dem": self.dem} if self.dem else p
+        # the terrain source list and the horizon algorithm's version are part of the key, so changing either
+        # recomputes (neither changes the key while unset / at version 1, so old caches stay valid)
+        key_src = {**p, "dem": self.dem} if self.dem else dict(p)
+        if terrain.ALGO_VERSION != 1:
+            key_src["algo"] = terrain.ALGO_VERSION
         key = hashlib.sha1(json.dumps(key_src, sort_keys=True).encode()).hexdigest()[:20]
         f = self.dir / f"{key}.json.gz"
         if f.exists():
