@@ -20,6 +20,9 @@ Official units, finest first (serve.py gives a point the finest area containing 
            extract, read with pyosmium). For the places listed under "Eretz Yisrael (Neighborhoods)":
            the Central Bureau of Statistics' sub-quarters (statistical areas 2022; a city without
            sub-quarters gets its statistical areas). Regional councils are never used as an area.
+  Canada   the cities' own neighbourhood layers (Toronto neighbourhoods, Montreal arrondissements, Ottawa
+           ONS Gen 3, Hamilton planning units, Halifax communities, Calgary community districts, Edmonton
+           and Winnipeg neighbourhoods), then Statistics Canada 2021 census subdivisions (municipalities)
   others   the municipal level of geoBoundaries (national statistics / mapping agencies; see PLANS)
 A source can be replaced with a local file (e.g. the CBS localities layer) via --sources.
 
@@ -66,6 +69,35 @@ CBS_PAGE = 2000                                   # the service's maxRecordCount
 CBS_HOOD_CITIES = [3000, 4000, 2610, 6700, 8000]
 GEOFABRIK_URL = "https://download.geofabrik.de/asia/israel-and-palestine-latest.osm.pbf"   # daily, ~150 MB
 
+# Canada. Statistics Canada 2021 census subdivisions (the municipalities), cartographic boundaries
+# (shoreline-clipped), from its ArcGIS service; layer 9 = CSD. Open Government Licence - Canada.
+STATCAN_CSD_URL = ("https://geo.statcan.gc.ca/geo_wa/rest/services/2021/Cartographic_boundary_files/"
+                   "MapServer/9/query")
+STATCAN_PAGE = 1000
+CA_PROVINCES = {"10": "NL", "11": "PE", "12": "NS", "13": "NB", "24": "QC", "35": "ON", "46": "MB",
+                "47": "SK", "48": "AB", "59": "BC", "60": "YT", "61": "NT", "62": "NU"}
+CSD_TYPES = {"CY": "city", "C": "city", "T": "town", "TV": "town", "VL": "village", "V": "ville",
+             "VC": "village cri", "VK": "village naskapi", "MU": "municipality", "M": "municipality",
+             "DM": "district municipality", "RGM": "regional municipality", "RM": "rural municipality",
+             "TP": "township", "CT": "canton", "CU": "cantons unis", "PE": "paroisse", "SV": "summer village",
+             "ID": "improvement district", "SC": "subdivision of county municipality",
+             "SNO": "subdivision of unorganized", "NO": "unorganized", "IRI": "Indian reserve",
+             "S-É": "Indian settlement", "TL": "teslin land", "NH": "northern hamlet", "HAM": "hamlet",
+             "LOT": "township and royalty", "CC": "chartered community", "COM": "community",
+             "CN": "crown colony", "IGD": "Indian government district", "NL": "Nisga'a land",
+             "NVL": "northern village", "RV": "resort village", "SÉ": "settlement", "SET": "settlement",
+             "TC": "terres réservées aux Cris", "TI": "terre inuite", "TK": "terres réservées aux Naskapis"}
+# The big cities' own neighbourhood layers: an amalgamated Canadian city is one census subdivision of up
+# to ~200 km (Halifax), far over terrain.max_area_radius_km. All in lon/lat GeoJSON (ArcGIS: outSR=4326).
+SOCRATA = "https://{host}/resource/{id}.geojson?$limit=50000"
+ARCGIS_HRM = "https://services2.arcgis.com/11XBiaBYA9Ep0yNJ/arcgis/rest/services/GSA/FeatureServer/0/query"
+ARCGIS_OTTAWA = "https://services.arcgis.com/G6F8XLCl5KtAlZ2G/arcgis/rest/services/GEN3_OTT_1_3_3/FeatureServer/0/query"
+ARCGIS_HAMILTON = "https://services.arcgis.com/rYz782eMbySr2srL/ArcGIS/rest/services/Neighborhoods/FeatureServer/8/query"
+TORONTO_URL = ("https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/fc443770-ef0a-4025-9c2c-2cb558bfab00/"
+               "resource/0719053b-28b7-48ea-b863-068823a93aaa/download/neighbourhoods-4326.geojson")
+MONTREAL_URL = ("https://donnees.montreal.ca/dataset/9797a946-9da8-41ec-8815-f6b276dec7e9/resource/"
+                "e18bfd07-edc8-4ce8-8a5a-3b617662a794/download/limites-administratives-agglomeration.geojson")
+
 MIN_SHARE = 0.25            # a unit belongs to a place's box if this share of it lies inside the box,
 MIN_BOX_SHARE = 0.03        # or if its part inside covers this share of the box (big units at the edge)
 POINT_KM = 0.3              # boxes smaller than this (centre to corner) are points
@@ -84,7 +116,37 @@ PLANS: dict[str, list[dict]] = {
     "Belgium": [gb("BEL", 4, "municipality")],
     "Brazil": [gb("BRA", 2, "municipality")],
     "Bulgaria": [gb("BGR", 2, "municipality")],
-    "Canada": [gb("CAN", 3, "census subdivision")],
+    "Canada": [                                          # city neighbourhoods, then StatCan municipalities
+        {"type": "city", "key": "ca-tor", "url": TORONTO_URL, "id_fields": ["AREA_SHORT_CODE", "AREA_ID"],
+         "name_fields": ["AREA_NAME"], "name_suffix": ", Toronto", "kind": "neighbourhood",
+         "source": "City of Toronto, Neighbourhoods (158) (Open Government Licence - Toronto)"},
+        {"type": "city", "key": "ca-mtl", "url": MONTREAL_URL, "id_fields": ["CODEID", "CODE_3C", "NUM"],
+         "name_fields": ["NOM", "NOM_OFFICIEL"], "name_suffix": ", Montréal", "kind": "arrondissement",
+         "only": {"TYPE": ["Arrondissement"]},                    # the villes liées are census subdivisions
+         "source": "Ville de Montréal, limites administratives de l'agglomération (CC BY 4.0)"},
+        {"type": "city", "key": "ca-ott", "arcgis": ARCGIS_OTTAWA, "id_fields": ["ONS_ID", "OBJECTID"],
+         "name_fields": ["ONS_Name", "Name_EN", "Name", "NAME_EN"], "name_suffix": ", Ottawa",
+         "kind": "neighbourhood (ONS Gen 3)",
+         "source": "City of Ottawa, Ottawa Neighbourhood Study Gen 3 (Open Data Licence v2.0)"},
+        {"type": "city", "key": "ca-ham", "arcgis": ARCGIS_HAMILTON, "id_fields": ["PLANNING_UNIT", "OBJECTID"],
+         "name_fields": ["NEIGHBOURHOOD"], "suffix_field": "COMMUNITY", "title_case": True,
+         "kind": "neighbourhood (planning unit)", "source": "City of Hamilton, Neighbourhoods (planning units)"},
+        {"type": "city", "key": "ca-hfx", "arcgis": ARCGIS_HRM, "id_fields": ["GSA_KEY", "OBJECTID"],
+         "name_fields": ["GSA_NAME"], "name_suffix": ", Halifax Regional Municipality", "title_case": True,
+         "kind": "community", "source": "Halifax Regional Municipality, Community Boundaries (Open Data Licence)"},
+        {"type": "city", "key": "ca-cgy", "url": SOCRATA.format(host="data.calgary.ca", id="surr-xmvs"),
+         "id_fields": ["comm_code"], "name_fields": ["name"], "name_suffix": ", Calgary", "title_case": True,
+         "kind": "community district",
+         "source": "City of Calgary, Community District Boundaries (Open Government Licence - City of Calgary)"},
+        {"type": "city", "key": "ca-edm", "url": SOCRATA.format(host="data.edmonton.ca", id="65fr-66s6"),
+         "id_fields": ["neighbourhood_number"], "name_fields": ["descriptive_name", "name"],
+         "name_suffix": ", Edmonton", "kind": "neighbourhood",
+         "source": "City of Edmonton, Neighbourhoods (Open Government Licence - City of Edmonton)"},
+        {"type": "city", "key": "ca-wpg", "url": SOCRATA.format(host="data.winnipeg.ca", id="8k6x-xxsy"),
+         "id_fields": ["id"], "name_fields": ["name"], "name_suffix": ", Winnipeg", "kind": "neighbourhood",
+         "source": "City of Winnipeg, Neighbourhoods (OpenData Licence - City of Winnipeg)"},
+        {"type": "statcan-csd"},
+    ],
     "Chile": [gb("CHL", 3, "commune")],
     "China": [],                                         # Hong Kong: no district layer available
     "Colombia": [gb("COL", 2, "municipality")],
@@ -450,7 +512,7 @@ class Sources:
             return [u for f in fips for u in self.tiger(spec["layer"], f)]
         if key not in self.cache:
             fn = getattr(self, t.replace("-", "_"))
-            self.cache[key] = fn(spec, boxes) if t == "israel-osm" else fn(spec)
+            self.cache[key] = fn(spec, boxes) if t in ("israel-osm", "statcan-csd") else fn(spec)
             log.info("%s: %d units", spec.get("label") or t, len(self.cache[key]))
         return self.cache[key]
 
@@ -497,6 +559,59 @@ class Sources:
                                    id_keys=(spec.get("id_field", "id"),), name_keys=(spec.get("name_field", "name"),),
                                    alt_keys=tuple(spec.get("alt_fields", ())), kind=spec.get("kind", "area"),
                                    level=spec.get("level", LEVEL_LOCALITY), source=spec.get("source", str(path.name)))
+
+    def arcgis(self, url: str, name: str, page: int, extra: dict | None = None, offset_deg: float = 0.00002,
+               label: str = "") -> list[dict]:
+        """Every feature of an ArcGIS feature / map layer query endpoint, as lon/lat GeoJSON, a page at a time
+        (each page cached as <name>-<offset>.geojson)."""
+        feats, offset = [], 0
+        while True:
+            q = {"where": "1=1", "outFields": "*", "outSR": 4326, "f": "geojson", "geometryPrecision": 6,
+                 "maxAllowableOffset": offset_deg, "orderByFields": "OBJECTID", "resultOffset": offset,
+                 "resultRecordCount": page}
+            q.update(extra or {})
+            path = self.fetch.path(f"{url}?{urllib.parse.urlencode(q)}", name=f"{name}-{offset}.geojson",
+                                   check=arcgis_check)
+            got = read_geojson(path)
+            feats += got
+            if label:
+                log.info("%s: %d so far", label, len(feats))
+            if len(got) < page:
+                return feats
+            offset += page
+
+    # a city's own neighbourhood layer: {"type": "city", "key", "url" (GeoJSON) or "arcgis" (a layer's
+    # /query), "id_fields", "name_fields", "kind", "source", optional "name_suffix" / "suffix_field",
+    # "title_case", "only": {field: [values]}, "level" (default neighbourhood), "path" (a local file)}
+    def city(self, spec):
+        if spec.get("path"):
+            feats = read_features(self.fetch.path(spec["path"]))
+        elif spec.get("arcgis"):
+            feats = self.arcgis(spec["arcgis"], spec["key"], spec.get("page", 1000),
+                                extra={"orderByFields": spec.get("order", "")})    # these layers fit one page
+        else:
+            feats = read_features(self.fetch.path(spec["url"], name=f"{spec['key']}.geojson",
+                                                  check=lambda b: json.loads(b)["features"]))
+        return city_units(feats, spec)
+
+    # Canada: Statistics Canada 2021 census subdivisions near the places (one query per place box)
+    def statcan_csd(self, spec, boxes=()):
+        if spec.get("path"):
+            feats = read_features(self.fetch.path(spec["path"]))
+        else:
+            feats, seen = [], set()
+            for b in boxes:
+                box = statcan_envelope(b)
+                for f in self.arcgis(spec.get("url", STATCAN_CSD_URL), statcan_cache_name(b),
+                                     STATCAN_PAGE, offset_deg=0.0001,      # ~10 m; areas are simplified to 25
+                                     extra={"geometry": box, "geometryType": "esriGeometryEnvelope",
+                                            "inSR": 4326, "spatialRel": "esriSpatialRelIntersects"}):
+                    uid = (f.get("properties") or {}).get("CSDUID")
+                    if uid not in seen:
+                        seen.add(uid)
+                        feats.append(f)
+            log.info("Statistics Canada: %d census subdivisions", len(feats))
+        return statcan_units(feats)
 
     # US Census TIGER/Line
     def us_states(self, boxes) -> list[str]:
@@ -583,6 +698,93 @@ class Sources:
 
     def cbs_localities(self, spec):
         return cbs_locality_units(self.cbs_features(spec))
+
+
+def statcan_envelope(box) -> str:
+    """A place's box plus ~10 km, as the service's "west,south,east,north" envelope."""
+    s, w, n, e = box
+    return f"{w - 0.15:.2f},{s - 0.1:.2f},{e + 0.15:.2f},{n + 0.1:.2f}"
+
+
+def statcan_cache_name(box) -> str:
+    return "statcan-csd2021-" + statcan_envelope(box).replace(",", "_")
+
+
+def arcgis_check(body: bytes):
+    """An ArcGIS query answers errors with HTTP 200 and {"error": ...}: reject it (retried, never cached)."""
+    d = json.loads(body)
+    if "error" in d or "features" not in d:
+        raise ValueError(f"ArcGIS error: {str(d.get('error', d))[:300]}")
+
+
+def first_field(feats: list[dict], fields, what: str, src: str) -> str:
+    """The first of the candidate fields the features carry (case-insensitive); a clear error otherwise,
+    so a renamed column fails the source loudly instead of naming every area by its id."""
+    have = {k.lower(): k for f in feats[:50] for k in (f.get("properties") or {})}
+    for c in fields:
+        if c.lower() in have:
+            return have[c.lower()]
+    raise ValueError(f"{src}: none of the {what} fields {list(fields)} found; the data has {sorted(have.values())}")
+
+
+def city_units(feats: list[dict], spec: dict) -> list[Unit]:
+    src = spec.get("source", spec["key"])
+    if not feats:
+        raise ValueError(f"{src}: no features")
+    name_f = first_field(feats, spec["name_fields"], "name", src)
+    id_f = first_field(feats, spec["id_fields"], "id", src)
+    # "only": keep features whose field has one of the values (a field the data lacks filters nothing)
+    only = {k: {v.lower() for v in vals} for k, vals in (spec.get("only") or {}).items()}
+    out = []
+    for i, f in enumerate(feats):
+        p = f.get("properties") or {}
+        if any(prop(p, k) and prop(p, k).strip().lower() not in vals for k, vals in only.items()):
+            continue
+        polys = geojson_polys(f.get("geometry"))
+        name = fix_text(prop(p, name_f)).strip()
+        if not polys or not name:
+            continue
+        if spec.get("title_case"):
+            name = title_case(name)
+        suffix = spec.get("name_suffix", "")
+        if spec.get("suffix_field") and prop(p, spec["suffix_field"]):
+            sfx = fix_text(prop(p, spec["suffix_field"])).strip()
+            suffix = ", " + (title_case(sfx) if spec.get("title_case") else sfx)
+        nid = re.sub(r"\.0$", "", prop(p, id_f, default=str(i)))
+        out.append(Unit(f"{spec['key']}:{nid}", name + suffix, spec.get("kind", "neighbourhood"),
+                        spec.get("level", LEVEL_NEIGHBOURHOOD), src, polys, [name]))
+    # one id may come in several pieces (multi-part features split by the service): merge them
+    merged: dict[str, Unit] = {}
+    for u in out:
+        if u.id in merged:
+            merged[u.id].polys += u.polys
+        else:
+            merged[u.id] = u
+    return list(merged.values())
+
+
+def title_case(s: str) -> str:
+    """CALGARY's / HALIFAX's upper-case names: "BRIDLEWOOD" -> "Bridlewood", "ST. ANDREWS" -> "St. Andrews"."""
+    if s != s.upper():
+        return s
+    return re.sub(r"[A-Za-zÀ-ÿ']+", lambda m: m.group(0).capitalize(), s.lower())
+
+
+def statcan_units(feats: list[dict]) -> list[Unit]:
+    src = "Statistics Canada, 2021 Census cartographic boundary files, census subdivisions (Open Government Licence - Canada)"
+    out = []
+    for f in feats:
+        p = f.get("properties") or {}
+        polys = geojson_polys(f.get("geometry"))
+        uid, name = prop(p, "CSDUID"), fix_text(prop(p, "CSDNAME")).strip()
+        if not polys or not uid or not name:
+            continue
+        typ = prop(p, "CSDTYPE")
+        prov = CA_PROVINCES.get(prop(p, "PRUID") or uid[:2], "")
+        out.append(Unit(f"statcan-csd:{uid}", f"{name}, {prov}" if prov else name,
+                        CSD_TYPES.get(typ, "census subdivision") + (f" ({typ})" if typ else ""),
+                        LEVEL_LOCALITY, src, polys, [name]))
+    return out
 
 
 def cbs_units(feats: list[dict], stat_areas_for) -> list[Unit]:

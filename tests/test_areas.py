@@ -182,6 +182,50 @@ def make_fixtures(cache: Path, la_src: Path | None):
                 [[(2.350, 48.860), (2.355, 48.860), (2.360, 48.860), (2.360, 48.86001),
                   (2.355, 48.86001), (2.350, 48.86001), (2.350, 48.860)]])]}
     (cache / "gb-FRA-ADM5.geojson").write_text(json.dumps(gbf))
+    make_canada_fixtures(cache)
+
+
+def fc(*feats):
+    return {"type": "FeatureCollection", "features": list(feats)}
+
+
+def make_canada_fixtures(cache: Path):
+    """Canada: StatCan census subdivisions (one ArcGIS answer per place box) and every city layer, each in
+    its own field names. Toronto and Halifax are covered completely by their neighbourhoods / communities."""
+    csd = lambda uid, name, typ, ring: feature({"OBJECTID": int(uid), "CSDUID": uid, "CSDNAME": name,
+                                               "CSDTYPE": typ, "PRUID": uid[:2]}, [ring])
+    toronto = CA_BOXES["Toronto_area_ON"]
+    (cache / f"{build_areas.statcan_cache_name(toronto)}-0.geojson").write_text(json.dumps(fc(
+        csd("3520005", "Toronto", "C", sq(43.60, -79.60, 43.80, -79.20)),
+        csd("3519028", "Vaughan", "CY", sq(43.75, -79.60, 43.90, -79.40)))))
+    halifax = CA_BOXES["Halifax_area_NS"]
+    (cache / f"{build_areas.statcan_cache_name(halifax)}-0.geojson").write_text(json.dumps(fc(
+        csd("1209034", "Halifax", "RGM", sq(44.40, -64.00, 45.20, -62.50)))))
+    montreal = CA_BOXES["Montreal_area_QC"]
+    (cache / f"{build_areas.statcan_cache_name(montreal)}-0.geojson").write_text(json.dumps(fc(
+        csd("2466023", "Montréal", "V", sq(45.45, -73.70, 45.60, -73.50)),
+        csd("2466058", "Côte-Saint-Luc", "V", sq(45.46, -73.68, 45.47, -73.66)))))
+    (cache / "ca-tor.geojson").write_text(json.dumps(fc(
+        feature({"AREA_SHORT_CODE": 34, "AREA_NAME": "Bathurst Manor"}, [sq(43.60, -79.60, 43.80, -79.40)]),
+        feature({"AREA_SHORT_CODE": 173, "AREA_NAME": "North Toronto"}, [sq(43.60, -79.40, 43.80, -79.20)]))))
+    (cache / "ca-mtl.geojson").write_text(json.dumps(fc(
+        feature({"CODEID": 6, "NOM": "Outremont", "TYPE": "Arrondissement"}, [sq(45.51, -73.62, 45.53, -73.59)]),
+        feature({"CODEID": 52, "NOM": "Côte-Saint-Luc", "TYPE": "Ville liée"}, [sq(45.46, -73.68, 45.47, -73.66)]))))
+    (cache / "ca-hfx-0.geojson").write_text(json.dumps(fc(
+        feature({"OBJECTID": 1, "GSA_KEY": 101, "GSA_NAME": "HALIFAX"}, [sq(44.40, -64.00, 45.20, -63.58)]),
+        feature({"OBJECTID": 2, "GSA_KEY": 102, "GSA_NAME": "DARTMOUTH"}, [sq(44.40, -63.58, 45.20, -62.50)]))))
+    far = lambda k: [sq(60.0 + k, -100.0, 60.01 + k, -99.99)]      # nowhere near the places
+    (cache / "ca-ott-0.geojson").write_text(json.dumps(fc(feature({"ONS_ID": 3001, "ONS_Name": "Glebe"}, far(0)))))
+    (cache / "ca-ham-0.geojson").write_text(json.dumps(fc(feature(
+        {"PLANNING_UNIT": 7, "NEIGHBOURHOOD": "WESTDALE NORTH", "COMMUNITY": "HAMILTON"}, far(1)))))
+    (cache / "ca-cgy.geojson").write_text(json.dumps(fc(feature({"comm_code": "BRI", "name": "BRIDLEWOOD"}, far(2)))))
+    (cache / "ca-edm.geojson").write_text(json.dumps(fc(feature(
+        {"neighbourhood_number": "2010", "name": "ABBOTTSFIELD", "descriptive_name": "Abbottsfield"}, far(3)))))
+    (cache / "ca-wpg.geojson").write_text(json.dumps(fc(feature({"id": "18", "name": "Tuxedo"}, far(4)))))
+
+
+CA_BOXES = {"Toronto_area_ON": (43.62, -79.58, 43.78, -79.22), "Halifax_area_NS": (44.60, -63.70, 44.70, -63.55),
+            "Montreal_area_QC": (45.455, -73.69, 45.59, -73.51)}
 
 
 CHAI = [
@@ -206,6 +250,8 @@ CHAI = [
     {"info": {"title": "France"}, "metroAreas": [
         {"name": "Paris", "bounds": {"n": 48.87, "s": 48.84, "e": 2.38, "w": 2.34}},
         {"name": "Nantes", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}}]},
+    {"info": {"title": "Canada"}, "metroAreas": [
+        {"name": k, "bounds": {"s": b[0], "w": b[1], "n": b[2], "e": b[3]}} for k, b in CA_BOXES.items()]},
 ]
 
 OVERRIDES = {"Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik": {"names": ["Kiryat Yam", "Kiryat Motzkin", "Kiryat Bialik"]},
@@ -257,6 +303,29 @@ def check_build(tmp: Path, la: Path | None) -> Path:
     q11 = next(a for a in data["areas"] if a["id"] == "cbs-subq:3000-11")
     assert len(q11["polygons"]) == 2 and q11["name"] == "Jerusalem, sub-quarter 11", q11
     assert q11["places"] == ["Eretz Yisrael (Neighborhoods)/Jerusalem"]
+
+    # Canada: Toronto and Halifax replaced by their neighbourhoods / communities; Vaughan stays a CSD;
+    # Montreal by its arrondissements, its villes liées come from StatCan (not twice)
+    by_id = {a["id"]: a for a in data["areas"]}
+    assert {"ca-tor:34", "ca-tor:173", "ca-hfx:101", "ca-hfx:102", "statcan-csd:3519028"} <= ids, ids
+    assert "statcan-csd:3520005" not in ids and "statcan-csd:1209034" not in ids, "covered by finer units"
+    assert by_id["ca-tor:34"]["name"] == "Bathurst Manor, Toronto" and by_id["ca-tor:34"]["level"] == 30
+    assert by_id["ca-hfx:101"]["name"] == "Halifax, Halifax Regional Municipality", by_id["ca-hfx:101"]
+    assert by_id["statcan-csd:3519028"]["name"] == "Vaughan, ON"
+    assert by_id["statcan-csd:3519028"]["kind"] == "city (CY)", by_id["statcan-csd:3519028"]
+    assert "ca-mtl:6" in ids and "ca-mtl:52" not in ids and "statcan-csd:2466058" in ids, ids
+    assert by_id["statcan-csd:2466058"]["name"] == "Côte-Saint-Luc, QC"
+    assert "statcan-csd:2466023" in ids, "Montréal city: its arrondissements cover only part of it here"
+    # the other cities' layers loaded with their own field names (no source failed)
+    assert "failed" not in report and "UNRESOLVED Canada" not in report, report
+    feats = json.loads((tmp / "cache" / "ca-ham-0.geojson").read_text())["features"]
+    ham = build_areas.city_units(feats, next(s for s in build_areas.PLANS["Canada"] if s.get("key") == "ca-ham"))
+    assert [u.name for u in ham] == ["Westdale North, Hamilton"], [u.name for u in ham]
+    try:
+        build_areas.city_units(feats, {"key": "x", "id_fields": ["nope"], "name_fields": ["NEIGHBOURHOOD"]})
+        raise AssertionError("a missing id field must fail the source")
+    except ValueError as e:
+        assert "PLANNING_UNIT" in str(e), e
     return out
 
 
