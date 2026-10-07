@@ -284,7 +284,7 @@ The areas come from `areas.json`, built by `build_areas.py` from the Chai Tables
 venv/bin/pip install pyshp osmium               # Census shapefiles; the OpenStreetMap extract
 venv/bin/python build_areas.py                   # all countries; ~1-2 GB of downloads, cached in
                                                  # <data_dir>/area-sources (delete a file to refresh it)
-venv/bin/python build_areas.py --only USA --only "Eretz Yisrael (Cities)"   # just some
+venv/bin/python build_areas.py --only USA --only "Eretz Yisrael (Cities)"   # rebuild just these; the other countries' areas in areas.json are kept (--replace drops them)
 ```
 
 It writes `<data_dir>/areas.json` (the server reloads it when it changes) and `areas_report.txt`: every

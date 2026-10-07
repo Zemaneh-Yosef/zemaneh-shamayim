@@ -350,6 +350,22 @@ def check_build(tmp: Path, la: Path | None) -> Path:
         raise AssertionError("a missing id field must fail the source")
     except ValueError as e:
         assert "PLANNING_UNIT" in str(e), e
+
+    # --only rebuilds some countries and keeps the rest of the file; --replace writes only those countries
+    common = ["--config", str(tmp / "config.json"), "--chai", str(tmp / "chai.json"), "--cache", str(cache),
+              "--overrides", str(tmp / "ov.json"), "--only", "Canada"]
+    assert build_areas.main(common) == 0
+    again = json.loads(out.read_text())
+    assert {a["id"] for a in again["areas"]} == ids, "--only Canada must not drop the other countries"
+    assert again["unresolved"] == [u for u in data["unresolved"] if not u["place"].startswith("Canada/")] + \
+        [u for u in data["unresolved"] if u["place"].startswith("Canada/")]
+    assert next(a for a in again["areas"] if a["id"] == "nyc-nta:QN0801")["places"] == \
+        next(a for a in data["areas"] if a["id"] == "nyc-nta:QN0801")["places"]
+    only = tmp / "data" / "only-canada.json"
+    (only).write_text(out.read_text())
+    assert build_areas.main(common + ["--replace", "--out", str(only)]) == 0
+    canada = {a["id"] for a in json.loads(only.read_text())["areas"]}
+    assert canada and all(i.startswith(("ca-", "statcan-")) for i in canada), canada
     return out
 
 
