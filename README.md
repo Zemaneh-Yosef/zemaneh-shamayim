@@ -268,12 +268,15 @@ The areas come from `areas.json`, built by `build_areas.py` from the Chai Tables
 * a single point: the finest unit containing it
 * no location, or a combined name like "Kiriat-yam-mozkin-bialik": whatever `areas_overrides.json` says
   (names, a point or a box); otherwise it is listed as unresolved
+* places chaiTable lacks (Hollywood FL, Pikesville, Oak Park MI...): the `_extra` list in `areas_overrides.json`
+  (a point or a box each), treated like chaiTable places. A point outside every place's areas gets no area
+  (`area: null`), so add a community there when its users should get one
 
 | where | official units (finest wins) | source |
 |---|---|---|
 | New York City | 2020 Neighborhood Tabulation Areas | NYC Department of City Planning |
 | City of Los Angeles | "Mapping L.A." neighbourhoods | Los Angeles Times |
-| Chicago, Houston, Dallas, Phoenix, San Diego, Austin | the city's own layer: Chicago's 77 community areas, Houston's super neighborhoods, Dallas's council districts (it has no citywide neighbourhood layer), Phoenix's urban villages, San Diego's community plan areas, Austin's neighborhood planning areas. Each city is one Census place of 25-55 km otherwise, at or over the area cap | each city's open-data / GIS service (see `US_CITIES` in `build_areas.py`) |
+| Chicago, Houston, Dallas, Phoenix, San Diego, Austin, Seattle, Baltimore | the city's own layer: Chicago's 77 community areas, Houston's super neighborhoods, Dallas's council districts (it has no citywide neighbourhood layer), Phoenix's urban villages, San Diego's community plan areas, Austin's neighborhood planning areas, Seattle's Neighborhood Map Atlas neighborhoods, Baltimore's neighborhood statistical areas. Each city is one Census place of 25-55 km otherwise, at or over the area cap | each city's open-data / GIS service (see `US_CITIES` in `build_areas.py`) |
 | rest of the US | incorporated places and census-designated places, then county subdivisions (towns) | US Census TIGER/Line |
 | Israel | municipal jurisdictions; locality outlines for villages inside regional councils. Regional councils are never an area | OpenStreetMap, whose `admin_level=8` boundaries are the Ministry of Interior's: Geofabrik's daily Israel and Palestine extract (one download) |
 | Israel, the places under "Eretz Yisrael (Neighborhoods)" (Beit Shemesh, Haifa, Jerusalem, Safed, Tiberias) | sub-quarters (תת-רובע; cities of 40,000+), or statistical areas for a listed city without them | Central Bureau of Statistics, statistical areas 2022 (downloaded from its ArcGIS service) |
@@ -462,7 +465,7 @@ contributors (Nominatim), GeoNames.
   OpenStreetMap contributors (ODbL, extract by Geofabrik), Statistics Canada (2021 Census boundary files,
   Open Government Licence - Canada), the cities of Toronto, Ottawa, Hamilton, Calgary, Edmonton and Winnipeg,
   Halifax Regional Municipality and Ville de Montréal (CC BY 4.0) under their open-data licences, the cities of
-  Chicago, Houston, Dallas, Phoenix, San Diego and Austin, and geoBoundaries (CC BY 4.0 / per-country licences; see each
+  Chicago, Houston, Dallas, Phoenix, San Diego, Austin, Seattle and Baltimore, and geoBoundaries (CC BY 4.0 / per-country licences; see each
   area's `source`).
 
 ## Caveats

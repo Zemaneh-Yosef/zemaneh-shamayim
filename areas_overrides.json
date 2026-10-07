@@ -1,5 +1,5 @@
 {
-  "_note": "Keys are \"<chaiTable country title>/<metro name>\". Each value is one of: {\"names\": [...]} - the official units with these names (an entry may itself be a list of alternative spellings of one place; the best match wins) (matched against the official data; the report prints every match and its score, check them); {\"point\": [lat, lon]} - the finest official unit containing this point; {\"bounds\": {\"n\":..,\"s\":..,\"e\":..,\"w\":..}} - every official unit in this box; {\"skip\": true}. Places with no location in chaiTable.json and no entry here are listed as unresolved in areas_report.txt.",
+  "_note": "Keys are \"<chaiTable country title>/<metro name>\". Each value is one of: {\"names\": [...]} - the official units with these names (an entry may itself be a list of alternative spellings of one place; the best match wins) (matched against the official data; the report prints every match and its score, check them); {\"point\": [lat, lon]} - the finest official unit containing this point; {\"bounds\": {\"n\":..,\"s\":..,\"e\":..,\"w\":..}} - every official unit in this box; {\"skip\": true}. \"_extra\" adds places chaiTable.json lacks, per country title: {\"name\", \"point\": [lat, lon] or \"bounds\"}; each gets its official units like a chaiTable place. Places with no location in chaiTable.json and no entry here are listed as unresolved in areas_report.txt.",
 
   "Eretz Yisrael (Cities)/Bnei Brak-ramat Gan-givatiyim": {"names": ["Bnei Brak", "Ramat Gan", "Givatayim"]},
   "Eretz Yisrael (Cities)/Tel Aviv-bat Yam-cholon": {"names": ["Tel Aviv-Yafo", "Bat Yam", "Holon"]},
@@ -58,6 +58,26 @@
   "France/Nantes": {"names": ["Nantes"]},
   "UK and Ireland/Gateshead-Newcastle_area_UK": {"names": ["Gateshead", "Newcastle upon Tyne"]},
   "Ukraine/Bogorodichin": {"names": ["Bohorodchany"]},
+
+  "USA/Jackson_area_NJ": {"point": [40.098, -74.357]},
+
+  "_extra": {
+    "USA": [
+      {"name": "Hollywood_area_FL", "point": [26.0112, -80.1495]},
+      {"name": "Aventura_area_FL", "point": [25.9565, -80.1392]},
+      {"name": "Boca_Raton_area_FL", "bounds": {"s": 26.30, "w": -80.26, "n": 26.42, "e": -80.07}},
+      {"name": "Delray_Beach_area_FL", "point": [26.4615, -80.0728]},
+      {"name": "Orlando_area_FL", "point": [28.5384, -81.3789]},
+      {"name": "Highland_Park_area_NJ", "point": [40.4959, -74.4243]},
+      {"name": "Edison_area_NJ", "point": [40.5187, -74.4121]},
+      {"name": "Pikesville_area_MD", "point": [39.3743, -76.7225]},
+      {"name": "Silver_Spring_area_MD", "point": [38.9907, -77.0261]},
+      {"name": "Kemp_Mill_area_MD", "point": [39.0390, -77.0189]},
+      {"name": "Oak_Park_area_MI", "point": [42.4595, -83.1827]},
+      {"name": "Southfield_area_MI", "point": [42.4734, -83.2219]},
+      {"name": "Beachwood_area_OH", "point": [41.4645, -81.5087]}
+    ]
+  },
 
   "_todo": "Still need a point from you (on regional-council land, an outpost or a site, so no official locality; without an entry they fall back to the radius the app sends): Amuna, Chamat Geder, Chavat Hashomer, Chevel Shalom, Chof Kinar, Chorasha, Ein Bokek, Kever Schmuel Hanavi Roof, Kever Rachel-beit Lechem, Kever Yonatan Ben Uziel, Marchavei David, Ramon Airbase, Ramot Sesh, Sah Nor, USA/North_East_New_Jersey_area_NJ"
 }

@@ -105,7 +105,7 @@ POINT_KM = 0.3              # boxes smaller than this (centre to corner) are poi
 BIG_BOX_KM = 60.0           # chaiTable boxes bigger than this are flagged in the report
 
 
-# Big US cities (Census places over or near terrain.max_area_radius_km) and their own official layers
+# Big US cities (Census places over, near or well into terrain.max_area_radius_km) and their own layers
 US_CITIES = [
     {"type": "city", "key": "us-chi", "url": SOCRATA.format(host="data.cityofchicago.org", id="igwz-8jzy"),
      "id_fields": ["area_numbe", "area_num_1"], "name_fields": ["community"], "title_case": True,
@@ -131,6 +131,15 @@ US_CITIES = [
      "id_fields": ["objectid", "gis_id"], "name_fields": ["planning_area_name"], "title_case": True,
      "name_suffix": ", Austin", "kind": "neighborhood planning area",
      "source": "City of Austin, Neighborhood Planning Areas"},
+    {"type": "city", "key": "us-sea",
+     "arcgis": "https://services.arcgis.com/ZOyb2t4B0UYuYNYH/arcgis/rest/services/nma_nhoods_sub/FeatureServer/0/query",
+     "id_fields": ["OBJECTID"], "name_fields": ["S_HOOD"], "alt_fields": ["S_HOOD_ALT_NAMES", "L_HOOD"],
+     "name_suffix": ", Seattle", "kind": "neighborhood",
+     "source": "City of Seattle, Neighborhood Map Atlas neighborhoods (City Clerk)"},
+    {"type": "city", "key": "us-bal",
+     "arcgis": "https://geodata.baltimorecity.gov/egis/rest/services/Planning/Neighborhoods/MapServer/0/query",
+     "id_fields": ["OBJECTID"], "name_fields": ["Name"], "name_suffix": ", Baltimore",
+     "kind": "neighborhood statistical area", "source": "Baltimore City Department of Planning, Neighborhoods"},
 ]
 
 
@@ -875,8 +884,9 @@ def city_units(feats: list[dict], spec: dict) -> list[Unit]:
             sfx = fix_text(prop(p, spec["suffix_field"])).strip()
             suffix = ", " + (title_case(sfx) if spec.get("title_case") else sfx)
         nid = re.sub(r"\.0$", "", prop(p, id_f, default=str(i)))
+        alts = [fix_text(prop(p, k)).strip() for k in spec.get("alt_fields", ()) if prop(p, k)]
         out.append(Unit(f"{spec['key']}:{nid}", name + suffix, spec.get("kind", "neighbourhood"),
-                        spec.get("level", LEVEL_NEIGHBOURHOOD), src, polys, [name]))
+                        spec.get("level", LEVEL_NEIGHBOURHOOD), src, polys, [name] + alts))
     # one id may come in several pieces (multi-part features split by the service): merge them
     merged: dict[str, Unit] = {}
     for u in out:
@@ -1144,6 +1154,7 @@ def build(args, cfg) -> dict:
     if args.sources:
         plans.update(json.loads(Path(args.sources).read_text()))
     overrides = json.loads(Path(args.overrides).read_text()) if args.overrides and Path(args.overrides).exists() else {}
+    extra = overrides.get("_extra", {})            # places chaiTable lacks: {country title: [{name, point|bounds}]}
     overrides = {k: v for k, v in overrides.items() if not k.startswith("_")}
     sources = Sources(fetch, cfg.get("areas", {}))
 
@@ -1170,6 +1181,16 @@ def build(args, cfg) -> dict:
                 la, lo = ov["point"]
                 box = (la, lo, la, lo)
             metros.append((key, m["name"], box, ov))
+        for e in extra.get(title, []):
+            key = f"{title}/{e['name']}"
+            if any(k == key for k, *_ in metros):
+                raise ValueError(f"_extra place {key} is already in chaiTable.json; use a normal override")
+            if "point" in e:
+                la, lo = e["point"]
+                box = (la, lo, la, lo)
+            else:
+                box = place_box(e["bounds"])
+            metros.append((key, e["name"], box, {}))
         boxes = [b for _, _, b, _ in metros if not is_empty(b)]
         units: list[Unit] = []
         failed = []
