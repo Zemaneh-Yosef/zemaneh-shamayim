@@ -1,5 +1,5 @@
 {
-  "_note": "Keys are \"<chaiTable country title>/<metro name>\". Each value is one of: {\"names\": [...]} - the official units with these names (matched against the official data; the report prints every match and its score, check them); {\"point\": [lat, lon]} - the finest official unit containing this point; {\"bounds\": {\"n\":..,\"s\":..,\"e\":..,\"w\":..}} - every official unit in this box; {\"skip\": true}. Places with no location in chaiTable.json and no entry here are listed as unresolved in areas_report.txt.",
+  "_note": "Keys are \"<chaiTable country title>/<metro name>\". Each value is one of: {\"names\": [...]} - the official units with these names (an entry may itself be a list of alternative spellings of one place; the best match wins) (matched against the official data; the report prints every match and its score, check them); {\"point\": [lat, lon]} - the finest official unit containing this point; {\"bounds\": {\"n\":..,\"s\":..,\"e\":..,\"w\":..}} - every official unit in this box; {\"skip\": true}. Places with no location in chaiTable.json and no entry here are listed as unresolved in areas_report.txt.",
 
   "Eretz Yisrael (Cities)/Bnei Brak-ramat Gan-givatiyim": {"names": ["Bnei Brak", "Ramat Gan", "Givatayim"]},
   "Eretz Yisrael (Cities)/Tel Aviv-bat Yam-cholon": {"names": ["Tel Aviv-Yafo", "Bat Yam", "Holon"]},
@@ -37,9 +37,27 @@
   "Eretz Yisrael (Cities)/Sadeh Elan": {"names": ["Sde Ilan"]},
   "Eretz Yisrael (Cities)/Tel Zion Kochav Yaakov": {"names": ["Kochav Ya'akov"]},
   "Eretz Yisrael (Cities)/Vered Yericho": {"names": ["Vered Yeriho"]},
+  "Eretz Yisrael (Cities)/Amichai": {"names": [["Amihai", "Amihay"]]},
+  "Eretz Yisrael (Cities)/Naaleh": {"names": [["Na'ale", "Naale"]]},
+  "Eretz Yisrael (Cities)/Tenah": {"names": [["Tene", "Tene Omarim"]]},
+  "Eretz Yisrael (Cities)/Chalamish": {"names": [["Halamish", "Hallamish", "Neve Tsuf", "Newe Zuf"]]},
+  "Eretz Yisrael (Cities)/Schem": {"names": [["Nablus", "Shechem", "Shekhem"]]},
+  "Eretz Yisrael (Cities)/Beit Shemes (old-part)": {"names": [["Beit Shemesh", "Bet Shemesh"]]},
+  "Eretz Yisrael (Cities)/Ramat Beit Shemes Gimmel": {"names": [["Beit Shemesh", "Bet Shemesh"]]},
+  "Eretz Yisrael (Cities)/Bnei Brak Zuriel": {"names": [["Bnei Brak", "Bene Beraq"]]},
+  "Eretz Yisrael (Cities)/Ohel Nachum Tiberias": {"names": [["Tiberias", "Teverya"]]},
+  "Eretz Yisrael (Cities)/Kever Rebbi Meir Baal Hanes": {"names": [["Tiberias", "Teverya"]]},
+  "Eretz Yisrael (Cities)/Metulah Top": {"names": ["Metula"]},
+  "Eretz Yisrael (Cities)/Metulah Bottom": {"names": ["Metula"]},
+  "Eretz Yisrael (Cities)/Ohr Yehudah-ramat Pinkas-neveh Efraim": {"names": [["Or Yehuda", "Or Yehudah"]]},
+  "Eretz Yisrael (Cities)/Mizpeh Nevoh": {"names": [["Ma'ale Adumim", "Maale Adummim"]]},
+  "Eretz Yisrael (Cities)/Givat Yitzhar": {"names": [["Yitzhar", "Yizhar"]]},
+  "Eretz Yisrael (Cities)/Gush Chizpin": {"names": [["Hispin", "Haspin"]]},
+  "Eretz Yisrael (Cities)/Telz Stone Ravshulman": {"names": [["Kiryat Ye'arim", "Qiryat Ye'arim"]]},
+  "Eretz Yisrael (Cities)/Telz Stone All Mountains": {"names": [["Kiryat Ye'arim", "Qiryat Ye'arim"]]},
   "France/Nantes": {"names": ["Nantes"]},
   "UK and Ireland/Gateshead-Newcastle_area_UK": {"names": ["Gateshead", "Newcastle upon Tyne"]},
   "Ukraine/Bogorodichin": {"names": ["Bohorodchany"]},
 
-  "_todo": "Still need a point or names from you (no location in chaiTable.json, and a guess could be wrong): Amuna, Beit Shemes (old-part), Bnei Brak Zuriel, Chavat Hashomer, Chevel Shalom, Chof Kinar, Chorasha, Givat Yitzhar, Gush Chizpin, Kever Schmuel Hanavi Roof, Kever Rachel-beit Lechem, Kever Rebbi Meir Baal Hanes, Kever Yonatan Ben Uziel, Macheneh Yatir, Marchavei David, Metulah Top, Metulah Bottom, Mizpeh Nevoh, Ohel Nachum Tiberias, Ohr Yehudah-ramat Pinkas-neveh Efraim, Ramat Beit Shemes Gimmel, Ramot Sesh, Sah Nor, Telz Stone Ravshulman, Telz Stone All Mountains, USA/North_East_New_Jersey_area_NJ"
+  "_todo": "Still need a point from you (on regional-council land, an outpost or a site, so no official locality; without an entry they fall back to the radius the app sends): Amuna, Chamat Geder, Chavat Hashomer, Chevel Shalom, Chof Kinar, Chorasha, Ein Bokek, Kever Schmuel Hanavi Roof, Kever Rachel-beit Lechem, Kever Yonatan Ben Uziel, Marchavei David, Ramon Airbase, Ramot Sesh, Sah Nor, USA/North_East_New_Jersey_area_NJ"
 }
