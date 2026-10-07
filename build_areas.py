@@ -458,13 +458,12 @@ def read_shapefile(path: Path) -> list[dict]:
         base = shp[:-4]
         names = {n.lower(): n for n in z.namelist()}
         cpg = names.get((base + ".cpg").lower())
-        enc = shapefile_encoding(z.read(cpg).decode("ascii", "replace") if cpg else "")
-        rd = shapefile.Reader(shp=io.BytesIO(z.read(shp)), dbf=io.BytesIO(z.read(names[(base + ".dbf").lower()])),
-                              encoding=enc, encodingErrors="replace")
+        dbf = z.read(names[(base + ".dbf").lower()])
+        enc = shapefile_encoding(z.read(cpg).decode("ascii", "replace")) if cpg else dbf_encoding(dbf)
+        rd = shapefile.Reader(shp=io.BytesIO(z.read(shp)), dbf=io.BytesIO(dbf), encoding=enc, encodingErrors="replace")
     else:
-        cpg = path.with_suffix(".cpg")
-        enc = shapefile_encoding(cpg.read_text(errors="replace") if cpg.exists() else "")
-        rd = shapefile.Reader(str(path), encoding=enc, encodingErrors="replace")
+        rd = shapefile.Reader(str(path), encoding=shapefile_text_encoding(path.with_suffix("")),
+                              encodingErrors="replace")
     fields = [f[0] for f in rd.fields[1:]]
     out = []
     for sr in rd.iterShapeRecords():
@@ -529,7 +528,7 @@ class Sources:
         if key not in self.cache:
             fn = getattr(self, t.replace("-", "_"))
             self.cache[key] = fn(spec, boxes) if t in ("israel-osm", "statcan-csd") else fn(spec)
-            log.info("%s: %d units", spec.get("label") or t, len(self.cache[key]))
+            log.info("%s: %d units", spec.get("label") or spec.get("source") or t, len(self.cache[key]))
         return self.cache[key]
 
     # geoBoundaries (national statistics / mapping agencies, via the geoBoundaries project)
@@ -610,26 +609,32 @@ class Sources:
                                                   check=lambda b: json.loads(b)["features"]))
         return city_units(feats, spec)
 
-    # Canada: Statistics Canada 2021 census subdivisions near the places (one download for the country)
+    # Canada: Statistics Canada 2021 census subdivisions near the places (one download for the country).
+    # The file is big (a 315 MB .shp): it is unpacked to disk once and read one shape at a time, and only
+    # the shapes whose box lies near a place are converted and reprojected.
     def statcan_csd(self, spec, boxes=()):
+        import shapefile                                        # pyshp
         path = self.fetch.path(spec.get("path") or spec.get("url", STATCAN_CSD_URL), name="lcsd000b21a_e.zip")
-        feats = read_shapefile(path)
-        prj = shapefile_prj(path)
+        base = unpack_shapefile(path, self.fetch.cache)
+        prj_f = base.with_suffix(".prj")
+        prj = prj_f.read_text(encoding="utf-8", errors="replace") if prj_f.exists() else ""
+        rd = shapefile.Reader(str(base), encoding=shapefile_text_encoding(base), encodingErrors="replace")
+        fields = [f[0] for f in rd.fields[1:]]
         dl, dw = STATCAN_MARGIN_DEG
-        near = [(s - dl, w - dw, n + dl, e + dw) for s, w, n, e in boxes]
-        kept = []
-        for f in feats:
-            geo = to_lonlat(f.get("geometry"), prj)
-            polys = geojson_polys(geo)
-            if not polys:
-                continue
-            xs = [x for p in polys for x, _ in p[0]]
-            ys = [y for p in polys for _, y in p[0]]
-            if near and not any(s <= max(ys) and n >= min(ys) and w <= max(xs) and e >= min(xs)
-                                for s, w, n, e in near):
-                continue
-            kept.append({"properties": f["properties"], "geometry": geo})
-        log.info("Statistics Canada: %d of %d census subdivisions near the places", len(kept), len(feats))
+        near = [project_box((s - dl, w - dw, n + dl, e + dw), prj) for s, w, n, e in boxes]
+        kept, total = [], 0
+        try:
+            for sr in rd.iterShapeRecords():
+                total += 1
+                x0, y0, x1, y1 = sr.shape.bbox if sr.shape.points else (0, 0, -1, -1)
+                if x1 < x0 or (near and not any(w <= x1 and e >= x0 and s <= y1 and n >= y0
+                                                for s, w, n, e in near)):
+                    continue
+                kept.append({"properties": dict(zip(fields, sr.record)),
+                             "geometry": to_lonlat(sr.shape.__geo_interface__, prj)})
+        finally:
+            rd.close()
+        log.info("Statistics Canada: %d of %d census subdivisions near the places", len(kept), total)
         return statcan_units(kept)
 
     # US Census TIGER/Line
@@ -719,14 +724,65 @@ class Sources:
         return cbs_locality_units(self.cbs_features(spec))
 
 
-def shapefile_prj(path: Path) -> str:
-    """The .prj (coordinate system, WKT) beside a zipped or plain shapefile, or ""."""
-    if path.suffix == ".zip":
-        z = zipfile.ZipFile(path)
-        prj = next((n for n in z.namelist() if n.lower().endswith(".prj")), None)
-        return z.read(prj).decode("utf-8", "replace") if prj else ""
-    p = path.with_suffix(".prj")
-    return p.read_text(encoding="utf-8", errors="replace") if p.exists() else ""
+def unpack_shapefile(path: Path, cache: Path) -> Path:
+    """A shapefile's path without extension, ready for pyshp to read from disk; a .zip is unpacked once into
+    <cache>/<name>-unzipped (again only when a member's size changed, e.g. after a fresh download)."""
+    if path.suffix.lower() != ".zip":
+        return path.with_suffix("")
+    dest = cache / f"{path.stem}-unzipped"
+    dest.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(path) as z:
+        shp = next(i for i in z.infolist() if i.filename.lower().endswith(".shp"))
+        stem = shp.filename[:-4]
+        for i in z.infolist():
+            ext = i.filename[len(stem):].lower()
+            if not i.filename.startswith(stem) or ext not in (".shp", ".shx", ".dbf", ".prj", ".cpg"):
+                continue
+            out = dest / ("x" + ext)                         # one fixed name: no dots or paths from the zip
+            if out.exists() and out.stat().st_size == i.file_size:
+                continue
+            tmp = out.with_suffix(ext + ".tmp")
+            with z.open(i) as src, open(tmp, "wb") as dst:
+                while chunk := src.read(1 << 20):
+                    dst.write(chunk)
+            tmp.replace(out)
+        for ext in (".cpg", ".prj"):                          # left over from an older file
+            if not any(i.filename.lower() == (stem + ext).lower() for i in z.infolist()):
+                (dest / ("x" + ext)).unlink(missing_ok=True)
+    return dest / "x"
+
+
+def shapefile_text_encoding(base: Path) -> str:
+    """The .dbf's text encoding: what its .cpg says, else UTF-8 if every byte decodes as UTF-8, else
+    Windows-1252 (older Canadian / European files without a .cpg)."""
+    cpg = base.with_suffix(".cpg")
+    if cpg.exists():
+        return shapefile_encoding(cpg.read_text(errors="replace"))
+    return dbf_encoding(base.with_suffix(".dbf").read_bytes())
+
+
+def dbf_encoding(dbf: bytes) -> str:
+    hdr = int.from_bytes(dbf[8:10], "little") if len(dbf) >= 10 else 0
+    try:
+        dbf[hdr:].decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        return "cp1252"
+
+
+def project_box(box, prj: str):
+    """A lon/lat (south, west, north, east) box in a projected system's coordinates, as the extent of a grid
+    of points over it (enough for boxes of a few dozen km); the box itself if prj is geographic."""
+    s, w, n, e = box
+    if not prj or prj.lstrip().upper().startswith("GEOGCS"):
+        return box
+    from rasterio.crs import CRS
+    from rasterio.warp import transform
+    k = 6
+    lons = [w + (e - w) * i / k for i in range(k + 1) for _ in range(k + 1)]
+    lats = [s + (n - s) * j / k for _ in range(k + 1) for j in range(k + 1)]
+    xs, ys = transform("EPSG:4326", CRS.from_wkt(prj), lons, lats)
+    return (min(ys), min(xs), max(ys), max(xs))
 
 
 def to_lonlat(geom: dict | None, prj: str) -> dict | None:
