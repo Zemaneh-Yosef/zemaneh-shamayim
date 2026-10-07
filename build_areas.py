@@ -105,6 +105,35 @@ POINT_KM = 0.3              # boxes smaller than this (centre to corner) are poi
 BIG_BOX_KM = 60.0           # chaiTable boxes bigger than this are flagged in the report
 
 
+# Big US cities (Census places over or near terrain.max_area_radius_km) and their own official layers
+US_CITIES = [
+    {"type": "city", "key": "us-chi", "url": SOCRATA.format(host="data.cityofchicago.org", id="igwz-8jzy"),
+     "id_fields": ["area_numbe", "area_num_1"], "name_fields": ["community"], "title_case": True,
+     "name_suffix": ", Chicago", "kind": "community area", "source": "City of Chicago, Community Areas (77)"},
+    {"type": "city", "key": "us-hou",
+     "arcgis": "https://geohwp.houstontx.gov/arcgis/rest/services/02_BaseData_Boundaries/COH/MapServer/1/query",
+     "id_fields": ["OBJECTID"], "name_fields": ["Name"], "title_case": True, "name_suffix": ", Houston",
+     "kind": "super neighborhood", "source": "City of Houston, Super Neighborhoods"},
+    {"type": "city", "key": "us-dal",
+     "arcgis": "https://services2.arcgis.com/rwnOSbfKSwyTBcwN/ArcGIS/rest/services/CouncilAreas/FeatureServer/0/query",
+     "id_fields": ["DISTRICT", "OBJECTID"], "name_fields": ["DISTRICT"], "name_prefix": "Council District ",
+     "name_suffix": ", Dallas", "kind": "council district",      # Dallas has no citywide neighbourhood layer
+     "source": "City of Dallas, City Council districts (2023)"},
+    {"type": "city", "key": "us-phx",
+     "arcgis": "https://maps.phoenix.gov/pub/rest/services/Public/Villages/MapServer/0/query",
+     "id_fields": ["ANID", "OBJECTID"], "name_fields": ["NAME"], "title_case": True, "name_suffix": ", Phoenix",
+     "kind": "urban village", "source": "City of Phoenix, Urban Villages"},
+    {"type": "city", "key": "us-sd",
+     "arcgis": "https://webmaps.sandiego.gov/arcgis/rest/services/DSD/Planning/MapServer/2/query",
+     "id_fields": ["CPCODE", "OBJECTID"], "name_fields": ["CPNAME"], "title_case": True, "name_suffix": ", San Diego",
+     "kind": "community planning area", "source": "City of San Diego, Community Plan areas"},
+    {"type": "city", "key": "us-aus", "url": SOCRATA.format(host="data.austintexas.gov", id="inrm-c3ee"),
+     "id_fields": ["objectid", "gis_id"], "name_fields": ["planning_area_name"], "title_case": True,
+     "name_suffix": ", Austin", "kind": "neighborhood planning area",
+     "source": "City of Austin, Neighborhood Planning Areas"},
+]
+
+
 def gb(iso, adm, kind):
     return {"type": "geoboundaries", "iso": iso, "adm": adm, "kind": kind}
 
@@ -172,7 +201,7 @@ PLANS: dict[str, list[dict]] = {
     "Ukraine": [gb("UKR", 3, "hromada / council")],
     "Uruguay": [gb("URY", 2, "municipality")],
     "Venezuela": [gb("VEN", 2, "municipality")],
-    "USA": [{"type": "nyc-nta"}, {"type": "la-times"},
+    "USA": [{"type": "nyc-nta"}, {"type": "la-times"}, *US_CITIES,
             {"type": "tiger", "layer": "place"}, {"type": "tiger", "layer": "cousub"}],
     "Eretz Yisrael (Cities)": [{"type": "cbs-localities"}, {"type": "israel-osm"}],
     "Eretz Yisrael (Neighborhoods)": [{"type": "cbs-subquarters"}, {"type": "cbs-localities"}, {"type": "israel-osm"}],
@@ -840,6 +869,7 @@ def city_units(feats: list[dict], spec: dict) -> list[Unit]:
             continue
         if spec.get("title_case"):
             name = title_case(name)
+        name = spec.get("name_prefix", "") + name
         suffix = spec.get("name_suffix", "")
         if spec.get("suffix_field") and prop(p, spec["suffix_field"]):
             sfx = fix_text(prop(p, spec["suffix_field"])).strip()
@@ -1081,19 +1111,22 @@ def check_point_name(units, u: Unit, name: str, box, key: str, report: list) -> 
     return [other]
 
 
-def match_names(units: list[Unit], wanted: list[str], min_score: float = 0.82):
-    """Best unit per wanted name (municipal / locality level), or None."""
+def match_names(units: list[Unit], wanted: list, min_score: float = 0.82):
+    """Best unit per wanted name (municipal / locality level), or None. A wanted entry may be a list of
+    alternative spellings of one place (["Halamish", "Neve Tsuf"]): the best-scoring spelling wins."""
     pool = [u for u in units if LEVEL_COARSE < u.level < LEVEL_NEIGHBOURHOOD]
     out = []
     for nm in wanted:
-        key = norm_name(nm)
         best, score = None, 0.0
-        for u in pool:
-            for alt in u.names or [u.name]:
-                r = difflib.SequenceMatcher(None, key, norm_name(alt)).ratio()
-                if r > score or (r == score and best is not None and u.level > best.level):
-                    best, score = u, r
-        out.append((nm, best if score >= min_score else None, round(score, 2)))
+        for spelling in ([nm] if isinstance(nm, str) else nm):
+            key = norm_name(spelling)
+            for u in pool:
+                for alt in u.names or [u.name]:
+                    r = difflib.SequenceMatcher(None, key, norm_name(alt)).ratio()
+                    if r > score or (r == score and best is not None and u.level > best.level):
+                        best, score = u, r
+        label = nm if isinstance(nm, str) else " / ".join(nm)
+        out.append((label, best if score >= min_score else None, round(score, 2)))
     return out
 
 

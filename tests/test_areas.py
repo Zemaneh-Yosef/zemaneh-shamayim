@@ -183,6 +183,16 @@ def make_fixtures(cache: Path, la_src: Path | None):
                   (2.355, 48.86001), (2.350, 48.86001), (2.350, 48.860)]])]}
     (cache / "gb-FRA-ADM5.geojson").write_text(json.dumps(gbf))
     make_canada_fixtures(cache)
+    # the big US cities' layers, each in its own field names (away from the test places)
+    far = lambda k: [sq(30.0 + k, -100.0, 30.01 + k, -99.99)]
+    us = {"us-chi.geojson": {"area_numbe": "50", "community": "WEST RIDGE"},
+          "us-hou-0.geojson": {"OBJECTID": 7, "Name": "MEYERLAND AREA"},
+          "us-dal-0.geojson": {"OBJECTID": 3, "DISTRICT": "13"},
+          "us-phx-0.geojson": {"OBJECTID": 1, "ANID": 9, "NAME": "NORTH MOUNTAIN"},
+          "us-sd-0.geojson": {"OBJECTID": 2, "CPCODE": 40, "CPNAME": "TORREY PINES"},
+          "us-aus.geojson": {"objectid": "1", "gis_id": "19.0", "planning_area_name": "HANCOCK"}}
+    for k, (fname, props) in enumerate(us.items()):
+        (cache / fname).write_text(json.dumps(fc(feature(props, far(k)))))
 
 
 def fc(*feats):
@@ -264,7 +274,8 @@ CHAI = [
         {"name": "Beit El", "bounds": {"n": 32.9601, "s": 32.96, "e": 35.4901, "w": 35.49}},     # inside Safed
         {"name": "Dimonah", "bounds": {"n": 31.0701, "s": 31.07, "e": 35.0301, "w": 35.03}},
         {"name": "Tzuba", "bounds": {"n": 31.5001, "s": 31.50, "e": 34.9001, "w": 34.90}},       # council land
-        {"name": "Nowhere", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}}]},
+        {"name": "Nowhere", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}},
+        {"name": "Smalltown Old", "bounds": {"n": 31.7701, "s": 31.77, "e": 35.2101, "w": 35.21}}]},   # wrong point
     {"info": {"title": "France"}, "metroAreas": [
         {"name": "Paris", "bounds": {"n": 48.87, "s": 48.84, "e": 2.38, "w": 2.34}},
         {"name": "Nantes", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}}]},
@@ -272,7 +283,8 @@ CHAI = [
         {"name": k, "bounds": {"s": b[0], "w": b[1], "n": b[2], "e": b[3]}} for k, b in CA_BOXES.items()]},
 ]
 
-OVERRIDES = {"Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik": {"names": ["Kiryat Yam", "Kiryat Motzkin", "Kiryat Bialik"]},
+OVERRIDES = {"Eretz Yisrael (Cities)/Smalltown Old": {"names": [["Nonexistent Spelling", "Smalltown"]]},
+             "Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik": {"names": ["Kiryat Yam", "Kiryat Motzkin", "Kiryat Bialik"]},
              "France/Nantes": {"names": ["Nantes"]}}
 
 
@@ -315,6 +327,8 @@ def check_build(tmp: Path, la: Path | None) -> Path:
     unresolved = {u["place"]: u["reason"] for u in data["unresolved"]}
     assert "Eretz Yisrael (Cities)/Nowhere" in unresolved, unresolved
     assert "Eretz Yisrael (Cities)/Kfar Etzion" in unresolved, "only a regional council there: unresolved"
+    assert "Nonexistent Spelling / Smalltown -> Smalltown (1.0)" in report, "best of the alternative spellings"
+    assert "Eretz Yisrael (Cities)/Smalltown Old" in next(a for a in data["areas"] if a["id"] == "cbs-loc:1234")["places"]
     assert "Kiryat Yam -> NO MATCH" in unresolved["Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik"]
     assert "gb-FRA5:FRA-2" in ids and "gb-FRA5:FRA-1" in ids, ids
     assert "gb-FRA5:FRA-3" not in ids and "dropped Sliver" in report, "slivers are dropped and reported"
@@ -350,6 +364,15 @@ def check_build(tmp: Path, la: Path | None) -> Path:
         raise AssertionError("a missing id field must fail the source")
     except ValueError as e:
         assert "PLANNING_UNIT" in str(e), e
+
+    us_names = {}
+    for spec in build_areas.US_CITIES:
+        f = json.loads((cache / (spec["key"] + ("-0.geojson" if "arcgis" in spec else ".geojson"))).read_text())
+        us_names.update({u.id: u.name for u in build_areas.city_units(f["features"], spec)})
+    assert us_names == {"us-chi:50": "West Ridge, Chicago", "us-hou:7": "Meyerland Area, Houston",
+                        "us-dal:13": "Council District 13, Dallas", "us-phx:9": "North Mountain, Phoenix",
+                        "us-sd:40": "Torrey Pines, San Diego", "us-aus:1": "Hancock, Austin"}, us_names
+    assert "failed" not in (tmp / "data" / "areas_report.txt").read_text()
 
     # --only rebuilds some countries and keeps the rest of the file; --replace writes only those countries
     common = ["--config", str(tmp / "config.json"), "--chai", str(tmp / "chai.json"), "--cache", str(cache),
