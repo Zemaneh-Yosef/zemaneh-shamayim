@@ -43,7 +43,7 @@ def run(tmp: Path, json_out: Path | None):
     cfgp.write_text(json.dumps({
         "data_dir": str(tmp / "data"), "regions": [REGION],
         "forecast_hours": {"hourly_until": 11, "step_after": 3, "max": 11},
-        "request_delay_s": 0, "climatology": {"min_days": 1}}))
+        "request_delay_s": 0, "climatology": {"min_days": 1, "ncep_years": 0}}))
     cfg = load_config(str(cfgp))
 
     print("1. region selection on a global 2.5 deg grid, across 0 deg longitude")
@@ -113,6 +113,44 @@ def run(tmp: Path, json_out: Path | None):
     srv.shutdown()
     if json_out:
         json_out.write_text(json.dumps(body))
+
+    print("5. NOAA reanalysis climatology from recent years (rolling window)")
+    meta_path = clim_dir(cfg, "ncep", "nyc") / "meta.json"
+    old = json.loads(meta_path.read_text()); old.pop("target", None); meta_path.write_text(json.dumps(old))
+    check(build_prior.regions_missing(cfg) == [], "1991-2020 mode: an older prior without a window is kept")
+    ycfg = json.loads(json.dumps(cfg)); ycfg["climatology"]["ncep_years"] = 2
+    oct26 = date(2026, 10, 8)
+    check(build_prior.target(ycfg, oct26) == [2024, 2025], "October 2026: window 2024-2025")
+    check(build_prior.target(ycfg, date(2027, 2, 10)) == [2024, 2025], "February 2027: still 2024-2025 (NOAA finishing 2026)")
+    check(build_prior.target(ycfg, date(2027, 3, 1)) == [2025, 2026], "March 2027: window moves to 2025-2026")
+    check(build_prior.regions_missing(ycfg, oct26) == [REGION], "yearly mode: the 1991-2020 prior is rebuilt")
+    ydir = tmp / "ncep-yearly"
+    for y, off in ((2022, 0.0), (2023, 1.0), (2024, 2.0), (2025, 3.0)):
+        make_ncep(ydir, year=y, offset=off)
+    make_ncep(ydir, year=2026, offset=4.0, days=60)             # an unfinished year
+    build_prior.build(ycfg, build_prior.regions_missing(ycfg, oct26), ydir, today=oct26)
+    n = ClimGrid(clim_dir(ycfg, "ncep", "nyc"))
+    check(n.meta["target"] == [2024, 2025] and n.meta["years"] == "2024-2025", f"built from {n.meta['years']}")
+    got = float(n.values[0, 0, n.fields.index("t2m"), ri, ci])
+    expect = np.mean([near_surface(d, 0) for d in range(31)]) - 0.26 + 2.5
+    check(abs(got - expect) < 0.01, f"January 00Z = mean of 2024 and 2025 ({got - 273.15:.2f} C, expected {expect - 273.15:.2f})")
+    t1000 = float(n.values[0, 0, n.fields.index("t1000"), ri, ci])
+    check(270 < t1000 < 300, f"packed yearly temperatures unpacked ({t1000:.2f} K)")
+    jul = float(n.values[6, 2, n.fields.index("t2m"), ri, ci])
+    expect_jul = np.mean([near_surface(d, 12) for d in range(181, 212)] + [near_surface(d, 12) for d in range(182, 213)]) - 0.26 + 2.5
+    check(abs(jul - expect_jul) < 0.02, f"July 12Z across a leap year ({jul - 273.15:.2f} C, expected {expect_jul - 273.15:.2f})")
+    check(build_prior.regions_missing(ycfg, oct26) == [], "nothing to rebuild within the same window")
+    cached = sorted(p.name for p in build_prior.cache_dir(ycfg).glob("*.npz"))
+    check(cached == ["2024.npz", "2025.npz"], f"yearly summaries kept: {cached}")
+    mar27 = date(2027, 3, 5)
+    check(build_prior.regions_missing(ycfg, mar27) == [REGION], "March 2027: rebuild for 2025-2026")
+    for f in ydir.glob("*.2025.nc"):
+        f.unlink()                                           # 2025 must now come from its stored summary
+    build_prior.build(ycfg, build_prior.regions_missing(ycfg, mar27), ydir, today=mar27)
+    n = ClimGrid(clim_dir(ycfg, "ncep", "nyc"))
+    check(n.meta["years"] == "2024-2025" and n.meta["target"] == [2025, 2026],
+          f"unfinished 2026 skipped, 2024 used instead, 2025 from its summary ({n.meta['years']})")
+    check(build_prior.regions_missing(ycfg, mar27) == [], "no hourly retries while 2026 stays unfinished")
     print("OK")
 
 
