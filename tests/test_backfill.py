@@ -122,6 +122,12 @@ def run(tmp: Path):
                 continue
             for fh in backfill_gfs.HOURS:
                 archive_file(arch / f"gfs.{d:%Y%m%d}/{run_h:02d}/atmos/gfs.t{run_h:02d}z.pgrb2.0p25.f{fh:03d}", 293.15)
+    for run_h in (0, 12):                                   # Oct 13: 00Z f004 damaged (.idx out of step)
+        for fh in backfill_gfs.HOURS:
+            f = arch / f"gfs.20251013/{run_h:02d}/atmos/gfs.t{run_h:02d}z.pgrb2.0p25.f{fh:03d}"
+            archive_file(f, 293.15)
+            if run_h == 0 and fh == 4:
+                f.write_bytes(b"junk" * 50 + f.read_bytes())
     for run_h in (0, 12):
         for fh in backfill_gfs.HOURS:
             archive_file(arch / f"gfs.20210301/{run_h:02d}/gfs.t{run_h:02d}z.pgrb2.0p25.f{fh:03d}", 273.15)
@@ -136,9 +142,13 @@ def run(tmp: Path):
 
     print("4. dry run, then the backfill")
     base = ["--config", str(cfgp), "--url", url, "--every", "4"]
+    S = backfill_gfs.sample_days
+    check(S(date(2025, 10, 1), date(2025, 10, 9), 4, 2) == S(date(2025, 10, 1), date(2025, 10, 11), 4, 2)
+          == [date(2025, 10, 9), date(2025, 10, 5), date(2025, 10, 1)],
+          "sampled days are a fixed calendar (every 4th day from 2021-01-01), whatever the end day")
     assert backfill_gfs.main(base + ["--start", "2025-10-01", "--end", "2025-10-09", "--dry-run"]) == 0
     check(int(ClimGrid(clim_dir(cfg, "gfs", "nyc")).counts.sum()) == 12, "dry run adds nothing")
-    assert backfill_gfs.main(base + ["--start", "2025-10-01", "--end", "2025-10-09"]) == 0
+    assert backfill_gfs.main(base + ["--start", "2025-10-01", "--end", "2025-10-09", "--phase", "2"]) == 0
     g = ClimGrid(clim_dir(cfg, "gfs", "nyc"))
     check(g.counts[9].tolist() == [12, 12, 12, 12, 6, 6, 6, 6],
           f"3 sampled days + the live run, Oct 5 12Z missing: {g.counts[9].tolist()}")
@@ -154,17 +164,25 @@ def run(tmp: Path):
     check(len(archived_cycles(clim_dir(cfg, "gfs", "nyc"))) == 6, "ledger: the live run + 5 archive runs")
 
     print("5. rerun adds nothing; pre-2021-v16 layout (no atmos/) works")
+    tg = {"nyc": clim_dir(cfg, "gfs", "nyc")}
+    check(backfill_gfs.detect_phase(tg, 4) == 2, "the phase of the runs already added is found again")
     n_req = len(RangeHandler.requests)
-    assert backfill_gfs.main(base + ["--start", "2025-10-01", "--end", "2025-10-09"]) == 0
+    assert backfill_gfs.main(base + ["--start", "2025-10-01", "--end", "2025-10-11"]) == 0
     check(len(RangeHandler.requests) == n_req, "already-added runs are not downloaded again")
     check(ClimGrid(clim_dir(cfg, "gfs", "nyc")).counts.sum() == g.counts.sum(), "nothing counted twice")
-    assert backfill_gfs.main(base + ["--start", "2021-03-01", "--end", "2021-03-01"]) == 0
+    assert backfill_gfs.main(base + ["--start", "2021-03-01", "--end", "2021-03-01", "--every", "1"]) == 0
     g = ClimGrid(clim_dir(cfg, "gfs", "nyc"))
     check(g.counts[2].tolist() == [3] * 8, f"March 2021 from the old layout: {g.counts[2].tolist()}")
     f = g.fields_at(datetime(2026, 3, 16, 7, tzinfo=timezone.utc), 40.75, -73.0, min_samples=3)
     check(f is not None and abs(f["t2m"] - 273.15) < 0.6, "March values from the 2021 run")
 
-    print("6. the live fetcher skips a run the backfill already added")
+    print("6. a damaged archive file is skipped, not fatal")
+    before = ClimGrid(clim_dir(cfg, "gfs", "nyc")).counts[9].copy()
+    assert backfill_gfs.main(base + ["--start", "2025-10-01", "--end", "2025-10-14"]) == 0
+    added = (ClimGrid(clim_dir(cfg, "gfs", "nyc")).counts[9] - before).tolist()
+    check(added == [3, 0, 3, 3, 3, 3, 3, 3], f"Oct 13 added without its damaged 00Z f004 (slot counts +{added})")
+
+    print("7. the live fetcher skips a run the backfill already added")
     bf = Cycle(datetime(2025, 10, 9, 0, tzinfo=timezone.utc))
     for h in forecast_hours(cfg):
         write_grib(src / REGION["name"] / fetch_gfs.grib_file_name(bf, h), REGION,
