@@ -14,8 +14,10 @@ per forecast hour. To keep that manageable the backfill samples:
 
 2021 to today at the default spacing is about 520 days x 8 hours, roughly 80-100 GB downloaded over
 the run (nothing large is kept: each file is decoded, cropped to your regions and deleted). It can be
-stopped and restarted at any time; runs already added are skipped (the same list the fetcher keeps),
-so nothing is ever counted twice, and it can run alongside the hourly fetcher.
+stopped and restarted at any time, or run again later to catch up: the sampled days are a fixed
+calendar (every `--every`-th day from 2021-01-01), runs already added are skipped (the same list the
+fetcher keeps), so nothing is downloaded or counted twice, and it can run alongside the hourly fetcher.
+A damaged archive file is logged and skipped.
 
     python3 backfill_gfs.py [--config config.json] [--start 2021-01-01] [--end YYYY-MM-DD]
                             [--every 4] [--parallel 4] [--dry-run]
@@ -25,6 +27,7 @@ Run fetch_gfs.py at least once first: the backfill crops to the same grid as the
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import logging
 import sys
@@ -54,6 +57,10 @@ class NotThere(Exception):
     pass
 
 
+class BadFile(Exception):
+    """The archive's file (or its .idx) is damaged: skip this forecast hour."""
+
+
 def ua(cfg: dict) -> str:
     return "zmanim-sky-server/0.1" + (f" ({cfg['contact']})" if cfg.get("contact") else "")
 
@@ -71,8 +78,8 @@ def get(cfg: dict, url: str, byte_range: tuple[int, int | None] | None = None, a
             if e.code in (403, 404):             # S3 answers 403 for a missing key without list rights
                 raise NotThere(url) from None
             log.warning("HTTP %s (attempt %d): %s", e.code, i + 1, url)
-        except (urllib.error.URLError, TimeoutError, ConnectionError) as e:
-            log.warning("%s (attempt %d): %s", e, i + 1, url)
+        except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
+            log.warning("%s (attempt %d): %s", e, i + 1, url)   # incl. a transfer cut short
         time.sleep(min(60, 5 * 2 ** i))
     raise RuntimeError(f"giving up on {url}")
 
@@ -122,10 +129,15 @@ def fetch_hour(cfg: dict, base: str, cycle: Cycle, hour: int, want, dest: Path) 
             idx = get(cfg, url + ".idx").decode("ascii", "replace")
         except NotThere:
             continue
-        parts = [get(cfg, url, r) for r in ranges_from_idx(idx, want)]
+        try:
+            ranges = ranges_from_idx(idx, want)
+        except ValueError as e:
+            raise BadFile(f"{url}: {e}") from None
+        parts = [get(cfg, url, r) for r in ranges]
+        for (a, _), part in zip(ranges, parts):     # every range must start a GRIB message
+            if part[:4] != b"GRIB" or part[-4:] != b"7777":
+                raise BadFile(f"{url}: bytes {a}- are not whole GRIB messages (.idx out of step with the file)")
         data = b"".join(parts)
-        if data[:4] != b"GRIB":
-            raise ValueError(f"{url}: not GRIB data")
         dest.write_bytes(data)
         return len(data)
     return 0
@@ -172,25 +184,46 @@ def crop_index(glats: np.ndarray, glons: np.ndarray, lats: list[float], lons: li
     return np.array(rows), np.array(cols)
 
 
-def sample_days(start: date, end: date, every: int) -> list[date]:
-    """Every `every`-th day from end back to start (newest first)."""
-    out, d = [], end
+def sample_days(start: date, end: date, every: int, phase: int) -> list[date]:
+    """The days from end back to start (newest first) whose distance from the archive's first day is
+    `phase` modulo `every`: the same calendar whenever the backfill runs, so a later run only adds days
+    that are new (or were missed), never a shifted second set."""
+    out = []
+    d = end - timedelta(days=((end - FIRST_DAY).days - phase) % every)
     while d >= start:
         out.append(d)
         d -= timedelta(days=every)
     return out
 
 
-def backfill(cfg: dict, start: date, end: date, every: int, parallel: int, base: str, dry_run: bool) -> int:
+def detect_phase(targets: dict[str, Path], every: int) -> int:
+    """The phase most runs already in the climatology have (a backfill started before the calendar was
+    fixed counted back from its own end day); 0 for a fresh climatology. The fetcher's own runs cover
+    every day alike, so they don't sway it."""
+    votes = [0] * every
+    for p in targets.values():
+        for cid in climatology.archived_cycles(p):
+            try:
+                d = datetime.strptime(cid[:8], "%Y%m%d").date()
+            except ValueError:
+                continue
+            votes[(d - FIRST_DAY).days % every] += 1
+    return max(range(every), key=lambda k: (votes[k], -k))
+
+
+def backfill(cfg: dict, start: date, end: date, every: int, parallel: int, base: str, dry_run: bool,
+             phase: int | None = None) -> int:
     grids = region_grids(cfg)
     want = wanted(cfg["pressure_levels_mb"])
-    days = sample_days(start, end, every)
     targets = {r["name"]: climatology.clim_dir(cfg, "gfs", r["name"]) for r in cfg["regions"]}
+    if phase is None:
+        phase = detect_phase(targets, every)
+    days = sample_days(start, end, every, phase % every)
     cycles = [Cycle(datetime(d.year, d.month, d.day, h, tzinfo=timezone.utc)) for d in days for h in RUNS]
     done = set.intersection(*(climatology.archived_cycles(p) for p in targets.values())) if targets else set()
     todo = [c for c in cycles if c.id not in done]
-    log.info("%s .. %s, every %d days: %d runs, %d already in the climatology, %d to add (~%.0f GB to download)",
-             start, end, every, len(cycles), len(cycles) - len(todo), len(todo),
+    log.info("%s .. %s, every %d days (phase %d): %d runs, %d already in the climatology, %d to add "
+             "(~%.0f GB to download)", start, end, every, phase % every, len(cycles), len(cycles) - len(todo), len(todo),
              len(todo) * len(HOURS) * 22 / 1024)
     if dry_run or not todo:
         return 0
@@ -198,15 +231,22 @@ def backfill(cfg: dict, start: date, end: date, every: int, parallel: int, base:
     with tempfile.TemporaryDirectory() as tmpd, ThreadPoolExecutor(parallel) as pool:
         for n, cycle in enumerate(todo, 1):
             paths = [Path(tmpd) / f"f{h:03d}.grib2" for h in HOURS]
-            sizes = list(pool.map(lambda hp: fetch_hour(cfg, base, cycle, hp[0], want, hp[1]), zip(HOURS, paths)))
-            if not any(sizes):
+            def one(hp):
+                try:
+                    return fetch_hour(cfg, base, cycle, hp[0], want, hp[1])
+                except BadFile as e:
+                    log.warning("%s f%03d skipped: %s", cycle.id, hp[0], e)
+                    return -1
+            sizes = list(pool.map(one, zip(HOURS, paths)))
+            if not any(z > 0 for z in sizes):
                 log.warning("%s: not in the archive, skipped", cycle.id)
                 continue
-            nbytes += sum(sizes)
+            nbytes += sum(z for z in sizes if z > 0)
             per_region = {name: [] for name in targets}
             for h, path, size in zip(HOURS, paths, sizes):
-                if not size:
-                    log.warning("%s f%03d: not in the archive", cycle.id, h)
+                if size <= 0:
+                    if size == 0:
+                        log.warning("%s f%03d: not in the archive", cycle.id, h)
                     continue
                 try:
                     arr, glats, glons = decode(path, cfg["pressure_levels_mb"])
@@ -243,6 +283,8 @@ def main(argv=None) -> int:
     ap.add_argument("--every", type=int, default=4, help="sample one day in this many (default 4)")
     ap.add_argument("--parallel", type=int, default=4, help="downloads at once (default 4)")
     ap.add_argument("--url", help=f"archive base URL (default {DEFAULT_URL})")
+    ap.add_argument("--phase", type=int, help="which day of each --every to take, counted from 2021-01-01 "
+                    "(default: the one most runs already added have, else 0)")
     ap.add_argument("--dry-run", action="store_true", help="only report what would be downloaded")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args(argv)
@@ -253,7 +295,7 @@ def main(argv=None) -> int:
     base = (a.url or cfg.get("climatology", {}).get("backfill_url") or DEFAULT_URL).rstrip("/")
     if a.every < 1 or a.start > end:
         ap.error("need --every >= 1 and --start <= --end")
-    return backfill(cfg, a.start, end, a.every, max(1, a.parallel), base, a.dry_run)
+    return backfill(cfg, a.start, end, a.every, max(1, a.parallel), base, a.dry_run, a.phase)
 
 
 if __name__ == "__main__":

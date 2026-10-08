@@ -146,9 +146,11 @@ globe (byte ranges from the `.idx` files, ~20–25 MB per hour), decoded, croppe
 deleted. It samples one day in `--every` (default 4) and, on each, one hour in each 3-hour slot (hours 1,
 4, 7, 10 of the 00Z and 12Z runs); each counts as a full live day. From 2021 that is roughly 80–100 GB of
 download in total, over several hours to a day or two depending on bandwidth, with negligible disk use.
-`--start` / `--end` limit the range (e.g. `--start 2023-01-01` for about half). It can be stopped and
-restarted at any time and runs safely alongside the fetcher: runs already in the climatology are never
-downloaded or counted again. Since the server's own days count one for one and the backfill samples, the
+`--start` / `--end` limit the range (e.g. `--start 2023-01-01` for about half). The sampled days are a
+fixed calendar (every 4th day counted from 2021-01-01), so it can be stopped, restarted, or run again
+later to catch up (e.g. from a weekly timer) and only fetches days it hasn't added yet; it runs safely
+alongside the fetcher, and runs already in the climatology are never downloaded or counted again. A
+damaged file in the archive (an `.idx` out of step with its file) is logged and skipped. Since the server's own days count one for one and the backfill samples, the
 average leans towards the most recent years.
 
 ## Resources (default config: continental US + Israel, 2 cycles kept)
