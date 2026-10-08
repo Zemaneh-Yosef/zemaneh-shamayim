@@ -5,20 +5,23 @@ Two sources, both by month and time of day:
 * "gfs":  your own climatology, built by fetch_gfs.py from the first 12 hours of every GFS run it
           stores (0.25 deg, 13 levels, water temperature). Grows by itself; a month / time-of-day slot
           is used once it holds `climatology.min_days` days of data.
-* "ncep": NOAA NCEP/NCAR Reanalysis 1, 1991-2020 averages at 00/06/12/18 UTC (2.5 deg, levels
-          1000/925/850/700/600/500 mb, air ~40 m above ground). Downloaded once without any key by
-          build_prior.py; the fallback until your own climatology has filled in.
+* "ncep": NOAA NCEP/NCAR Reanalysis 1, last 10 complete years averaged at 00/06/12/18 UTC (2.5 deg, levels
+          1000/925/850/700/600/500 mb, air ~40 m above ground). Built without any key by build_prior.py
+          (the window moves forward each year); the fallback until your own climatology has filled in.
+          backfill_gfs.py can fill the "gfs" source with past GFS runs so it covers every month at once.
 
 Storage:  <data_dir>/climatology/<source>/<region>/meta.json + values.npy [+ counts.npy]
           values: [month, time-of-day slot, field, lat, lon]; "gfs" stores running sums + counts.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import math
 import os
 import shutil
 import time
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -144,8 +147,78 @@ def build_profile(f: dict, levels_mb: list[int], dist_km: float, lat: float, lon
 
 
 # ---------------------------------------------------------------------------------------------
-# Own GFS climatology: add the first hours of a stored cycle to running sums
+# Own GFS climatology: running sums by month and 3-hour slot (live runs and backfilled past runs)
 # ---------------------------------------------------------------------------------------------
+@contextmanager
+def locked(out: Path):
+    """Exclusive lock on one region's climatology (the fetcher and backfill_gfs.py may run at once)."""
+    out.parent.mkdir(parents=True, exist_ok=True)
+    with open(out.parent / f".{out.name}.lock", "w") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def gfs_clim_meta(region: dict, grid_meta: dict) -> dict:
+    """The meta.json of a region's own GFS climatology, from a stored cycle's region meta."""
+    nslots = 24 // GFS_SLOT_HOURS
+    return {"lats": grid_meta["lats"], "lons": grid_meta["lons"], "fields": grid_meta["fields"],
+            "levels_mb": grid_meta["levels_mb"], "region": region,
+            "slot_hours": [GFS_SLOT_HOURS * k + GFS_SLOT_HOURS / 2 for k in range(nslots)],
+            "near_surface_agl": 2.0, "source": "own GFS archive (first hours of each run)"}
+
+
+def open_gfs_clim(cfg: dict, region: dict, grid_meta: dict, log) -> Path:
+    """The region's own climatology directory, created (or restarted for a changed grid) as needed.
+    Call with the region locked."""
+    out = clim_dir(cfg, "gfs", region["name"])
+    expected = gfs_clim_meta(region, grid_meta)
+    if out.exists():
+        old = json.loads((out / "meta.json").read_text())
+        if any(old.get(k) != expected[k] for k in ("lats", "lons", "fields", "levels_mb", "region")):
+            aside = out.with_name(out.name + f".replaced-{int(time.time())}")
+            log.warning("region %s changed: keeping the old climatology at %s and starting a new one",
+                        region["name"], aside)
+            out.rename(aside)
+    if not out.exists():
+        nslots = 24 // GFS_SLOT_HOURS
+        shape = (12, nslots, len(expected["fields"]), len(expected["lats"]), len(expected["lons"]))
+        out.mkdir(parents=True)
+        np.lib.format.open_memmap(out / "values.npy", mode="w+", dtype=np.float32, shape=shape)[:] = 0
+        np.save(out / "counts.npy", np.zeros((12, nslots), dtype=np.int32))
+        write_json_atomic(out / "meta.json", expected)
+    return out
+
+
+def archived_cycles(out: Path) -> set[str]:
+    f = out / "archived_cycles.txt"
+    return set(f.read_text().split()) if f.exists() else set()
+
+
+def add_samples(out: Path, cycle_id: str, samples, weight: int = 1) -> int:
+    """Add [(valid time, array[field, lat, lon])] to the running sums, each counted `weight` times,
+    and record the cycle as archived. Call with the region locked. Returns the number added."""
+    sums = np.load(out / "values.npy", mmap_mode="r+")
+    counts = np.load(out / "counts.npy")
+    added = 0
+    for t, arr in samples:
+        if arr.shape != sums.shape[2:] or np.isnan(arr).any():
+            continue
+        m, s = t.month - 1, t.hour // GFS_SLOT_HOURS
+        sums[m, s] += arr * np.float32(weight)
+        counts[m, s] += weight
+        added += 1
+    sums.flush()
+    del sums
+    np.save(out / "counts.npy", counts)
+    with open(out / "archived_cycles.txt", "a") as fh:
+        fh.write(cycle_id + "\n")
+    os.utime(out / "meta.json")                 # tells the API to reload
+    return added
+
+
 def archive_cycle(cfg: dict, cycle: Cycle, cycle_dir: Path, log) -> None:
     ccfg = cfg.get("climatology", {})
     if not ccfg.get("archive", True):
@@ -154,48 +227,12 @@ def archive_cycle(cfg: dict, cycle: Cycle, cycle_dir: Path, log) -> None:
     for region in cfg["regions"]:
         rdir = cycle_dir / region["name"]
         meta = json.loads((rdir / "meta.json").read_text())
-        out = clim_dir(cfg, "gfs", region["name"])
-        nslots = 24 // GFS_SLOT_HOURS
-        shape = (12, nslots, len(meta["fields"]), len(meta["lats"]), len(meta["lons"]))
-        expected = {"lats": meta["lats"], "lons": meta["lons"], "fields": meta["fields"],
-                    "levels_mb": meta["levels_mb"], "region": region,
-                    "slot_hours": [GFS_SLOT_HOURS * k + GFS_SLOT_HOURS / 2 for k in range(nslots)],
-                    "near_surface_agl": 2.0, "source": "own GFS archive (first hours of each run)"}
-        if out.exists():
-            old = json.loads((out / "meta.json").read_text())
-            if any(old.get(k) != expected[k] for k in ("lats", "lons", "fields", "levels_mb", "region")):
-                aside = out.with_name(out.name + f".replaced-{int(time.time())}")
-                log.warning("region %s changed: keeping the old climatology at %s and starting a new one",
-                            region["name"], aside)
-                out.rename(aside)
-        if not out.exists():
-            out.mkdir(parents=True)
-            np.lib.format.open_memmap(out / "values.npy", mode="w+", dtype=np.float32, shape=shape)[:] = 0
-            np.save(out / "counts.npy", np.zeros((12, nslots), dtype=np.int32))
-            write_json_atomic(out / "meta.json", expected)
-        done_file = out / "archived_cycles.txt"
-        done = set(done_file.read_text().split()) if done_file.exists() else set()
-        if cycle.id in done:
-            continue
-        sums = np.load(out / "values.npy", mmap_mode="r+")
-        counts = np.load(out / "counts.npy")
-        added = 0
-        for h in hours:
-            src = rdir / f"f{h:03d}.npy"
-            if not src.exists():
+        target = clim_dir(cfg, "gfs", region["name"])
+        with locked(target):
+            out = open_gfs_clim(cfg, region, meta, log)
+            if cycle.id in archived_cycles(out):
                 continue
-            arr = np.load(src)
-            if np.isnan(arr).any():
-                continue
-            t = cycle.time + timedelta(hours=h)
-            m, s = t.month - 1, t.hour // GFS_SLOT_HOURS
-            sums[m, s] += arr
-            counts[m, s] += 1
-            added += 1
-        sums.flush()
-        del sums
-        np.save(out / "counts.npy", counts)
-        with open(done_file, "a") as fh:
-            fh.write(cycle.id + "\n")
-        os.utime(out / "meta.json")                 # tells the API to reload
+            samples = [(cycle.time + timedelta(hours=h), np.load(rdir / f"f{h:03d}.npy"))
+                       for h in hours if (rdir / f"f{h:03d}.npy").exists()]
+            added = add_samples(out, cycle.id, samples)
         log.info("climatology %s: added %d hours of %s", region["name"], added, cycle.id)

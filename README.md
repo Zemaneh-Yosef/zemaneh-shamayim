@@ -33,8 +33,8 @@ the best source it has for that date:
 | source | dates | detail |
 |---|---|---|
 | `forecast` | the next ~7 days | latest GFS run, 0.25°, 13 levels, water temperature |
-| `climatology-gfs` | any date, once that month has data | typical values from your own archive of past GFS runs, same detail |
-| `climatology-ncep` | any date, from the first run | NOAA NCEP/NCAR Reanalysis 1, 1991–2020 averages at 00/06/12/18 UTC, 2.5°, 4 levels below 700 mb |
+| `climatology-gfs` | any date, once that month has data | typical values from your own archive of GFS runs (live, plus past runs from `backfill_gfs.py`), same detail |
+| `climatology-ncep` | any date, from the first run | NOAA NCEP/NCAR Reanalysis 1, average of the last 10 complete years at 00/06/12/18 UTC, 2.5°, 4 levels below 700 mb |
 
 Dates no source covers are left out, and the app uses its next provider (e.g. monthly normals).
 
@@ -46,8 +46,16 @@ Dates no source covers are left out, and the app uses its next provider (e.g. mo
 * After each run it also adds the first 12 hours (the most accurate part) to running averages by
   month and 3-hour slot of the day: your own climatology. A month is used once it holds
   `climatology.min_days` days (default 8), so it covers the whole year after about a year.
-* The first time a region has no NOAA reanalysis climatology, the fetcher builds it (`build_prior.py`):
-  about 2.1 GB downloaded once from NOAA PSL (no key), reduced to a few MB, raw files deleted.
+* The first time a region has no NOAA reanalysis climatology, the fetcher builds it (`build_prior.py`)
+  from NOAA PSL's yearly files (no key): the last `climatology.ncep_years` complete years (default 10),
+  so the fallback reflects today's climate rather than a 1991–2020 average centred on ~2005. Each year
+  (~600 MB) is downloaded, reduced to a ~25 MB global summary kept under `climatology/ncep-years/`, and
+  deleted: about 6 GB once, then each March (when NOAA has finished the previous year) the window moves
+  forward and the prior is rebuilt with one new year downloaded. New regions need no download. A year NOAA
+  has not finished is replaced by an earlier one. `ncep_years: 0` keeps NOAA's fixed 1991–2020 means.
+  An existing server with a 1991–2020 prior switches over on its next fetcher run.
+* Optionally, `backfill_gfs.py` fills your own climatology with past GFS runs (see below), so every
+  month has GFS-detail typical profiles from the start instead of waiting a year.
 * `serve.py` also answers `GET /v1/horizon` (terrain, below). It answers `GET /v1/path-profiles?lat=..&lon=..[&from=YYYY-MM-DD][&days=N]` (default:
   yesterday to a week ahead; up to `api.max_days`, 400) with, for each sunrise and sunset, profiles at
   0, 10, 25, 50, 100, 150, 200, 300 and 400 km along the Sun's azimuth, interpolated in space, time
@@ -121,6 +129,28 @@ curl http://127.0.0.1:8787/v1/status
 Expose it through your web server for HTTPS (`deploy/nginx-location.conf`). The API sets
 `Access-Control-Allow-Origin` from `api.allow_origin` in the config (default `*`).
 
+### Backfilling your own climatology (optional)
+
+After the first fetcher run, `backfill_gfs.py` adds past GFS runs from NOAA's archive on AWS Open Data
+(`s3://noaa-gfs-bdp-pds`, from 2021; no key or account), so every month of a yearly calendar gets
+GFS-detail typical profiles averaged over recent years, instead of the NOAA fallback until the server has
+run for a year:
+
+```sh
+sudo -u zmanim-sky ZMANIM_SKY_CONFIG=/opt/zmanim-sky-server/config.json venv/bin/python backfill_gfs.py --dry-run
+sudo -u zmanim-sky ZMANIM_SKY_CONFIG=/opt/zmanim-sky-server/config.json nohup venv/bin/python backfill_gfs.py &
+```
+
+The archive cannot cut out a region, so only the needed fields of each hour are downloaded for the whole
+globe (byte ranges from the `.idx` files, ~20–25 MB per hour), decoded, cropped to your regions and
+deleted. It samples one day in `--every` (default 4) and, on each, one hour in each 3-hour slot (hours 1,
+4, 7, 10 of the 00Z and 12Z runs); each counts as a full live day. From 2021 that is roughly 80–100 GB of
+download in total, over several hours to a day or two depending on bandwidth, with negligible disk use.
+`--start` / `--end` limit the range (e.g. `--start 2023-01-01` for about half). It can be stopped and
+restarted at any time and runs safely alongside the fetcher: runs already in the climatology are never
+downloaded or counted again. Since the server's own days count one for one and the backfill samples, the
+average leans towards the most recent years.
+
 ## Resources (default config: continental US + Israel, 2 cycles kept)
 
 * Download: roughly 200–400 MB per cycle, about 280 requests spaced 2 s apart, twice a day.
@@ -128,7 +158,10 @@ Expose it through your web server for HTTPS (`deploy/nginx-location.conf`). The 
   one being fetched. Fewer forecast hours (`forecast_hours.max`) or a smaller box reduce this.
 * Your own climatology: 12 months x 8 slots of the same fields, about 330 MB for the US box (fixed
   size; it does not grow over time). The NOAA climatology is a few MB per region.
-* NOAA reanalysis build: about 2.1 GB download and a few minutes, once per new region.
+* NOAA reanalysis build: about 6 GB download once (10 years, ~600 MB of disk at a time), then ~600 MB
+  each March; ~250 MB of yearly summaries kept. Adding a region downloads nothing.
+* Optional backfill of your own climatology: roughly 80–100 GB download from 2021 at the default spacing,
+  once; no lasting disk use beyond the climatology itself.
 * CPU / RAM: negligible; arrays are memory-mapped.
 
 ## Terrain horizons for visible sunrise / sunset
@@ -444,7 +477,10 @@ the HTTP endpoint); needs rasterio.
 
 `python3 tests/test_e2e.py` runs the forecast pipeline on synthetic GRIB files shaped like the grib
 filter's output; `python3 tests/test_climatology.py` checks the NOAA climatology build (on synthetic
-NetCDF files laid out like NOAA's), your own archive, and date ranges across all three sources. No
+NetCDF files laid out like NOAA's: the 1991–2020 means and the rolling window of yearly files, including
+an unfinished year, a leap year and the stored yearly summaries), your own archive, and date ranges across
+all three sources; `python3 tests/test_backfill.py` checks the backfill against a local fake of the AWS
+archive (byte ranges, the pre-2021 layout, cropping, weighting, no double counting with the fetcher). No
 network needed.
 
 ## Data credits
@@ -472,7 +508,9 @@ contributors (Nominatim), GeoNames.
 
 * The GFS decoder is verified on a real NOMADS file; the NOAA reanalysis reader was tested on files
   built to NOAA's documented layout only. `build_prior.py` logs each file's variables, units and a
-  sanity summary (near-surface temperature range) - check that log on the first run.
+  sanity summary (near-surface temperature range) - check that log on the first run. Likewise
+  `backfill_gfs.py` was tested against a fake archive built to the AWS layout: watch the first few runs
+  of a real backfill (`-v`).
 * If NOAA changes the grib filter URLs, edit `grib_filter` in the config (see
   https://nomads.ncep.noaa.gov/ for the current ones). NOMADS throttles heavy users; keep
   `request_delay_s` at 1–2 s.

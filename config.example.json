@@ -48,7 +48,8 @@
     "archive": true,
     "archive_hours": 12,
     "min_days": 8,
-    "ncep_prior": true
+    "ncep_prior": true,
+    "ncep_years": 10
   },
   "terrain": {
     "tiles_dir": "",

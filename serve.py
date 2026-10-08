@@ -11,7 +11,7 @@
 Each event comes from the best source available for it (its "source" field):
     "forecast"          the latest GFS run (about 7 days ahead)
     "climatology-gfs"   your own climatology, built from past GFS runs (once a month has enough data)
-    "climatology-ncep"  NOAA's 1991-2020 reanalysis climatology (the fallback until then)
+    "climatology-ncep"  NOAA reanalysis climatology of recent years (the fallback until then)
 Events no source covers are left out; the app then uses its next provider.
 
 /v1/horizon returns terrain horizon profiles for visible sunrise / sunset (terrain.py), computed from
