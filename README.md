@@ -465,6 +465,37 @@ venv/bin/python light_pollution.py --bbox 40.60,-73.98,40.62,-73.955
 curl 'http://127.0.0.1:8787/v1/light-pollution?lat=40.609283058016736&lon=-73.96828881865329&area=auto'
 ```
 
+## Haze calibration for nightfall by the stars
+
+The app's star-visibility nightfall reads the evening haze (aerosol optical depth at 550 nm) from the CAMS
+model through Open-Meteo. `haze_calibration.py` checks CAMS against [AERONET](https://aeronet.gsfc.nasa.gov/),
+NASA's network of sun photometers that measure the real haze (hundreds of stations: many across the US,
+Canada's AEROCAN, several in Israel), and `GET /v1/haze-calibration?lat=..&lon=..` gives the app one factor to
+multiply CAMS by at a place:
+
+```json
+{"factor": 1.25, "radiusKm": 300.0, "period": ["2024-10-07", "2026-10-06"],
+ "stations": [{"site": "CCNY", "lat": 40.821, "lon": -73.949, "distanceKm": 19.0, "ratio": 1.3, "days": 412}]}
+```
+
+For every AERONET station inside the configured regions (plus `haze_calibration.margin_deg`), the ratio is
+the median over days of measured / modelled daytime haze (AERONET's daily averages, Level 1.5, carried from
+500 to 550 nm with each day's Angstrom exponent; CAMS averaged over local solar 8-16 h), from stations with at
+least `min_days` (60) days of both. A model's errors follow the kind of haze a region has (desert dust, city
+pollution, wildfire smoke), so a station speaks for its surroundings: a place's factor blends the stations
+within `radius_km` (300), weighted by their days of data and nearness, and fades to 1 (no correction) with
+distance - 1 where no station is near.
+
+```sh
+sudo -u zmanim-sky ZMANIM_SKY_CONFIG=/opt/zmanim-sky-server/config.json venv/bin/python haze_calibration.py
+```
+
+No key. Each station's CAMS series is one Open-Meteo request that counts as ~25 calls per year of data, so with
+the default two years about 150 stations fit in Open-Meteo's free 10,000 calls a day; requests are 8 s apart.
+A run stops cleanly at `--max-sites` or any failure and the next run continues (series are cached under
+`<data_dir>/haze-cal-cache/`); the log says how many stations are left. Rebuild once a year. AERONET's data
+policy asks that its use acknowledge the AERONET network and the station PIs.
+
 ## Tests
 
 `python3 tests/test_dem_layers.py` checks the merged bare-earth tiles (priority per pixel, reprojection
@@ -481,7 +512,9 @@ the HTTP endpoint); needs rasterio.
 filter's output; `python3 tests/test_climatology.py` checks the NOAA climatology build (on synthetic
 NetCDF files laid out like NOAA's: the 1991–2020 means and the rolling window of yearly files, including
 an unfinished year, a leap year and the stored yearly summaries), your own archive, and date ranges across
-all three sources; `python3 tests/test_backfill.py` checks the backfill against a local fake of the AWS
+all three sources; `python3 tests/test_haze_calibration.py` checks the AERONET / CAMS calibration on a
+fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint);
+`python3 tests/test_backfill.py` checks the backfill against a local fake of the AWS
 archive (byte ranges, the pre-2021 layout, cropping, weighting, no double counting with the fetcher). No
 network needed.
 

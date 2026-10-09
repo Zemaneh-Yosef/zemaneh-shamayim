@@ -95,6 +95,17 @@ DEFAULT_CONFIG = {
         "area_percentile": 90.0,  # area=auto / bbox: this percentile of the area's pixels (brighter = later)
         "max_radius_km": 30.0,    # largest area / bbox (centre to corner) summarised
     },
+    "haze_calibration": {
+        # CAMS haze vs AERONET's measurements (haze_calibration.py; /v1/haze-calibration)
+        "file": "",               # default: <data_dir>/haze-calibration.json
+        "years": 2,               # period compared, back from now (CAMS on Open-Meteo starts Aug 2022)
+        "level": "1.5",           # AERONET level: 1.5 cloud-screened (recent), 2.0 quality-assured (trails)
+        "min_days": 60,           # days with both measurement and model a station needs
+        "margin_deg": 2.0,        # stations this far outside the regions count too
+        "radius_km": 300.0,       # stations blended into a place's factor
+        "request_delay_s": 8.0,   # between CAMS requests (each counts as ~25 Open-Meteo calls a year)
+        "max_sites_per_run": None,
+    },
     "areas": {
         "file": "",               # default: <data_dir>/areas.json (written by build_areas.py)
         "tiger_year": 2024,       # US Census TIGER/Line vintage build_areas.py downloads

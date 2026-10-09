@@ -6,6 +6,7 @@
     GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..]   (the official area containing the point)
     GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329
     GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &bbox=S,W,N,E][&percentile=90][&year=2026]
+    GET /v1/haze-calibration?lat=40.71&lon=-74.01
     GET /v1/status
 
 Each event comes from the best source available for it (its "source" field):
@@ -31,6 +32,10 @@ this year) by sky-meter readings nearby, else by the measured growth of skyglow 
 or with area=auto / bbox the `percentile` (default light_pollution.area_percentile, 90) over every atlas
 pixel in the area.
 
+/v1/haze-calibration returns the factor the app multiplies CAMS's aerosol optical depth by at a place:
+AERONET's measured haze over CAMS's at the stations within haze_calibration.radius_km, blended (and 1 where
+none is near). Built by haze_calibration.py; 503 until it has run.
+
 Run behind nginx (or any reverse proxy) for TLS. Standard library only, plus numpy (and rasterio for
 /v1/light-pollution).
 """
@@ -54,6 +59,7 @@ import numpy as np
 import areas
 import climatology
 import dem_layers
+import haze_calibration
 import light_pollution
 import terrain
 from climatology import ClimGrid, build_profile, clim_dir
@@ -436,6 +442,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    _cal: tuple = (None, None)          # (mtime, data) of haze-calibration.json
+
+    def haze_calibration(self) -> dict:
+        path = haze_calibration.calibration_path(self.store.cfg)
+        try:
+            mt = path.stat().st_mtime_ns
+        except OSError:
+            raise FileNotFoundError("no haze calibration yet (run haze_calibration.py)") from None
+        if Handler._cal[0] != mt:
+            Handler._cal = (mt, json.loads(path.read_text()))
+        return Handler._cal[1]
+
     def area_index(self) -> areas.AreaIndex:
         if Handler.areas is None:
             Handler.areas = areas.AreaIndex(areas_path(self.store.cfg))
@@ -459,6 +477,13 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/v1/light-pollution":
                 body, cache_s = light_pollution_query(self.lightpol, self.area_index(), q)
                 return self.send_json(200, body, cache_s=cache_s)
+            if url.path == "/v1/haze-calibration":
+                lat, lon = float(q["lat"][0]), float(q["lon"][0])
+                if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                    raise ValueError("lat/lon out of range")
+                radius = float(self.store.cfg.get("haze_calibration", {}).get("radius_km", 300))
+                body = haze_calibration.calibration_at(self.haze_calibration(), lat, lon, radius)
+                return self.send_json(200, body, cache_s=7 * 86400)
             if url.path == "/v1/area":
                 lat, lon = float(q["lat"][0]), float(q["lon"][0])
                 a = self.area_index().find(lat, lon)
