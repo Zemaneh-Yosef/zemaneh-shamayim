@@ -215,6 +215,17 @@ Without `moon=1` the response has no `moon` entry and is cached separately from 
 the first request for a place costs roughly twice the time (one extra pass over the area's spots); then
 it is cached.
 
+Each answer is cached in `<data_dir>/horizons`, so a place costs its computation once (point: ~1 s;
+0.8 km vantage search: ~5–10 s).
+
+`make_horizon.py` does the same from the command line (same output as `/v1/horizon`; tiles downloaded into `./tiles` unless `--no-download`):
+
+```sh
+venv/bin/python make_horizon.py 31.7486 35.2374 --height 802 --out armon-hanatziv.json
+venv/bin/python make_horizon.py 40.6092 -73.9683 --radius-km 0.8 --out brooklyn-vantage.json
+venv/bin/python make_horizon.py --bbox 40.60,-73.98,40.62,-73.955 --out midwood.json
+```
+
 ### Default elevation tiles
 
 Unless bare-earth layers are configured (next section), all heights come from the AWS Terrain Tiles:
@@ -224,18 +235,8 @@ key; `terrain.tiles_url`). They are downloaded into
 Those tiles carry ocean depths offshore (to -85 m within a few km of New York); the line of sight meets
 the water, so heights below sea level are raised to 0 and candidate spots in the water are skipped.
 Places really below sea level keep their heights when the observer stands in one (ground below
--20 m: the Dead Sea, Jordan valley, Death Valley). Where the set has no tile at all, the area is open sea. Each answer is cached in `<data_dir>/horizons`, so a
-place costs its computation once (point: ~1 s; 0.8 km vantage search: ~5–10 s). To work offline, put
-the tiles in `tiles_dir` yourself and set `"tiles_url": ""`; a missing tile is then reported (HTTP 503)
+-20 m: the Dead Sea, Jordan valley, Death Valley). Where the set has no tile at all, the area is open sea. To work offline, put the tiles in `tiles_dir` yourself and set `"tiles_url": ""`; a missing tile is then reported (HTTP 503)
 instead of downloaded.
-
-The same from the command line (same output; tiles downloaded into `./tiles` unless `--no-download`):
-
-```sh
-venv/bin/python make_horizon.py 31.7486 35.2374 --height 802 --out armon-hanatziv.json
-venv/bin/python make_horizon.py 40.6092 -73.9683 --radius-km 0.8 --out brooklyn-vantage.json
-venv/bin/python make_horizon.py --bbox 40.60,-73.98,40.62,-73.955 --out midwood.json
-```
 
 ### Bare-earth terrain (`terrain.layers`, dem_layers.py)
 
