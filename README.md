@@ -52,11 +52,12 @@ Dates no source covers are left out, and the app uses its next provider (e.g. mo
   (~600 MB) is downloaded, reduced to a ~25 MB global summary kept under `climatology/ncep-years/`, and
   deleted: about 6 GB once, then each March (when NOAA has finished the previous year) the window moves
   forward and the prior is rebuilt with one new year downloaded. New regions need no download. A year NOAA
-  has not finished is replaced by an earlier one. `ncep_years: 0` keeps NOAA's fixed 1991–2020 means.
-  An existing server with a 1991–2020 prior switches over on its next fetcher run.
+  has not finished is replaced by an earlier one. `ncep_years: 0` uses NOAA's fixed 1991–2020 means
+  instead. Whenever the stored prior doesn't match the configured window (a new year, a changed
+  `ncep_years`), the fetcher rebuilds it on its next run.
 * Optionally, `backfill_gfs.py` fills your own climatology with past GFS runs (see below), so every
   month has GFS-detail typical profiles from the start instead of waiting a year.
-* `serve.py` also answers `GET /v1/horizon` (terrain, below). It answers `GET /v1/path-profiles?lat=..&lon=..[&from=YYYY-MM-DD][&days=N]` (default:
+* `serve.py` answers `GET /v1/path-profiles?lat=..&lon=..[&from=YYYY-MM-DD][&days=N]` (default:
   yesterday to a week ahead; up to `api.max_days`, 400) with, for each sunrise and sunset, profiles at
   0, 10, 25, 50, 100, 150, 200, 300 and 400 km along the Sun's azimuth, interpolated in space, time
   of day and season, plus the `source` used. `GET /v1/status` shows the live cycle and, per region,
@@ -210,10 +211,15 @@ s/R · cos(azimuth − B). The geometric elevation of an entry, in the reference
 `geometricElevation(observerM, heightM, distanceKm) − tiltDeg`. In point mode it is the point's own
 horizon over the wider arc (`tiltDeg` 0).
 
-Without `moon=1` the response, and its cache key, are exactly as before. With it, the first request for
-a place costs roughly twice the time (one extra pass over the area's spots); then it is cached.
+Without `moon=1` the response has no `moon` entry and is cached separately from moon requests. With it,
+the first request for a place costs roughly twice the time (one extra pass over the area's spots); then
+it is cached.
 
-Elevation: SRTM tiles from `s3.amazonaws.com/elevation-tiles-prod/skadi` (free, no key), downloaded into
+### Default elevation tiles
+
+Unless bare-earth layers are configured (next section), all heights come from the AWS Terrain Tiles:
+SRTM worldwide, with USGS 3DEP in the US, from `s3.amazonaws.com/elevation-tiles-prod/skadi` (free, no
+key; `terrain.tiles_url`). They are downloaded into
 `terrain.tiles_dir` (default `<data_dir>/tiles`, ~2–8 MB each) the first time a request needs them.
 Those tiles carry ocean depths offshore (to -85 m within a few km of New York); the line of sight meets
 the water, so heights below sea level are raised to 0 and candidate spots in the water are skipped.
@@ -233,18 +239,18 @@ venv/bin/python make_horizon.py --bbox 40.60,-73.98,40.62,-73.955 --out midwood.
 
 ### Bare-earth terrain (`terrain.layers`, dem_layers.py)
 
-The default tiles are USGS 3DEP (bare earth) in the US but mainly SRTM elsewhere, and SRTM is a
-surface model: buildings and forest count as terrain and raise the horizon (later sunrise, earlier
-sunset). With `terrain.layers.sources` set, every point of every line of sight takes its height from the
-first source that has data there, then the plain tiles:
+The default tiles are bare earth only in the US (3DEP). Elsewhere they are SRTM, a surface model:
+buildings and forest count as terrain and raise the horizon (later sunrise, earlier sunset). With
+`terrain.layers.sources` set, every point of every line of sight takes its height from the first source
+in this list that has data there:
 
 | order | source | covers | notes |
 |---|---|---|---|
 | 1 | USGS 3DEP 1 arc-second | US | bare earth, NAVD88; read per 1x1 degree file straight from USGS's bucket |
 | 2 | NRCan MRDEM-30 DTM | Canada | bare earth, 30 m, CGVD2013; read from NRCan's VRT (Open Government Licence - Canada) |
-| 3 | an Israeli DTM | Israel | `enabled: false` until you have a file (any projection, e.g. EPSG:2039) |
+| 3 | an Israeli DTM | Israel | a file you supply (any projection, e.g. EPSG:2039); `enabled: false` until then. The Survey of Israel and the Geological Survey of Israel (25 m DTM) have one, but neither is openly published: it has to be licensed or requested |
 | 4 | FABDEM V1-2 | world | Copernicus 30 m with forests and buildings removed; CC BY-NC-SA 4.0, non-commercial only |
-| 5 | the plain tiles | world | as before, for whatever is left (e.g. open sea) |
+| 5 | the default tiles | world | the fallback for any pixel none of the above covers, mainly open sea |
 
 The line of sight crosses borders (Jerusalem's sunrise is over Jordan), so each source only fills the
 pixels it covers and the next one fills the rest. Differences between vertical datums (NAVD88,
@@ -266,11 +272,11 @@ sudo -u zmanim-sky venv/bin/python dem_layers.py info N40W074                   
 With `auto_build: true` (and rasterio installed) missing tiles are built during the first request that
 needs them: a 150 km horizon touches ~9 tiles, so that first request can take minutes. Prebuilding the
 cities you serve avoids it. Without rasterio, only prebuilt tiles are used and everything else falls
-back to the plain tiles.
+back to the default tiles.
 
 Safety: a source that doesn't cover a tile (no file there) is skipped quietly, but any other failure
 (network, corrupt file, a configured file missing) aborts that tile's build - nothing is saved, the
-plain tiles are used, and it is retried next time. A tile is never kept half-built from a worse source.
+default tiles are used, and it is retried next time. A tile is never kept half-built from a worse source.
 
 Merged tiles go to `<data_dir>/dem-layers/<signature>/` (float32, ~52 MB per land tile, memory-mapped;
 sea-only tiles are a marker file). The signature is a hash of the enabled sources, and it is part of the
@@ -282,8 +288,8 @@ from merged data carry `"terrain": {"layers": <signature>, "sources": [...]}`.
 With `area=auto` the client sends only its coordinates; the server finds the official area it is in -
 a neighbourhood, village, town or city - and searches that whole area, so everyone in it gets the same
 visible sunrise (the earliest anywhere in it) and the same latest sunset. The answer is cached per
-area, not per point. Use `fetchHorizonForArea(SERVER, lat, lon)` from `horizon-client.js`; it replaces
-looking the place up in a `neighborhoods.js` on the client and calling `fetchHorizonForBox`.
+area, not per point. Use `fetchHorizonForArea(SERVER, lat, lon)` from `horizon-client.js`; the client
+needs no list of neighbourhoods of its own.
 
 ```sh
 curl 'http://127.0.0.1:8787/v1/area?lat=40.609283058016736&lon=-73.96828881865329'      # which area (no polygons)
@@ -436,8 +442,9 @@ Each download is re-compressed as it arrives (`light_pollution.convert`, default
 `max_z_error` 0.001 mcd/m²) and saved as `light_pollution.file` (`lp_{row}_{col}_lerc.tif`); the
 original is deleted. The world then takes 52 MB instead of 488. Before it replaces anything the converted
 file is read back and checked (same grid, every pixel within `max_z_error`); a failed conversion leaves
-nothing behind and is retried on the next request. Originals already in the folder from before are
-converted the first time they are used (or all at once with `--download-all`). `"convert": {}` keeps
+nothing behind and is retried on the next request. Original tiles already in the folder (downloaded
+while `convert` was off, or copied in under their original names) are converted the first time they are used (or all at once with
+`--download-all`). `"convert": {}` keeps
 downloads as they come, under the URL's own file name. The options are GDAL GeoTIFF creation options, so
 another codec works too.
 
