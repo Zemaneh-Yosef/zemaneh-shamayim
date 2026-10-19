@@ -7,3 +7,4 @@ rasterio>=1.3  # dem_layers.py (builds merged bare-earth tiles) and light_pollut
 cdsapi>=0.7   # era5_profiles.py only: past air from the Copernicus CDS (free key in ~/.cdsapirc)
 h5py>=3.8      # era5_profiles.py --source ncar only (with fsspec, requests, aiohttp)
 fsspec>=2023.1
+xlrd>=2.0      # observations.py only: Keller's .XLS spreadsheet of Druk's observations
