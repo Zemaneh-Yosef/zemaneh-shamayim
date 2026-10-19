@@ -8,13 +8,16 @@ and 2022):
   DRUK9396.DAT          Rabbi Avraham Druk, Armon HaNatziv, 1993-96 (day-of-year rows, a column per year,
                         each time with a letter: the observer's code, kept as `code`)
   DRUK.001              the same, 1985-92 (quoted cells, "#N/A" where none)
+  DRUK_10 yr. observations.XLS   the fullest list, 1985-96 (1,921 sunrises; 1993-96 has 521, the .DAT only
+                        368): a column per year, times as fractions of a day, 42 where none, a Hebrew-letter
+                        code column after each year (needs xlrd)
   Golan_YYYY.csv        Yisroel Golan, Nevei Yaakov, 2009-13 ("hebrew date,Mon-DD-YYYY,H:MM:SS")
   Zuriel_*.csv          Rabbi Yosef Zuriel, Bnei Brak, 1961-92 ("HH:MM:SS,MM/DD/YY"; places surmised)
 
 All are Israel standard time (UTC+2) the whole year: June sunrises at Armon HaNatziv read 04:34. So the
 output's time zone is Etc/GMT-2 (POSIX sign: UTC+2), written as a comment line and to pass as --tz.
 
-    python3 observations.py DRUK9396.DAT DRUK.001 --out druk.csv
+    python3 observations.py "DRUK_10 yr. observations.XLS" --out druk.csv      # all of Druk's, 1985-96
     python3 observations.py Golan_20*.csv --out golan.csv
 
 Places (Keller & Hall): Armon HaNatziv 31.748553 N 35.237436 E (Rabbi Druk's shul, from Keller's DRUK
@@ -80,6 +83,41 @@ def druk_001(text: str):
                 yield d, f"{int(t.group(1)):02d}:{t.group(2)}:{t.group(3)}", t.group(4)
 
 
+XLS_CODES = {"ב": "B", "כ": "K", "מ": "M"}
+
+
+def druk_xls(path: Path):
+    """The spreadsheet: row 6 names the years (column 4 on), rows from 9 are days of the year (column 1,
+    1-366 with 29 February as day 60); a time is a fraction of a day, 42 = no observation."""
+    import xlrd
+    sh = xlrd.open_workbook(str(path)).sheets()[0]
+    years = {c: int(sh.cell_value(6, c)) for c in range(sh.ncols)
+             if isinstance(sh.cell_value(6, c), float) and 1900 < sh.cell_value(6, c) < 2100}
+    for r in range(9, sh.nrows):
+        doy = sh.cell_value(r, 1)
+        if not isinstance(doy, float) or not 1 <= doy <= 366:
+            continue
+        m, d = _leap_doy(int(doy))
+        for c, year in years.items():
+            v = sh.cell_value(r, c)
+            if not isinstance(v, float) or not 0 < v < 1:
+                continue
+            try:
+                day = date(year, m, d)
+            except ValueError:                           # 29 February in a common year
+                continue
+            sec = round(v * 86400)
+            code = XLS_CODES.get(str(sh.cell_value(r, c + 1)).strip(), "")
+            yield day, f"{sec // 3600:02d}:{sec // 60 % 60:02d}:{sec % 60:02d}", code
+
+
+def _leap_doy(doy: int) -> tuple[int, int]:
+    """Month and day of a day of the year counted in a leap year (as Druk's tables are: 60 = 29 Feb)."""
+    t = date(2000, 1, 1).toordinal() + doy - 1
+    x = date.fromordinal(t)
+    return x.month, x.day
+
+
 def golan(text: str):
     for line in text.splitlines():
         m = re.match(r"[^,]*,([A-Za-z]{3})-(\d{2})-(\d{4}),\s*" + TIME, line)
@@ -97,8 +135,10 @@ def zuriel(text: str):
 
 
 def read(path: Path):
-    text = path.read_text(errors="replace")
     name = path.name.lower()
+    if name.endswith(".xls"):
+        return list(druk_xls(path))
+    text = path.read_text(errors="replace")
     if name.endswith(".dat"):
         return list(druk_dat(text))
     if name.endswith(".001"):
@@ -107,7 +147,7 @@ def read(path: Path):
         return list(golan(text))
     if name.startswith("zuriel"):
         return list(zuriel(text))
-    raise SystemExit(f"{path}: unknown format (DRUK*.DAT, DRUK*.001, Golan_*.csv, Zuriel_*.csv)")
+    raise SystemExit(f"{path}: unknown format (DRUK*.DAT, DRUK*.001, DRUK*.XLS, Golan_*.csv, Zuriel_*.csv)")
 
 
 def main(argv=None) -> int:
