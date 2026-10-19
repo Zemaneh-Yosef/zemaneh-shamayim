@@ -9,6 +9,9 @@
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
     GET /v1/status
 
+Each column's lower air is stood on the real ground (api.follow_terrain; see climatology.follow_terrain):
+the weather model's terrain is smoothed over ~25 km, the air near the ground follows the real one.
+
 Each event comes from the best source available for it (its "source" field):
     "forecast"          the latest GFS run (about 7 days ahead)
     "climatology-gfs"   your own climatology, built from past GFS runs (once a month has enough data)
@@ -162,7 +165,7 @@ def sample(store: Store, region: str, hour: int, ij) -> np.ndarray:
             + blk[:, 1, 0] * fy * (1 - fx) + blk[:, 1, 1] * fy * fx)
 
 
-def profile_at(store: Store, region: str, t: datetime, lat: float, lon: float, dist_km: float):
+def profile_at(store: Store, region: str, t: datetime, lat: float, lon: float, dist_km: float, **follow):
     """Forecast profile, or None outside the grid / forecast window."""
     if store.cycle_id is None or region not in store.regions:
         return None
@@ -179,10 +182,11 @@ def profile_at(store: Store, region: str, t: datetime, lat: float, lon: float, d
     w = (tau - h0) / (h1 - h0)
     v = sample(store, region, h0, ij) * (1 - w) + sample(store, region, h1, ij) * w
     f = {n: v[i] for i, n in enumerate(store.regions[region]["fields"])}
-    return build_profile(f, store.regions[region]["levels_mb"], dist_km, lat, lon)
+    return build_profile(f, store.regions[region]["levels_mb"], dist_km, lat, lon, **follow)
 
 
-def clim_profile_at(store: Store, source: str, region: str, t: datetime, lat: float, lon: float, dist_km: float):
+def clim_profile_at(store: Store, source: str, region: str, t: datetime, lat: float, lon: float, dist_km: float,
+                    **follow):
     g = store.clim.get((source, region))
     if g is None:
         return None
@@ -195,21 +199,47 @@ def clim_profile_at(store: Store, source: str, region: str, t: datetime, lat: fl
     near = store.clim.get(("gfs-near", region)) if source == "gfs" else None
     if near is not None:
         f.update(near.fields_at(t, lat, lon, min_samples) or {})   # until it has filled in: without them
-    return build_profile(f, g.levels_mb, dist_km, lat, lon, g.near_surface_agl)
+    return build_profile(f, g.levels_mb, dist_km, lat, lon, g.near_surface_agl, **follow)
 
 
 SOURCES = ("forecast", "climatology-gfs", "climatology-ncep")
 
 
-def path_profiles(store: Store, lat: float, lon: float, start, days: int) -> dict:
+class Ground:
+    """The real ground under the path's columns (api.follow_terrain): elevation samples from the horizon
+    service's tiles within ground_radius_m of each point (climatology.real_ground averages them)."""
+
+    def __init__(self, tiles: terrain.Tiles, follow: dict):
+        self.tiles, self.follow = tiles, follow
+        r = float(follow.get("ground_radius_m", 1000.0))
+        k = np.linspace(-r, r, 5)
+        dy, dx = np.meshgrid(k, k)
+        keep = np.hypot(dx, dy) <= r * 1.0001
+        self.dy, self.dx = dy[keep], dx[keep]
+
+    def __call__(self, points: list[tuple[float, float]]) -> list[float]:
+        lat = np.array([p[0] for p in points])[:, None] + self.dy[None, :] / 111195.0
+        lon = np.array([p[1] for p in points])[:, None] + self.dx[None, :] / (111195.0 * np.cos(np.radians(lat)))
+        h = self.tiles.heights(lat, lon)
+        return [list(row) for row in h]
+
+
+def path_profiles(store: Store, lat: float, lon: float, start, days: int, ground: Ground | None = None) -> dict:
     cfg = store.cfg
     region = store.region_for(lat, lon)
     if region is None:
         raise LookupError("location is outside the configured regions")
+    follow = cfg["api"].get("follow_terrain") or {}
+    if not follow.get("enabled"):
+        ground = None
+    max_km = float(follow.get("max_km", 150.0))
+
+    def kw(g):
+        return {"ground_samples": g, "follow": follow} if g is not None else {}
     getters = {
-        "forecast": lambda t, a, b, d: profile_at(store, region, t, a, b, d),
-        "climatology-gfs": lambda t, a, b, d: clim_profile_at(store, "gfs", region, t, a, b, d),
-        "climatology-ncep": lambda t, a, b, d: clim_profile_at(store, "ncep", region, t, a, b, d),
+        "forecast": lambda t, a, b, d, g: profile_at(store, region, t, a, b, d, **kw(g)),
+        "climatology-gfs": lambda t, a, b, d, g: clim_profile_at(store, "gfs", region, t, a, b, d, **kw(g)),
+        "climatology-ncep": lambda t, a, b, d, g: clim_profile_at(store, "ncep", region, t, a, b, d, **kw(g)),
     }
     events = []
     for k in range(days):
@@ -220,10 +250,18 @@ def path_profiles(store: Store, lat: float, lon: float, start, days: int) -> dic
                 continue
             t, az = se
             points = [(dist, *destination(lat, lon, az, dist)) for dist in cfg["api"]["distances_km"]]
+            near = [k for k, (d_, _, _) in enumerate(points) if d_ <= max_km]
+            samples = [None] * len(points)
+            if ground is not None and near:
+                try:
+                    for k, smp in zip(near, ground([points[k][1:] for k in near])):
+                        samples[k] = smp
+                except Exception as e:                # never fail the profiles over the terrain
+                    log.warning("no ground heights for %.4f,%.4f (%s): columns left on the model's terrain", lat, lon, e)
             for src in SOURCES:
                 profs = []
-                for dist, plat, plon in points:
-                    p = getters[src](t, plat, plon, dist)
+                for (dist, plat, plon), smp in zip(points, samples):
+                    p = getters[src](t, plat, plon, dist, smp)
                     if p is None:
                         break                  # left the grid, the forecast window, or data too thin
                     profs.append(p)
@@ -527,7 +565,10 @@ class Handler(BaseHTTPRequestHandler):
                 start = solar_date(datetime.now(timezone.utc), lon) - timedelta(days=1)
                 days = int(q.get("days", ["8"])[0]) + 1
             days = max(1, min(days, int(self.store.cfg["api"]["max_days"])))
-            body = path_profiles(self.store, round(lat, 4), round(lon, 4), start, days)
+            ground = None
+            if Handler.horizons is not None:
+                ground = Ground(Handler.horizons.tiles, self.store.cfg["api"].get("follow_terrain") or {})
+            body = path_profiles(self.store, round(lat, 4), round(lon, 4), start, days, ground)
             only_clim = body["events"] and all(e["source"] != "forecast" for e in body["events"])
             return self.send_json(200, body, cache_s=86400 if only_clim else 1800)
         except (KeyError, ValueError) as e:

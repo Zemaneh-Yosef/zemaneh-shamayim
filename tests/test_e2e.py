@@ -71,6 +71,23 @@ def run(tmp: Path, json_out: Path | None):
     assert abs(t80["t"] - (12.0 - 0.0065 * 78 + 2.4)) < 0.05, t80
     assert abs(t80["p"] - 1013.25 * 2.718281828 ** (-9.80665 * 80 / (287.05 * (285.15 + t80["t"] + 273.15) / 2))) < 0.02, t80
     assert t80["t"] > plast["levels"][0]["t"], "the inversion reaches the client"
+    # columns stood on the real ground (api.follow_terrain): sunsets look west, over land here
+    flat = serve.path_profiles(serve.Handler.store, 40.7128, -74.006, now.date(), 2)
+    moved = serve.path_profiles(serve.Handler.store, 40.7128, -74.006, now.date(), 2,
+                                ground=lambda pts: [[150.0] * 13 for _ in pts])
+    ev0 = next(x for x in flat["events"] if x["event"] == "sunset")
+    ev1 = next(x for x in moved["events"] if x["event"] == "sunset")
+    for p0, p1 in zip(ev0["profiles"], ev1["profiles"]):
+        if p1["distanceKm"] <= 150 and not p1["water"]:
+            assert p1["groundM"] == 150.0 and p1["levels"][0]["h"] == 152.0, p1
+        else:
+            assert p1 == p0, p1                 # far columns (and water) as before
+    assert any("groundM" in p for p in ev1["profiles"]), ev1
+    full["api"]["follow_terrain"]["enabled"] = False
+    off = serve.path_profiles(serve.Handler.store, 40.7128, -74.006, now.date(), 2,
+                              ground=lambda pts: [[150.0] * 13 for _ in pts])
+    assert off == flat, "follow_terrain.enabled false: as before"
+    full["api"]["follow_terrain"]["enabled"] = True
     try:
         urllib.request.urlopen(base + "/v1/path-profiles?lat=10&lon=10")
         raise AssertionError("expected 404 outside region")
