@@ -16,10 +16,18 @@ follow_terrain with the server's elevation tiles), for royzmanimwebsite's _denoD
 that don't start with a date are skipped). Profiles reach api.distances_km (400 km) along the Sun's
 azimuth, as the API's do; api.follow_terrain applies unless --no-follow-terrain.
 
-The data comes from the Copernicus Climate Data Store (free; needs an account and its API key in
-~/.cdsapirc, see https://cds.climate.copernicus.eu/how-to-api; pip install cdsapi). Only a box around the
-paths is requested, one month at a time and only the hours around the events: a year of sunrises is a few
-MB. Downloads are kept in --cache (default <data_dir>/era5), so a rerun downloads nothing. --nc-dir reads
+Two places to get ERA5 from (--source):
+
+* "cds" (default): the Copernicus Climate Data Store (free; needs an account and its API key in
+  ~/.cdsapirc, see https://cds.climate.copernicus.eu/how-to-api; pip install cdsapi). Only a box around the
+  paths is requested, one month at a time and only the hours around the events: a year of sunrises is a few
+  MB, but requests wait in the CDS queue.
+* "ncar": NSF NCAR's copy on AWS Open Data (s3://nsf-ncar-era5, ds633.0; no key; pip install h5py fsspec
+  requests aiohttp). Its pressure-level files hold the whole globe per hour in one compressed chunk, so
+  each hour of temperature and geopotential is ~110 MB read (and dropped after cutting out the box): about
+  2 GB per 10 events, ~5 s per hour and variable; --parallel reads several at once.
+
+Either way the box is kept in --cache (default <data_dir>/era5), so a rerun downloads nothing. --nc-dir reads
 files you downloaded yourself instead (named era5-pl-YYYYMM.nc and era5-sl-YYYYMM.nc; pressure levels:
 temperature + geopotential; single levels: 2 m temperature, surface pressure, geopotential, land-sea
 mask, skin temperature), which is also what the tests do.
@@ -83,20 +91,23 @@ def plan(cfg: dict, lat: float, lon: float, dates: list[date], events: list[str]
 
 
 def hours_needed(events) -> dict[str, dict]:
-    """{YYYYMM: {"days": [...], "hours": [...]}}: the hours on either side of each event."""
+    """{YYYYMM: {"days": [...], "hours": [...], "pairs": [[day, hour], ...]}}: the hours on either side of each
+    event (the CDS takes days x hours; "pairs" are just the hours wanted)."""
     out: dict[str, dict] = {}
     for _, _, t, _, _ in events:
         for h in (t.replace(minute=0, second=0, microsecond=0), t.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)):
             k = h.strftime("%Y%m")
-            e = out.setdefault(k, {"days": set(), "hours": set()})
+            e = out.setdefault(k, {"days": set(), "hours": set(), "pairs": set()})
             e["days"].add(h.day)
             e["hours"].add(h.hour)
-    return {k: {"days": sorted(v["days"]), "hours": sorted(v["hours"])} for k, v in sorted(out.items())}
+            e["pairs"].add((h.day, h.hour))
+    return {k: {"days": sorted(v["days"]), "hours": sorted(v["hours"]), "pairs": [list(x) for x in sorted(v["pairs"])]}
+            for k, v in sorted(out.items())}
 
 
 def download(cache: Path, month: str, need: dict, box) -> tuple[Path, Path]:
     """The month's two files for this box (from the cache, or the CDS)."""
-    tag = hashlib.sha1(json.dumps([box, need]).encode()).hexdigest()[:10]
+    tag = hashlib.sha1(json.dumps([box, need["days"], need["hours"]]).encode()).hexdigest()[:10]
     pl, sl = cache / f"era5-pl-{month}-{tag}.nc", cache / f"era5-sl-{month}-{tag}.nc"
     if pl.exists() and sl.exists():
         return pl, sl
@@ -119,6 +130,101 @@ def download(cache: Path, month: str, need: dict, box) -> tuple[Path, Path]:
         tmp = target.with_suffix(".part")
         c.retrieve(dataset, {**common_req, **extra}, str(tmp))
         tmp.replace(target)
+    return pl, sl
+
+
+NCAR = "https://nsf-ncar-era5.s3.amazonaws.com"
+
+
+def _ncar_open(url: str):
+    import fsspec
+    import h5py
+    return h5py.File(fsspec.open(url, block_size=8 * 2**20).open(), "r")
+
+
+def _box_index(lat: np.ndarray, lon: np.ndarray, box):
+    """Row slice and column index array (ascending runs) of the box in a global 0..360 grid."""
+    n, w, s, e = box
+    rows = np.where((lat >= s - 1e-6) & (lat <= n + 1e-6))[0]
+    cols = np.array([int(round((x % 360) / 0.25)) % len(lon) for x in np.arange(w, e + 1e-9, 0.25)])
+    return slice(rows[0], rows[-1] + 1), cols
+
+
+def _read_cols(ds, lead, rows: slice, cols: np.ndarray):
+    """ds[lead..., rows, cols] reading contiguous runs (the box may cross 0 degrees)."""
+    parts, start = [], 0
+    for k in range(1, len(cols) + 1):
+        if k == len(cols) or cols[k] != cols[k - 1] + 1:
+            parts.append(np.asarray(ds[(*lead, rows, slice(cols[start], cols[k - 1] + 1))]))
+            start = k
+    return np.concatenate(parts, axis=-1)
+
+
+def _ncar_hour(args):
+    """One hour of temperature and geopotential in the box: (t, z) arrays [level, lat, lon]."""
+    day, hour, box, levels = args
+    out = []
+    for code, var in (("128_130_t", "T"), ("128_129_z", "Z")):
+        url = f"{NCAR}/e5.oper.an.pl/{day:%Y%m}/e5.oper.an.pl.{code}.ll025sc.{day:%Y%m%d}00_{day:%Y%m%d}23.nc"
+        with _ncar_open(url) as h:
+            rows, cols = _box_index(h["latitude"][:], h["longitude"][:], box)
+            lv = [int(round(x)) for x in h["level"][:]]
+            a = _read_cols(h[var], (hour, slice(None)), rows, cols)
+            out.append(a[[lv.index(p) for p in levels]])
+    return out
+
+
+def download_ncar(cache: Path, month: str, need: dict, box, parallel: int = 4) -> tuple[Path, Path]:
+    """The month's two files for this box, from NCAR's ERA5 on AWS, written in the CDS layout."""
+    import netCDF4
+    from concurrent.futures import ProcessPoolExecutor
+
+    tag = hashlib.sha1(json.dumps([box, need["pairs"], "ncar"]).encode()).hexdigest()[:10]
+    pl, sl = cache / f"era5-pl-{month}-{tag}.nc", cache / f"era5-sl-{month}-{tag}.nc"
+    if pl.exists() and sl.exists():
+        return pl, sl
+    cache.mkdir(parents=True, exist_ok=True)
+    y, m = int(month[:4]), int(month[4:])
+    hours = [datetime(y, m, d, h, tzinfo=timezone.utc) for d, h in need["pairs"]]
+    log.info("NCAR ERA5 %s: %d hours of temperature and geopotential", month, len(hours))
+    with ProcessPoolExecutor(parallel) as pool:
+        tz = list(pool.map(_ncar_hour, [(h.date(), h.hour, box, LEVELS) for h in hours]))
+    nxt = datetime(y + m // 12, m % 12 + 1, 1)
+    span = f"{y:04d}{m:02d}0100_{nxt - timedelta(hours=1):%Y%m%d%H}"
+    sfc = {}
+    for code, var, name in (("128_167_2t", "VAR_2T", "t2m"), ("128_134_sp", "SP", "sp"), ("128_235_skt", "SKT", "skt")):
+        with _ncar_open(f"{NCAR}/e5.oper.an.sfc/{month}/e5.oper.an.sfc.{code}.ll025sc.{span}.nc") as h:
+            rows, cols = _box_index(h["latitude"][:], h["longitude"][:], box)
+            lat = np.asarray(h["latitude"][rows])
+            lon = (np.asarray(h["longitude"][:])[cols] + 180) % 360 - 180
+            sfc[name] = np.stack([_read_cols(h[var], ((hh.day - 1) * 24 + hh.hour,), rows, cols) for hh in hours])
+    for code, var, name in (("128_129_z", "Z", "z"), ("128_172_lsm", "LSM", "lsm")):
+        with _ncar_open(f"{NCAR}/e5.oper.invariant/197901/e5.oper.invariant.{code}.ll025sc.1979010100_1979010100.nc") as h:
+            rows, cols = _box_index(h["latitude"][:], h["longitude"][:], box)
+            sfc[name] = np.broadcast_to(_read_cols(h[var], (0,), rows, cols), sfc["t2m"].shape)
+    base = datetime(1900, 1, 1, tzinfo=timezone.utc)
+    for path, kind in ((pl, "pl"), (sl, "sl")):
+        tmp = path.with_suffix(".part")
+        with netCDF4.Dataset(tmp, "w") as ds:
+            ds.createDimension("valid_time", len(hours))
+            ds.createDimension("latitude", len(lat))
+            ds.createDimension("longitude", len(lon))
+            tv = ds.createVariable("valid_time", "i8", ("valid_time",))
+            tv.units = "hours since 1900-01-01 00:00:00"
+            tv[:] = [int((h - base).total_seconds() // 3600) for h in hours]
+            ds.createVariable("latitude", "f8", ("latitude",))[:] = lat
+            ds.createVariable("longitude", "f8", ("longitude",))[:] = lon
+            dims = ("valid_time", "latitude", "longitude")
+            if kind == "pl":
+                ds.createDimension("pressure_level", len(LEVELS))
+                ds.createVariable("pressure_level", "f8", ("pressure_level",))[:] = LEVELS
+                d4 = ("valid_time", "pressure_level", "latitude", "longitude")
+                ds.createVariable("t", "f4", d4, zlib=True)[:] = np.stack([a for a, _ in tz])
+                ds.createVariable("z", "f4", d4, zlib=True)[:] = np.stack([b for _, b in tz])
+            else:
+                for name, arr in sfc.items():
+                    ds.createVariable(name, "f4", dims, zlib=True)[:] = arr
+        tmp.replace(path)
     return pl, sl
 
 
@@ -240,6 +346,9 @@ def main(argv=None) -> int:
     ap.add_argument("--to", dest="end", type=date.fromisoformat, help="with --from (default: that day)")
     ap.add_argument("--event", choices=["sunrise", "sunset", "both"], default="both")
     ap.add_argument("--out", type=Path, required=True)
+    ap.add_argument("--source", choices=["cds", "ncar"], default="cds",
+                    help="the Copernicus CDS (key needed) or NSF NCAR's copy on AWS (no key, more to read)")
+    ap.add_argument("--parallel", type=int, default=4, help="--source ncar: hours read at once (default 4)")
     ap.add_argument("--cache", type=Path, help="downloads kept here (default <data_dir>/era5)")
     ap.add_argument("--nc-dir", type=Path, help="read era5-pl-YYYYMM.nc / era5-sl-YYYYMM.nc from here instead")
     ap.add_argument("--no-follow-terrain", action="store_true", help="leave the columns on ERA5's terrain")
@@ -259,7 +368,10 @@ def main(argv=None) -> int:
         files = lambda month, need, box: (a.nc_dir / f"era5-pl-{month}.nc", a.nc_dir / f"era5-sl-{month}.nc")   # noqa: E731
     else:
         cache = a.cache or Path(cfg["data_dir"]) / "era5"
-        files = lambda month, need, box: download(cache, month, need, box)   # noqa: E731
+        if a.source == "ncar":
+            files = lambda month, need, box: download_ncar(cache, month, need, box, max(1, a.parallel))   # noqa: E731
+        else:
+            files = lambda month, need, box: download(cache, month, need, box)   # noqa: E731
     ground = None
     if not a.no_follow_terrain:
         import serve
