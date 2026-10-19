@@ -358,7 +358,8 @@ Setup:
 ```sh
 sudo -u zmanim-sky venv/bin/pip install rasterio      # GDAL included; needed to BUILD merged tiles and for /v1/light-pollution
 # FABDEM: download the 10x10 degree zips you need from https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn
-# (Israel / Jordan: N30E030-N40E040; US / Canada borders are covered by 3DEP and MRDEM) and unzip the
+# (Israel / Jordan: N30E030-N40E040; France: N40W010-N50E000, N40E000-N50E010, N50E000-N60E010; US /
+# Canada borders are covered by 3DEP and MRDEM) and unzip the
 # 1x1 degree .tif files into <data_dir>/fabdem/. The config expects <name>_FABDEM_V1-2.tif with the
 # south-west-corner name (e.g. N31E035_FABDEM_V1-2.tif); adjust the template if your files differ.
 sudo -u zmanim-sky venv/bin/python dem_layers.py build --around 40.609283058016736 -73.96828881865329   # New York: tiles for a 150 km horizon
@@ -374,6 +375,19 @@ back to the default tiles.
 Safety: a source that doesn't cover a tile (no file there) is skipped quietly, but any other failure
 (network, corrupt file, a configured file missing) aborts that tile's build - nothing is saved, the
 default tiles are used, and it is retried next time. A tile is never kept half-built from a worse source.
+
+Adding a source's files later (say FABDEM for a new country, where the tiles were built from the default
+tiles until then) doesn't change tiles already built. Rebuild them, then restart the API (it keeps tiles in
+memory):
+
+```sh
+sudo -u zmanim-sky venv/bin/python dem_layers.py build --bbox 41 -6 52 10 --force --existing   # France's built tiles
+sudo systemctl restart zmanim-sky-api
+```
+
+A rebuild that changes a tile's heights raises its revision (`<tile>.rev`), which is part of the terrain
+version of every horizon within `max_km` of it (`terrain.layers` in `/v1/horizon` and
+`/v1/terrain-version`): those horizons are recomputed and royzmanimwebsite downloads them again, and no others.
 
 Merged tiles go to `<data_dir>/dem-layers/<signature>/` (float32, ~52 MB per land tile, memory-mapped;
 sea-only tiles are a marker file). The signature is a hash of the enabled sources, and it is part of the

@@ -203,6 +203,12 @@ class Builder:
     def path(self, lat_i: int, lon_i: int) -> Path:
         return self.out / f"{terrain.tile_name(lat_i, lon_i)}.npy"
 
+    def _bump_rev(self, lat_i: int, lon_i: int, changed: bool):
+        if changed:
+            r = tile_rev(self.out, lat_i, lon_i) + 1
+            self.path(lat_i, lon_i).with_suffix(".rev").write_text(str(r))
+            log.info("%s changed: revision %d", terrain.tile_name(lat_i, lon_i), r)
+
     def build(self, lat_i: int, lon_i: int, force: bool = False) -> "np.ndarray | None":
         """The merged tile (float32, N x N, row 0 = north edge), built and saved if not there yet;
         None for open sea (no source has data and there is no skadi tile), like Tiles.tile()."""
@@ -219,6 +225,9 @@ class Builder:
                 return None
             if f.exists() and not force:
                 return np.load(f, mmap_mode="r")
+            # a rebuild that changes the heights raises the tile's revision (tile_rev), which is part of the
+            # terrain version of every horizon reaching it (serve.Horizons.layers_version)
+            old = np.array(np.load(f, mmap_mode="r")) if f.exists() else ("sea" if sea.exists() else None)
             t0 = time.time()
             # sample centres on the 1" grid lines, edges included (like .hgt)
             transform = Affine(STEP, 0, lon_i - STEP / 2, 0, -STEP, lat_i + 1 + STEP / 2)
@@ -235,11 +244,15 @@ class Builder:
                     stats["sea (no data)"] = float(rest.sum()) / dst.size
             if stats.get("sea (no data)") == 1.0:              # all sea: a marker, not 52 MB of zeros
                 sea.write_text("")
+                f.unlink(missing_ok=True)
+                self._bump_rev(lat_i, lon_i, old is not None and not (isinstance(old, str)))
                 log.info("%s is open sea", terrain.tile_name(lat_i, lon_i))
                 return None
             tmpf = f.with_name(f.stem + ".tmp.npy")
             np.save(tmpf, dst)
             os.replace(tmpf, f)
+            sea.unlink(missing_ok=True)
+            self._bump_rev(lat_i, lon_i, old is not None and (isinstance(old, str) or not np.array_equal(old, dst)))
             f.with_suffix(".json").write_text(json.dumps(
                 {"tile": terrain.tile_name(lat_i, lon_i), "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                  "seconds": round(time.time() - t0, 1), "fraction_by_source": {k: round(v, 4) for k, v in stats.items()}},
@@ -247,6 +260,14 @@ class Builder:
             log.info("built %s in %.1f s: %s", terrain.tile_name(lat_i, lon_i), time.time() - t0,
                      ", ".join(f"{k} {v:.0%}" for k, v in stats.items()))
             return np.load(f, mmap_mode="r")
+
+
+def tile_rev(out: Path, lat_i: int, lon_i: int) -> int:
+    """How many times a merged tile was rebuilt with different heights (0: as first built, or not built)."""
+    try:
+        return int((Path(out) / f"{terrain.tile_name(lat_i, lon_i)}.rev").read_text())
+    except (OSError, ValueError):
+        return 0
 
 
 def tile_fields(lat_i: int, lon_i: int) -> dict:
@@ -442,7 +463,10 @@ def main():
     g.add_argument("--around", nargs=2, type=float, metavar=("LAT", "LON"))
     g.add_argument("--bbox", nargs=4, type=float, metavar=("S", "W", "N", "E"))
     b.add_argument("--km", type=float, default=None, help="radius for --around (default terrain.max_km)")
-    b.add_argument("--force", action="store_true", help="rebuild tiles that exist")
+    b.add_argument("--force", action="store_true", help="rebuild tiles that exist (e.g. after adding source files; "
+                   "restart the API afterwards: it keeps tiles in memory)")
+    b.add_argument("--existing", action="store_true", help="only tiles already built (with --force: rebuild "
+                   "those; the others are built from the new files when first needed)")
     i = sub.add_parser("info", help="show which sources a built tile came from")
     i.add_argument("tile", help="e.g. N40W074")
     a = ap.parse_args()
@@ -460,6 +484,8 @@ def main():
     base = terrain.Tiles(Path(t["tiles_dir"] or Path(cfg["data_dir"]) / "tiles"), t["tiles_url"] or None)
     builder = make_builder(cfg, base)
     todo = tiles_around(a.around[0], a.around[1], a.km or float(t["max_km"])) if a.around else tiles_in(*a.bbox)
+    if a.existing:
+        todo = [k for k in todo if builder.path(*k).exists() or builder.path(*k).with_suffix(".sea").exists()]
     log.info("%d tiles -> %s", len(todo), out)
     for lat_i, lon_i in todo:
         builder.build(lat_i, lon_i, force=a.force)

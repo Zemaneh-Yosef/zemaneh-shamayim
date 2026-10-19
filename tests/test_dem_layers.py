@@ -159,6 +159,31 @@ def main():
         t2 = terrain.Tiles(tiles_dir, None, layered_dir=dem_layers.layers_dir(cfg), builder=builder)
         check(t2.tile(31, 34) is None and t2.layered_used == 0, "Tiles then falls back to the plain tiles")
 
+        # revisions: a forced rebuild with the same heights keeps the tile's revision, one with different
+        # heights (a source's file added or removed) raises it, and with it the version of horizons reaching it
+        from types import SimpleNamespace
+        import serve
+        out = dem_layers.layers_dir(cfg)
+        check(dem_layers.tile_rev(out, LAT_I, LON_I) == 0, "first build: revision 0")
+        builder.build(LAT_I, LON_I, force=True)
+        check(dem_layers.tile_rev(out, LAT_I, LON_I) == 0, "rebuilt with the same heights: still 0")
+        fab = tmp / "fabdem" / "N31E035_FABDEM_V1-2.tif"
+        fab.rename(fab.with_suffix(".away"))
+        builder.build(LAT_I, LON_I, force=True)
+        check(dem_layers.tile_rev(out, LAT_I, LON_I) == 1, "a source's file gone: heights changed, revision 1")
+        fab.with_suffix(".away").rename(fab)
+        builder.build(LAT_I, LON_I, force=True)
+        check(dem_layers.tile_rev(out, LAT_I, LON_I) == 2, "and back: revision 2")
+        sig_now = dem_layers.signature(layers)
+        hz = SimpleNamespace(dem=sig_now, layers_out=out)
+        near = {"lat": 31.5, "lon": 36.5, "bbox": None, "radius_km": 0.0, "max_km": 150.0}
+        far = {**near, "lat": 25.0}
+        v_near = serve.Horizons.layers_version(hz, near)
+        check(v_near.startswith(sig_now + ".") and serve.Horizons.layers_version(hz, far) == sig_now,
+              f"horizon reaching the rebuilt tile: version {v_near}; one 650 km away: the plain signature")
+        builder.build(33, 30, force=True)
+        check(dem_layers.tile_rev(out, 33, 30) == 0, "sea tile rebuilt as sea: unchanged")
+
         # signature changes with the source list -> separate folder (old tiles never reused)
         sig1 = dem_layers.signature(layers)
         sig2 = dem_layers.signature({**layers, "sources": layers["sources"][1:]})

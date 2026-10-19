@@ -414,6 +414,7 @@ class Horizons:
         if self.dem:
             log.info("bare-earth layers %s (%s): %s", self.dem, layered_dir, ", ".join(self.dem_sources))
         self.tiles = terrain.Tiles(folder, url, user_agent=ua, layered_dir=layered_dir, builder=builder)
+        self.layers_out = layered_dir
         # finer terrain for the near range (terrain.fine), e.g. USGS 3DEP 1/3"
         self.tiles.fine = dem_layers.make_fine(cfg)
         self.fine = self.tiles.fine and {"sig": self.tiles.fine.sig, "km": self.tiles.fine.max_km}
@@ -481,10 +482,27 @@ class Horizons:
         dlon = km / (111.19 * max(0.05, math.cos(math.radians((s + n) / 2))))
         return self.tiles.fine.version(s - dlat, w - dlon, n + dlat, e + dlon)
 
+    def layers_version(self, p: dict) -> str | None:
+        """The bare-earth layers' part in a horizon with these params: their signature, plus the revisions of
+        the merged tiles within its reach that were rebuilt with different heights (dem_layers.py build
+        --force, e.g. after adding a region's FABDEM files), so such a rebuild renews those horizons only."""
+        if not self.dem:
+            return None
+        s, w, n, e = p["bbox"] or (p["lat"], p["lon"], p["lat"], p["lon"])
+        km = p["max_km"] + (0.0 if p["bbox"] else p["radius_km"])
+        dlat = km / 111.19
+        dlon = km / (111.19 * max(0.05, math.cos(math.radians((s + n) / 2))))
+        revs = {f"{i},{j}": r for i, j in dem_layers.tiles_in(s - dlat, w - dlon, n + dlat, e + dlon)
+                if (r := dem_layers.tile_rev(self.layers_out, i, j))}
+        if not revs:
+            return self.dem
+        return f"{self.dem}.{hashlib.sha1(json.dumps(revs, sort_keys=True).encode()).hexdigest()[:8]}"
+
     def terrain_version(self, q: dict, max_bbox_km: float | None = None) -> dict:
         """/v1/terrain-version: what a horizon with this query would be made from, without computing it.
-        A stored horizon whose terrain.fine.version differs (or is missing where this has one) is out of date."""
-        return {"fine": self.fine_version(self.params(q, max_bbox_km)), "layers": self.dem}
+        A stored horizon whose terrain.fine.version or terrain.layers differs is out of date."""
+        p = self.params(q, max_bbox_km)
+        return {"fine": self.fine_version(p), "layers": self.layers_version(p)}
 
     def compute(self, q: dict, max_bbox_km: float | None = None) -> bytes:
         p = self.params(q, max_bbox_km)
@@ -493,7 +511,8 @@ class Horizons:
         # the terrain source list and the horizon algorithm's version are part of the key, so changing either
         # recomputes (neither changes the key while unset / at version 1, so old caches stay valid); the fine
         # terrain only where it has data
-        key_src = {**p, "dem": self.dem} if self.dem else dict(p)
+        layers_v = self.layers_version(p)
+        key_src = {**p, "dem": layers_v} if layers_v else dict(p)
         if fine_v:
             key_src["fine"] = self.fine
         if terrain.ALGO_VERSION != 1:
@@ -510,8 +529,8 @@ class Horizons:
                                       min_km=p["min_km"], max_km=p["max_km"],
                                       max_candidates=int(self.cfg["max_candidates"]),
                                       moon=p.get("moon", False), moon_percentile=p.get("moon_percentile", 90.0))
-            if self.dem:
-                res["terrain"] = {"layers": self.dem, "sources": self.dem_sources}
+            if layers_v:
+                res["terrain"] = {"layers": layers_v, "sources": self.dem_sources}
             if fine_v:
                 res.setdefault("terrain", {})["fine"] = {"signature": self.fine["sig"], "version": fine_v,
                                                          "withinKm": self.fine["km"], "sources": self.tiles.fine.names}
