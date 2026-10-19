@@ -471,6 +471,8 @@ def main():
     i.add_argument("tile", help="e.g. N40W074")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # GDAL's own notes, e.g. the 404 of a per-tile source (USGS 3DEP) outside its coverage: expected, not news
+    logging.getLogger("rasterio").setLevel(logging.WARNING)
 
     cfg = load_config(a.config)
     t = cfg["terrain"]
