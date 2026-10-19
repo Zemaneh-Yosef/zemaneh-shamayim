@@ -216,6 +216,36 @@ The 80 m / 100 m air keeps its own list of runs, so running the backfill again a
 the runs you already have, downloading only those two fields (~2 MB per forecast hour, a few GB in all). GFS
 has them from v16 (22 March 2021); earlier runs are noted in that store without data.
 
+### Upgrading
+
+From a fresh checkout of the new version. `config.json` and the data in `/var/lib/zmanim-sky` are kept:
+the copy brings no `config.json`, and new config keys fall back to their defaults.
+
+```sh
+sudo systemctl stop zmanim-sky-fetch.timer zmanim-sky-api.service
+sudo cp -r ./* /opt/zmanim-sky-server/
+sudo chown -R zmanim-sky: /opt/zmanim-sky-server
+cd /opt/zmanim-sky-server
+sudo -u zmanim-sky venv/bin/pip install -r requirements.txt
+diff <(sudo -u zmanim-sky python3 -c 'import json;print(*sorted(json.load(open("config.example.json"))),sep="\n")') \
+     <(sudo -u zmanim-sky python3 -c 'import json;print(*sorted(json.load(open("config.json"))),sep="\n")')   # sections new in the example
+sudo cp deploy/*.service deploy/*.timer /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl start zmanim-sky-fetch.timer zmanim-sky-api.service
+curl http://127.0.0.1:8787/v1/status
+```
+
+If an upgrade adds fields to the GFS fetch, the next fetcher run sees that the stored cycle lacks them and
+downloads it again; until then the API serves the old cycle. Fields added to the climatology have their
+own list of runs: run the backfill again (above) to fill them for past runs. A backfill already running
+can be left to finish first.
+
+Upgrading to the version with the 80 m / 100 m air and ensembles: nothing to change in `config.json` (the
+GEFS ensemble and `terrain.fine` are opt-in, `follow_terrain` stays off). Run the backfill once more, which
+fills `gfs-near` and `gfs-moments` for the runs you already have; until it has, climatology dates are
+served as before, without the near-surface air or ensembles. `observations.py` needs `xlrd`, installed by
+the requirements line above.
+
 ## Resources (default config: continental US + Israel, 2 cycles kept)
 
 * Download: roughly 200–400 MB per cycle, about 280 requests spaced 2 s apart, twice a day.
