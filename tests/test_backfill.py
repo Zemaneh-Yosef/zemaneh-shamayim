@@ -23,7 +23,7 @@ sys.path.insert(0, str(HERE))
 import backfill_gfs  # noqa: E402
 import fetch_gfs  # noqa: E402
 from climatology import ClimGrid, archived_cycles, clim_dir  # noqa: E402
-from common import Cycle, forecast_hours, load_config  # noqa: E402
+from common import Cycle, cycle_field_names, field_names, forecast_hours, load_config, near_fields  # noqa: E402
 from make_synthetic import write as write_grib  # noqa: E402
 
 REGION = {"name": "nyc", "north": 43.0, "south": 38.0, "west": -78.0, "east": -68.0}
@@ -37,9 +37,10 @@ def check(cond, msg):
     print("  ok:", msg)
 
 
-def archive_file(path: Path, t2m_sea: float):
+def archive_file(path: Path, t2m_sea: float, near_m=(80, 100)):
     """A GRIB file over WIDE with an unwanted RH message in the middle, plus its .idx."""
-    write_grib(path, WIDE, t2m_land=t2m_sea - 2, t2m_sea=t2m_sea, skin_sea=t2m_sea + 4, coast_lon=-74.0)
+    write_grib(path, WIDE, t2m_land=t2m_sea - 2, t2m_sea=t2m_sea, skin_sea=t2m_sea + 4, coast_lon=-74.0,
+               near_m=near_m, near_inversion_k=1.0)
     msgs = []
     with open(path, "rb") as f:
         while (h := eccodes.codes_grib_new_from_file(f)) is not None:
@@ -130,15 +131,27 @@ def run(tmp: Path):
                 f.write_bytes(b"junk" * 50 + f.read_bytes())
     for run_h in (0, 12):
         for fh in backfill_gfs.HOURS:
-            archive_file(arch / f"gfs.20210301/{run_h:02d}/gfs.t{run_h:02d}z.pgrb2.0p25.f{fh:03d}", 273.15)
+            archive_file(arch / f"gfs.20210301/{run_h:02d}/gfs.t{run_h:02d}z.pgrb2.0p25.f{fh:03d}", 273.15,
+                         near_m=())              # before GFS v16: no 80 m / 100 m air
     RangeHandler.root = arch
     srv = ThreadingHTTPServer(("127.0.0.1", 0), RangeHandler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     url = f"http://127.0.0.1:{srv.server_address[1]}"
 
     idx = (arch / "gfs.20251001/00/atmos/gfs.t00z.pgrb2.0p25.f001.idx").read_text()
-    rngs = backfill_gfs.ranges_from_idx(idx, backfill_gfs.wanted(cfg["pressure_levels_mb"]))
-    check(len(rngs) == 2 and rngs[-1][1] is None, f"adjacent fields merged, the RH message left out: {rngs}")
+    rngs = backfill_gfs.ranges_from_idx(idx, backfill_gfs.wanted(field_names(cfg["pressure_levels_mb"])))
+    check(len(rngs) == 2, f"adjacent fields merged, the RH message and the 80 m / 100 m air left out: {rngs}")
+    rngs = backfill_gfs.ranges_from_idx(idx, backfill_gfs.wanted(cycle_field_names(cfg)))
+    check(len(rngs) == 2 and rngs[-1][1] is None, f"with the 80 m / 100 m air: {rngs}")
+    old = (arch / "gfs.20210301/00/gfs.t00z.pgrb2.0p25.f001.idx").read_text()
+    try:
+        backfill_gfs.ranges_from_idx(old, backfill_gfs.wanted(cycle_field_names(cfg)))
+        check(False, "should have failed")
+    except ValueError:
+        pass
+    check(backfill_gfs.ranges_from_idx(old, backfill_gfs.wanted(cycle_field_names(cfg)),
+                                       backfill_gfs.wanted(near_fields(cfg["near_surface_m"]))),
+          "the 80 m / 100 m air is optional (absent before GFS v16)")
 
     print("4. dry run, then the backfill")
     base = ["--config", str(cfgp), "--url", url, "--every", "4"]
@@ -162,6 +175,11 @@ def run(tmp: Path):
     check(g.meta["lats"] == json.loads((tmp / "data/gfs" / live.id / "nyc/meta.json").read_text())["lats"],
           "same grid as the live data (cropped from the wider archive grid)")
     check(len(archived_cycles(clim_dir(cfg, "gfs", "nyc"))) == 6, "ledger: the live run + 5 archive runs")
+    n = ClimGrid(clim_dir(cfg, "gfs-near", "nyc"))
+    check(n.fields == ["t80m", "t100m"] and n.counts[9].tolist() == g.counts[9].tolist(),
+          f"the 80 m / 100 m air in its own store, same counts: {n.fields} {n.counts[9].tolist()}")
+    fn = n.fields_at(datetime(2026, 10, 15, 16, 30, tzinfo=timezone.utc), 40.75, -73.0, min_samples=3)
+    check(abs(fn["t80m"] - (293.15 - 0.0065 * 78 + 0.8)) < 0.02, f"80 m air from the archive ({fn['t80m'] - 273.15:.2f} C)")
 
     print("5. rerun adds nothing; pre-2021-v16 layout (no atmos/) works")
     tg = {"nyc": clim_dir(cfg, "gfs", "nyc")}
@@ -173,6 +191,9 @@ def run(tmp: Path):
     assert backfill_gfs.main(base + ["--start", "2021-03-01", "--end", "2021-03-01", "--every", "1"]) == 0
     g = ClimGrid(clim_dir(cfg, "gfs", "nyc"))
     check(g.counts[2].tolist() == [3] * 8, f"March 2021 from the old layout: {g.counts[2].tolist()}")
+    n = ClimGrid(clim_dir(cfg, "gfs-near", "nyc"))
+    check(n.counts[2].tolist() == [0] * 8 and "2021030100" in archived_cycles(n.path),
+          "no 80 m / 100 m air before GFS v16: recorded without data, so it isn't asked again")
     f = g.fields_at(datetime(2026, 3, 16, 7, tzinfo=timezone.utc), 40.75, -73.0, min_samples=3)
     check(f is not None and abs(f["t2m"] - 273.15) < 0.6, "March values from the 2021 run")
 
@@ -182,7 +203,19 @@ def run(tmp: Path):
     added = (ClimGrid(clim_dir(cfg, "gfs", "nyc")).counts[9] - before).tolist()
     check(added == [3, 0, 3, 3, 3, 3, 3, 3], f"Oct 13 added without its damaged 00Z f004 (slot counts +{added})")
 
-    print("7. the live fetcher skips a run the backfill already added")
+    print("7. a climatology from before the 80 m / 100 m air: only those fields are fetched")
+    import shutil
+    shutil.rmtree(clim_dir(cfg, "gfs-near", "nyc"))
+    main_before = ClimGrid(clim_dir(cfg, "gfs", "nyc")).counts.copy()
+    n_req = len(RangeHandler.requests)
+    assert backfill_gfs.main(base + ["--start", "2025-10-01", "--end", "2025-10-09"]) == 0
+    ranges = [r for _, r in RangeHandler.requests[n_req:] if r]
+    check(ClimGrid(clim_dir(cfg, "gfs", "nyc")).counts.tolist() == main_before.tolist(), "main store untouched")
+    n = ClimGrid(clim_dir(cfg, "gfs-near", "nyc"))
+    check(n.counts[9].tolist() == [9, 9, 9, 9, 6, 6, 6, 6], f"near store filled from the archive: {n.counts[9].tolist()}")
+    check(len(ranges) == 5 * 4, f"one byte range per forecast hour (just the two messages): {len(ranges)}")
+
+    print("8. the live fetcher skips a run the backfill already added")
     bf = Cycle(datetime(2025, 10, 9, 0, tzinfo=timezone.utc))
     for h in forecast_hours(cfg):
         write_grib(src / REGION["name"] / fetch_gfs.grib_file_name(bf, h), REGION,

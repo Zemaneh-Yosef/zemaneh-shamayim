@@ -2,7 +2,9 @@
 level types and north-to-south scanning) for testing the pipeline without network access.
 
 Field: standard-lapse columns anchored at a 2 m temperature; land west of `coast_lon`, water east of
-it with its own surface temperature."""
+it with its own surface temperature. The air at `near_m` metres above the ground (GFS's 80 m and 100 m)
+is `near_inversion_k` warmer per 100 m than the standard lapse rate would make it; near_m=() writes a file
+without them, like GFS before v16."""
 from __future__ import annotations
 
 import math
@@ -25,7 +27,7 @@ def column(t2m_k: float, psfc_pa: float, orog: float):
 
 
 def write(path: Path, region: dict, t2m_land: float, t2m_sea: float, skin_sea: float,
-          coast_lon: float, orog_land: float = 0.0) -> None:
+          coast_lon: float, orog_land: float = 0.0, near_m=(80, 100), near_inversion_k: float = 0.0) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lats = np.arange(region["north"], region["south"] - 1e-9, -0.25)        # north -> south, like GFS
     lons = np.arange(region["west"], region["east"] + 1e-9, 0.25)
@@ -37,6 +39,7 @@ def write(path: Path, region: dict, t2m_land: float, t2m_sea: float, skin_sea: f
     tsfc = np.where(land > 0, t2m_land + 3, skin_sea)
     fields = [
         ((0, 0, 0), "heightAboveGround", 2, t2m),
+        *(((0, 0, 0), "heightAboveGround", h, t2m - 0.0065 * (h - 2) + near_inversion_k * h / 100) for h in near_m),
         ((0, 0, 0), "surface", 0, tsfc),
         ((0, 3, 0), "surface", 0, psfc),
         ((0, 3, 5), "surface", 0, orog),

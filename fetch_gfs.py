@@ -28,7 +28,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common import Cycle, field_names, forecast_hours, gfs_dir, load_config, write_json_atomic
+from common import Cycle, cycle_field_names, forecast_hours, gfs_dir, load_config, write_json_atomic
 
 log = logging.getLogger("fetch_gfs")
 
@@ -55,6 +55,8 @@ def filter_url(cfg: dict, cycle: Cycle, hour: int, region: dict) -> str:
     }
     for p in cfg["pressure_levels_mb"]:
         q[f"lev_{p}_mb"] = "on"
+    for h in cfg.get("near_surface_m", []):
+        q[f"lev_{h}_m_above_ground"] = "on"
     return base + "?" + urllib.parse.urlencode(q)
 
 
@@ -82,11 +84,11 @@ def download(cfg: dict, url: str, dest: Path, attempts: int = 4) -> bool:
     raise RuntimeError(f"giving up on {url}")
 
 
-def decode(path: Path, levels_mb: list[int]):
-    """Decode one grib-filter file into (array[field, lat, lon] float32, lats ascending, lons)."""
+def decode(path: Path, names: list[str]):
+    """Decode one grib-filter file into (array[field, lat, lon] float32, lats ascending, lons), with the
+    fields `names` (common.field_names / near_fields) in that order; each must be in the file."""
     import eccodes
 
-    names = field_names(levels_mb)
     index = {n: i for i, n in enumerate(names)}
     out = None
     lats = lons = None
@@ -102,13 +104,13 @@ def decode(path: Path, levels_mb: list[int]):
                 surf = gi("typeOfFirstFixedSurface")
                 level = gi("level")
                 name = None
-                if surf == ISOBARIC and level in levels_mb:
+                if surf == ISOBARIC:
                     name = {TMP: f"t{level}", HGT: f"z{level}"}.get(key)
                 elif surf == SURFACE:
                     name = {TMP: "tsfc", PRES: "psfc", HGT: "orog", LAND: "land"}.get(key)
-                elif surf == ABOVE_GROUND and level == 2 and key == TMP:
-                    name = "t2m"
-                if name is None:
+                elif surf == ABOVE_GROUND and key == TMP:
+                    name = "t2m" if level == 2 else f"t{level}m"
+                if name not in index:
                     continue
                 ni, nj = eccodes.codes_get(h, "Ni"), eccodes.codes_get(h, "Nj")
                 vals = eccodes.codes_get_values(h).reshape(nj, ni)
@@ -146,7 +148,7 @@ def latest_cycles(cfg: dict, now: datetime) -> list[Cycle]:
 
 
 def stored_matches_config(cfg: dict, cdir: Path, hours: list[int], partial: bool = False) -> bool:
-    """True if a stored (or partly stored) cycle was made with the current regions, levels and hours."""
+    """True if a stored (or partly stored) cycle was made with the current regions, fields and hours."""
     try:
         if not partial:
             info = json.loads((cdir / "cycle.json").read_text())
@@ -159,7 +161,8 @@ def stored_matches_config(cfg: dict, cdir: Path, hours: list[int], partial: bool
                     continue                      # not started yet
                 return False
             meta = json.loads(meta_path.read_text())
-            if meta["region"] != r or meta["levels_mb"] != cfg["pressure_levels_mb"]:
+            if meta["region"] != r or meta["levels_mb"] != cfg["pressure_levels_mb"] \
+                    or meta["fields"] != cycle_field_names(cfg):
                 return False
         return True
     except (OSError, ValueError, KeyError):
@@ -208,13 +211,13 @@ def fetch_cycle(cfg: dict, cycle: Cycle, source_dir: Path | None = None) -> bool
                     continue
                 if not get(hour, region, tmp):
                     raise RuntimeError(f"{cycle.id} f{hour:03d} {region['name']}: missing on server")
-                arr, lats, lons = decode(tmp, cfg["pressure_levels_mb"])
+                arr, lats, lons = decode(tmp, cycle_field_names(cfg))
                 np.save(dest, arr)
                 meta = rdir / "meta.json"
                 if not meta.exists():
                     write_json_atomic(meta, {
                         "lats": lats.tolist(), "lons": lons.tolist(),
-                        "fields": field_names(cfg["pressure_levels_mb"]),
+                        "fields": cycle_field_names(cfg),
                         "levels_mb": cfg["pressure_levels_mb"], "region": region,
                     })
                 log.info("%s %s f%03d stored", cycle.id, region["name"], hour)

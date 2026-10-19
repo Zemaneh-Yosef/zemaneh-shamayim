@@ -104,7 +104,7 @@ class Store:
             log.info("serving cycle %s", cid)
 
     def refresh_climatology(self) -> None:
-        for src in ("gfs", "ncep"):
+        for src in ("gfs", "gfs-near", "ncep"):
             for r in self.cfg["regions"]:
                 path = clim_dir(self.cfg, src, r["name"])
                 key = (src, r["name"])
@@ -192,6 +192,9 @@ def clim_profile_at(store: Store, source: str, region: str, t: datetime, lat: fl
     f = g.fields_at(t, lat, lon, min_samples)
     if f is None:
         return None
+    near = store.clim.get(("gfs-near", region)) if source == "gfs" else None
+    if near is not None:
+        f.update(near.fields_at(t, lat, lon, min_samples) or {})   # until it has filled in: without them
     return build_profile(f, g.levels_mb, dist_km, lat, lon, g.near_surface_agl)
 
 
