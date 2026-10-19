@@ -9,8 +9,8 @@
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
     GET /v1/status
 
-Each column's lower air is stood on the real ground (api.follow_terrain; see climatology.follow_terrain):
-the weather model's terrain is smoothed over ~25 km, the air near the ground follows the real one.
+With api.follow_terrain on (off by default: it made the fit to Rabbi Druk's sunrises worse), each column's
+lower air is stood on the real ground instead of the weather model's ~25 km-smoothed terrain.
 
 Each event comes from the best source available for it (its "source" field):
     "forecast"          the latest GFS run (about 7 days ahead)

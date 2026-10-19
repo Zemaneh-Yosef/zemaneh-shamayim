@@ -72,6 +72,7 @@ def run(tmp: Path, json_out: Path | None):
     assert abs(t80["p"] - 1013.25 * 2.718281828 ** (-9.80665 * 80 / (287.05 * (285.15 + t80["t"] + 273.15) / 2))) < 0.02, t80
     assert t80["t"] > plast["levels"][0]["t"], "the inversion reaches the client"
     # columns stood on the real ground (api.follow_terrain): sunsets look west, over land here
+    full["api"]["follow_terrain"]["enabled"] = True      # off by default; on here to check it
     flat = serve.path_profiles(serve.Handler.store, 40.7128, -74.006, now.date(), 2)
     moved = serve.path_profiles(serve.Handler.store, 40.7128, -74.006, now.date(), 2,
                                 ground=lambda pts: [[150.0] * 13 for _ in pts])
