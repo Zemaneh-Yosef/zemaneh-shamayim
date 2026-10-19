@@ -81,7 +81,8 @@ def main():
         print("1. what is asked: a box around the 400 km paths, the hours around each sunrise")
         check(box[0] > LAT and box[2] < LAT and box[3] > LON + 4 and box[1] < LON,
               f"box N W S E = {box}: reaches 400 km east of the observer")
-        check(list(need) == ["199501", "199502"] and need["199501"]["days"] == [10, 31] and need["199501"]["hours"] == [4, 5],
+        check(list(need) == ["199501", "199502"] and need["199501"]["days"] == [10, 31] and need["199501"]["hours"] == [4, 5]
+              and need["199501"]["pairs"] == [[10, 4], [10, 5], [31, 4], [31, 5]],
               f"by month, only the event days and the hours either side: {need}")
 
         for m, new in (("199501", True), ("199502", False)):     # both CDS layouts
