@@ -32,7 +32,7 @@ the best source it has for that date:
 
 | source | dates | detail |
 |---|---|---|
-| `forecast` | the next ~7 days | latest GFS run, 0.25°, 13 levels, water temperature |
+| `forecast` | the next ~7 days | latest GFS run, 0.25°, 13 levels plus the air 80 m and 100 m above the ground, water temperature |
 | `climatology-gfs` | any date, once that month has data | typical values from your own archive of GFS runs (live, plus past runs from `backfill_gfs.py`), same detail |
 | `climatology-ncep` | any date, from the first run | NOAA NCEP/NCAR Reanalysis 1, average of the last 10 complete years at 00/06/12/18 UTC, 2.5°, 4 levels below 700 mb |
 
@@ -40,12 +40,20 @@ Dates no source covers are left out, and the app uses its next provider (e.g. mo
 
 * `fetch_gfs.py` (hourly timer) checks for a new GFS cycle (00Z and 12Z by default), downloads only
   the needed variables for your regions: temperature and height at 13 pressure levels (1000–500 mb,
-  surface to ~5.5 km), 2 m temperature, surface (water) temperature, surface pressure, terrain
-  height, land/water mask. Hourly to 120 h, 3-hourly to 168 h. Each hour is decoded and stored as a
-  numpy array; a cycle goes live only when complete. Old cycles are pruned.
+  surface to ~5.5 km), temperature 2 m, 80 m and 100 m above the ground (`near_surface_m`), surface
+  (water) temperature, surface pressure, terrain height, land/water mask. Hourly to 120 h, 3-hourly to
+  168 h. Each hour is decoded and stored as a numpy array; a cycle goes live only when complete. Old
+  cycles are pruned.
+* Why 80 m and 100 m: horizon refraction is decided by the temperature gradient in the lowest hundred
+  metres or so, and near the ground the pressure levels are ~250 m apart (1000 / 975 / 950 mb), so a dawn
+  inversion was only a straight line from the 2 m air to 975 mb. The two levels are GFS's own boundary-layer
+  air (from its lowest model levels) in that layer; their pressure is hydrostatic from the surface.
 * After each run it also adds the first 12 hours (the most accurate part) to running averages by
   month and 3-hour slot of the day: your own climatology. A month is used once it holds
-  `climatology.min_days` days (default 8), so it covers the whole year after about a year.
+  `climatology.min_days` days (default 8), so it covers the whole year after about a year. The 80 m /
+  100 m air has a store of its own (`climatology/gfs-near/`) with its own counts, so a climatology built
+  before those levels were added keeps its data; until the new store fills in for a month, that month's
+  profiles are as before.
 * The first time a region has no NOAA reanalysis climatology, the fetcher builds it (`build_prior.py`)
   from NOAA PSL's yearly files (no key): the last `climatology.ncep_years` complete years (default 10),
   so the fallback reflects today's climate rather than a 1991–2020 average centred on ~2005. Each year
@@ -153,6 +161,10 @@ later to catch up (e.g. from a weekly timer) and only fetches days it hasn't add
 alongside the fetcher, and runs already in the climatology are never downloaded or counted again. A
 damaged file in the archive (an `.idx` out of step with its file) is logged and skipped. Since the server's own days count one for one and the backfill samples, the
 average leans towards the most recent years.
+
+The 80 m / 100 m air keeps its own list of runs, so running the backfill again after upgrading fills it for
+the runs you already have, downloading only those two fields (~2 MB per forecast hour, a few GB in all). GFS
+has them from v16 (22 March 2021); earlier runs are noted in that store without data.
 
 ## Resources (default config: continental US + Israel, 2 cycles kept)
 

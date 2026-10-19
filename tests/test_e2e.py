@@ -41,7 +41,7 @@ def run(tmp: Path, json_out: Path | None):
     from common import forecast_hours
     for h in forecast_hours(full):
         write(src / REGION["name"] / fetch_gfs.grib_file_name(cycle, h), REGION,
-              t2m_land=283.15, t2m_sea=285.15, skin_sea=289.15, coast_lon=COAST)
+              t2m_land=283.15, t2m_sea=285.15, skin_sea=289.15, coast_lon=COAST, near_inversion_k=3.0)
     assert fetch_gfs.main(["--config", str(cfg_path), "--cycle", cycle.id, "--source-dir", str(src)]) == 0
     # second run must be a no-op
     assert fetch_gfs.main(["--config", str(cfg_path), "--cycle", cycle.id, "--source-dir", str(src)]) == 0
@@ -60,9 +60,17 @@ def run(tmp: Path, json_out: Path | None):
           f"az {e['azimuthDeg']} with {len(e['profiles'])} profiles")
     print(f"  near: water={p0['water']} levels={len(p0['levels'])} 2m T={p0['levels'][0]['t']}C")
     print(f"  far ({plast['distanceKm']} km): water={plast['water']} skin={plast.get('skinC')}C "
-          f"2m T={plast['levels'][0]['t']}C, 1000mb h={plast['levels'][1]['h']} m")
+          f"2m T={plast['levels'][0]['t']}C, 80 m T={plast['levels'][1]['t']}C")
     assert plast["water"] and abs(plast["skinC"] - 16.0) < 0.05
     assert abs(plast["levels"][0]["t"] - 12.0) < 0.05
+    # the 80 m and 100 m air (3 K per 100 m warmer than the standard lapse: an inversion) between the
+    # 2 m air and the pressure levels, heights ascending, pressure hydrostatic from the surface
+    hs = [lv["h"] for lv in plast["levels"]]
+    assert hs == sorted(hs) and hs[1:3] == [80.0, 100.0], hs
+    t80 = plast["levels"][1]
+    assert abs(t80["t"] - (12.0 - 0.0065 * 78 + 2.4)) < 0.05, t80
+    assert abs(t80["p"] - 1013.25 * 2.718281828 ** (-9.80665 * 80 / (287.05 * (285.15 + t80["t"] + 273.15) / 2))) < 0.02, t80
+    assert t80["t"] > plast["levels"][0]["t"], "the inversion reaches the client"
     try:
         urllib.request.urlopen(base + "/v1/path-profiles?lat=10&lon=10")
         raise AssertionError("expected 404 outside region")

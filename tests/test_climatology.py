@@ -108,6 +108,10 @@ def run(tmp: Path, json_out: Path | None):
     lv = e_ncep["profiles"][0]["levels"]
     check(lv[0]["h"] > 30 and all(lv[i]["h"] < lv[i + 1]["h"] for i in range(len(lv) - 1)),
           f"NOAA profile: near-surface level at {lv[0]['h']} m, heights increasing")
+    e_gfs = next(e for e in body["events"] if e["source"] == "climatology-gfs")
+    hs = [lv["h"] for lv in e_gfs["profiles"][0]["levels"]]
+    check(hs[1:3] == [80.0, 100.0] and hs == sorted(hs), f"own climatology: the 80 m / 100 m air from its own store {hs[:4]}")
+    check(all(lv["h"] not in (80.0, 100.0) for lv in lv), "NOAA profile: no 80 m / 100 m levels")
     st = json.loads(urllib.request.urlopen(base + "/v1/status").read())
     check(st["climatology"]["nyc"]["gfs"]["months_ready"] == 1, f"status reports climatology progress {st['climatology']['nyc']['gfs']['days_per_month'][9]} days in October")
     srv.shutdown()

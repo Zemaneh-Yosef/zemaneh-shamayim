@@ -15,7 +15,20 @@ SURFACE_FIELDS = ["t2m", "tsfc", "psfc", "orog", "land"]
 
 
 def field_names(levels_mb: list[int]) -> list[str]:
+    """The fields of the own climatology's main store (and of forecast cycles, before near_fields)."""
     return SURFACE_FIELDS + [f"t{p}" for p in levels_mb] + [f"z{p}" for p in levels_mb]
+
+
+def near_fields(near_m: list[int]) -> list[str]:
+    """Air temperature at fixed heights above the ground (GFS's 80 m and 100 m): the bottom of the
+    boundary layer, where the pressure levels (~250 m apart near the ground) see a dawn inversion only as
+    a straight line from the 2 m air to 975 mb. Kept in a store of its own in the climatology."""
+    return [f"t{h}m" for h in near_m]
+
+
+def cycle_field_names(cfg: dict) -> list[str]:
+    """The fields stored per forecast hour."""
+    return field_names(cfg["pressure_levels_mb"]) + near_fields(cfg.get("near_surface_m", []))
 
 
 DEFAULT_CONFIG = {
@@ -26,6 +39,8 @@ DEFAULT_CONFIG = {
         {"name": "conus", "north": 55.0, "south": 20.0, "west": -130.0, "east": -60.0},
     ],
     "pressure_levels_mb": [1000, 975, 950, 925, 900, 850, 800, 750, 700, 650, 600, 550, 500],
+    # temperature at these heights above the ground too (GFS has 80 and 100 m, from GFS v16, March 2021)
+    "near_surface_m": [80, 100],
     "forecast_hours": {"hourly_until": 120, "step_after": 3, "max": 168},
     "cycles": [0, 12],
     "cycles_to_keep": 2,

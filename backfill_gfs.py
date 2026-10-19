@@ -19,6 +19,11 @@ calendar (every `--every`-th day from 2021-01-01), runs already added are skippe
 fetcher keeps), so nothing is downloaded or counted twice, and it can run alongside the hourly fetcher.
 A damaged archive file is logged and skipped.
 
+The air 80 m and 100 m above the ground (`near_surface_m`) goes to its own store ("gfs-near", see
+climatology.py), which keeps its own list of runs. A backfill run after those levels were added therefore
+fetches, for runs the main store already has, only those two fields (~2 MB per forecast hour). GFS has them
+from v16 (22 March 2021); earlier runs are recorded in that store without data, so they aren't asked again.
+
     python3 backfill_gfs.py [--config config.json] [--start 2021-01-01] [--end YYYY-MM-DD]
                             [--every 4] [--parallel 4] [--dry-run]
 
@@ -42,7 +47,7 @@ from pathlib import Path
 import numpy as np
 
 import climatology
-from common import Cycle, field_names, gfs_dir, load_config
+from common import Cycle, cycle_field_names, field_names, gfs_dir, load_config
 from fetch_gfs import decode
 
 log = logging.getLogger("backfill_gfs")
@@ -84,16 +89,27 @@ def get(cfg: dict, url: str, byte_range: tuple[int, int | None] | None = None, a
     raise RuntimeError(f"giving up on {url}")
 
 
-def wanted(levels_mb: list[int]) -> set[tuple[str, str]]:
-    w = {("TMP", "2 m above ground"), ("TMP", "surface"), ("PRES", "surface"), ("HGT", "surface"),
-         ("LAND", "surface")}
-    for p in levels_mb:
-        w |= {("TMP", f"{p} mb"), ("HGT", f"{p} mb")}
-    return w
+SURFACE_MESSAGES = {"t2m": ("TMP", "2 m above ground"), "tsfc": ("TMP", "surface"), "psfc": ("PRES", "surface"),
+                    "orog": ("HGT", "surface"), "land": ("LAND", "surface")}
 
 
-def ranges_from_idx(idx: str, want: set[tuple[str, str]]) -> list[tuple[int, int | None]]:
-    """Byte ranges (inclusive; None = to the end) of the wanted messages, adjacent ones merged."""
+def message_of(name: str) -> tuple[str, str]:
+    """The (variable, level) of a field name in the archive's .idx files."""
+    if name in SURFACE_MESSAGES:
+        return SURFACE_MESSAGES[name]
+    if climatology.NEAR_FIELD.match(name):
+        return ("TMP", f"{name[1:-1]} m above ground")
+    return ("TMP" if name[0] == "t" else "HGT", f"{name[1:]} mb")
+
+
+def wanted(names) -> set[tuple[str, str]]:
+    return {message_of(n) for n in names}
+
+
+def ranges_from_idx(idx: str, want: set[tuple[str, str]],
+                    optional: set[tuple[str, str]] = frozenset()) -> list[tuple[int, int | None]]:
+    """Byte ranges (inclusive; None = to the end) of the wanted messages, adjacent ones merged. Messages
+    in `optional` are taken when the file has them; any other missing message is an error."""
     rows = []
     for line in idx.splitlines():
         parts = line.split(":")
@@ -110,7 +126,7 @@ def ranges_from_idx(idx: str, want: set[tuple[str, str]]) -> list[tuple[int, int
             out[-1][1] = end
         else:
             out.append([off, end])
-    missing = want - seen
+    missing = want - seen - optional
     if missing:
         raise ValueError(f"fields not in the file: {sorted(missing)}")
     return [tuple(r) for r in out]
@@ -122,15 +138,22 @@ def file_urls(base: str, cycle: Cycle, hour: int) -> list[str]:
     return [f"{base}/{day}/atmos/{name}", f"{base}/{day}/{name}"]   # before GFS v16 (Mar 2021): no atmos/
 
 
-def fetch_hour(cfg: dict, base: str, cycle: Cycle, hour: int, want, dest: Path) -> int:
-    """Download the wanted messages of one forecast hour into dest. Returns bytes, or 0 if absent."""
+def present_in(idx: str, names) -> list[str]:
+    """Those of `names` whose message the .idx lists."""
+    have = {(p[3], p[4]) for p in (line.split(":") for line in idx.splitlines()) if len(p) >= 6}
+    return [n for n in names if message_of(n) in have]
+
+
+def fetch_hour(cfg: dict, base: str, cycle: Cycle, hour: int, names, optional, dest: Path):
+    """Download the messages of fields `names` of one forecast hour into dest (those in `optional` only if
+    the file has them). Returns (bytes, the names downloaded), or (0, []) if the file is absent."""
     for url in file_urls(base, cycle, hour):
         try:
             idx = get(cfg, url + ".idx").decode("ascii", "replace")
         except NotThere:
             continue
         try:
-            ranges = ranges_from_idx(idx, want)
+            ranges = ranges_from_idx(idx, wanted(names), wanted(optional))
         except ValueError as e:
             raise BadFile(f"{url}: {e}") from None
         parts = [get(cfg, url, r) for r in ranges]
@@ -139,13 +162,13 @@ def fetch_hour(cfg: dict, base: str, cycle: Cycle, hour: int, want, dest: Path) 
                 raise BadFile(f"{url}: bytes {a}- are not whole GRIB messages (.idx out of step with the file)")
         data = b"".join(parts)
         dest.write_bytes(data)
-        return len(data)
-    return 0
+        return len(data), present_in(idx, names)
+    return 0, []
 
 
 def region_grids(cfg: dict) -> dict[str, dict]:
     """The grid (lats, lons, fields, levels) of each region's live data, from its climatology or the
-    newest stored cycle."""
+    newest stored cycle; the fields are those of a forecast cycle (the stores take their own out of them)."""
     out = {}
     fields = field_names(cfg["pressure_levels_mb"])
     cycles = sorted((p for p in gfs_dir(cfg).glob("[0-9]" * 10) if (p / "complete").exists()), reverse=True) \
@@ -157,8 +180,9 @@ def region_grids(cfg: dict) -> dict[str, dict]:
                 continue
             meta = json.loads(m.read_text())
             if meta.get("region") == r and meta.get("levels_mb") == cfg["pressure_levels_mb"] \
-                    and meta.get("fields") == fields:
-                out[r["name"]] = {k: meta[k] for k in ("lats", "lons", "fields", "levels_mb")}
+                    and meta.get("fields", [])[:len(fields)] == fields:
+                out[r["name"]] = {"lats": meta["lats"], "lons": meta["lons"], "fields": cycle_field_names(cfg),
+                                  "levels_mb": meta["levels_mb"]}
                 break
         else:
             raise SystemExit(f"no stored GFS data for region {r['name']} with the current configuration: "
@@ -214,59 +238,72 @@ def detect_phase(targets: dict[str, Path], every: int) -> int:
 def backfill(cfg: dict, start: date, end: date, every: int, parallel: int, base: str, dry_run: bool,
              phase: int | None = None) -> int:
     grids = region_grids(cfg)
-    want = wanted(cfg["pressure_levels_mb"])
+    all_fields = cycle_field_names(cfg)
+    store_names = {s: climatology.store_fields(s, all_fields, cfg["pressure_levels_mb"]) for s in climatology.GFS_STORES}
+    stores = [s for s in climatology.GFS_STORES if store_names[s]]
     targets = {r["name"]: climatology.clim_dir(cfg, "gfs", r["name"]) for r in cfg["regions"]}
     if phase is None:
         phase = detect_phase(targets, every)
     days = sample_days(start, end, every, phase % every)
     cycles = [Cycle(datetime(d.year, d.month, d.day, h, tzinfo=timezone.utc)) for d in days for h in RUNS]
-    done = set.intersection(*(climatology.archived_cycles(p) for p in targets.values())) if targets else set()
-    todo = [c for c in cycles if c.id not in done]
-    log.info("%s .. %s, every %d days (phase %d): %d runs, %d already in the climatology, %d to add "
-             "(~%.0f GB to download)", start, end, every, phase % every, len(cycles), len(cycles) - len(todo), len(todo),
-             len(todo) * len(HOURS) * 22 / 1024)
+    done = {s: set.intersection(*(climatology.archived_cycles(climatology.clim_dir(cfg, s, r["name"]))
+                                  for r in cfg["regions"])) if cfg["regions"] else set() for s in stores}
+    todo = [c for c in cycles if any(c.id not in done[s] for s in stores)]
+    full = sum(1 for c in todo if c.id not in done["gfs"])
+    log.info("%s .. %s, every %d days (phase %d): %d runs, %d already in the climatology, %d to add, %d of them "
+             "only the near-surface fields (~%.0f GB to download)", start, end, every, phase % every, len(cycles),
+             len(cycles) - len(todo), len(todo), len(todo) - full,
+             (full * 22 + (len(todo) - full) * 2) * len(HOURS) / 1024)
     if dry_run or not todo:
         return 0
     t0, nbytes, added_runs = time.time(), 0, 0
     with tempfile.TemporaryDirectory() as tmpd, ThreadPoolExecutor(parallel) as pool:
         for n, cycle in enumerate(todo, 1):
+            need = [s for s in stores if cycle.id not in done[s]]
+            names = [f for f in all_fields if any(f in store_names[s] for s in need)]
+            optional = store_names.get("gfs-near", [])      # GFS has them only from v16 (March 2021)
             paths = [Path(tmpd) / f"f{h:03d}.grib2" for h in HOURS]
             def one(hp):
                 try:
-                    return fetch_hour(cfg, base, cycle, hp[0], want, hp[1])
+                    return fetch_hour(cfg, base, cycle, hp[0], names, optional, hp[1])
                 except BadFile as e:
                     log.warning("%s f%03d skipped: %s", cycle.id, hp[0], e)
-                    return -1
-            sizes = list(pool.map(one, zip(HOURS, paths)))
-            if not any(z > 0 for z in sizes):
+                    return -1, []
+            got = list(pool.map(one, zip(HOURS, paths)))
+            if not any(z > 0 for z, _ in got):
                 log.warning("%s: not in the archive, skipped", cycle.id)
                 continue
-            nbytes += sum(z for z in sizes if z > 0)
-            per_region = {name: [] for name in targets}
-            for h, path, size in zip(HOURS, paths, sizes):
+            nbytes += sum(z for z, _ in got if z > 0)
+            per_store = {(s, r["name"]): [] for s in need for r in cfg["regions"]}
+            for h, path, (size, present) in zip(HOURS, paths, got):
                 if size <= 0:
                     if size == 0:
                         log.warning("%s f%03d: not in the archive", cycle.id, h)
                     continue
                 try:
-                    arr, glats, glons = decode(path, cfg["pressure_levels_mb"])
+                    arr, glats, glons = decode(path, present)
                 except Exception as e:
                     log.warning("%s f%03d: %s", cycle.id, h, e)
                     continue
                 finally:
                     path.unlink(missing_ok=True)
+                for s in need:
+                    if not all(f in present for f in store_names[s]):
+                        continue                  # e.g. no 80 m / 100 m air before GFS v16
+                    idx = [present.index(f) for f in store_names[s]]
+                    for r in cfg["regions"]:
+                        g = grids[r["name"]]
+                        rows, cols = crop_index(glats, glons, g["lats"], g["lons"])
+                        per_store[(s, r["name"])].append((cycle.time + timedelta(hours=h), arr[idx][:, rows][:, :, cols]))
+            for s in need:
                 for r in cfg["regions"]:
-                    g = grids[r["name"]]
-                    rows, cols = crop_index(glats, glons, g["lats"], g["lons"])
-                    per_region[r["name"]].append((cycle.time + timedelta(hours=h), arr[:, rows][:, :, cols]))
-            for r in cfg["regions"]:
-                with climatology.locked(targets[r["name"]]):
-                    out = climatology.open_gfs_clim(cfg, r, grids[r["name"]], log)
-                    if cycle.id in climatology.archived_cycles(out):
-                        continue                  # the fetcher got there first
-                    # each sampled hour stands for that day's 3 hours in its slot, as the fetcher adds
-                    k = climatology.add_samples(out, cycle.id, per_region[r["name"]], climatology.GFS_SLOT_HOURS)
-                log.debug("%s %s: %d hours", cycle.id, r["name"], k)
+                    with climatology.locked(climatology.clim_dir(cfg, s, r["name"])):
+                        out = climatology.open_gfs_clim(cfg, r, grids[r["name"]], log, s)
+                        if cycle.id in climatology.archived_cycles(out):
+                            continue              # the fetcher got there first
+                        # each sampled hour stands for that day's 3 hours in its slot, as the fetcher adds
+                        k = climatology.add_samples(out, cycle.id, per_store[(s, r["name"])], climatology.GFS_SLOT_HOURS)
+                    log.debug("%s %s %s: %d hours", cycle.id, s, r["name"], k)
             added_runs += 1
             el = time.time() - t0
             log.info("%s added (%d/%d); %.1f GB so far, %.1f MB/s, about %.1f h left", cycle.id, n, len(todo),

@@ -4,13 +4,18 @@ Two sources, both by month and time of day:
 
 * "gfs":  your own climatology, built by fetch_gfs.py from the first 12 hours of every GFS run it
           stores (0.25 deg, 13 levels, water temperature). Grows by itself; a month / time-of-day slot
-          is used once it holds `climatology.min_days` days of data.
+          is used once it holds `climatology.min_days` days of data. The air 80 m and 100 m above the
+          ground (`near_surface_m`) is kept beside it in a store of its own, "gfs-near", with its own
+          counts and list of runs: it was added later (and GFS has it only from March 2021), so the
+          main store's years of data are kept as they are, and the profile gets those levels wherever
+          "gfs-near" has enough data too.
 * "ncep": NOAA NCEP/NCAR Reanalysis 1, last 10 complete years averaged at 00/06/12/18 UTC (2.5 deg, levels
           1000/925/850/700/600/500 mb, air ~40 m above ground). Built without any key by build_prior.py
           (the window moves forward each year); the fallback until your own climatology has filled in.
           backfill_gfs.py can fill the "gfs" source with past GFS runs so it covers every month at once.
 
 Storage:  <data_dir>/climatology/<source>/<region>/meta.json + values.npy [+ counts.npy]
+          (source "gfs", "gfs-near" or "ncep")
           values: [month, time-of-day slot, field, lat, lon]; "gfs" stores running sums + counts.
 """
 from __future__ import annotations
@@ -19,6 +24,7 @@ import fcntl
 import json
 import math
 import os
+import re
 import shutil
 import time
 from contextlib import contextmanager
@@ -27,8 +33,10 @@ from pathlib import Path
 
 import numpy as np
 
-from common import Cycle, write_json_atomic
+from common import Cycle, field_names, write_json_atomic
 
+G0, R_DRY = 9.80665, 287.05
+NEAR_FIELD = re.compile(r"^t(\d+)m$")       # t80m: air temperature 80 m above the ground
 MID_MONTH_DOY = [15.5, 45, 74.5, 105, 135.5, 166, 196.5, 227.5, 258, 288.5, 319, 349.5]
 GFS_SLOT_HOURS = 3                      # own climatology: 8 slots of 3 h (UTC)
 
@@ -133,12 +141,24 @@ def build_profile(f: dict, levels_mb: list[int], dist_km: float, lat: float, lon
                   near_surface_agl: float = 2.0) -> dict:
     surface_h = f["orog"] + near_surface_agl
     levels = [{"h": round(surface_h, 1), "t": round(f["t2m"] - 273.15, 2), "p": round(f["psfc"] / 100, 2)}]
+    # fixed heights above the ground (t80m, t100m), when the source has them; their pressure is
+    # hydrostatic from the surface pressure through the mean of the 2 m air and the level's
+    near = []
+    for name, temp in f.items():
+        m = NEAR_FIELD.match(name)
+        if m and temp is not None and math.isfinite(temp) and int(m.group(1)) > near_surface_agl:
+            agl = int(m.group(1))
+            p = f["psfc"] * math.exp(-G0 * agl / (R_DRY * (f["t2m"] + temp) / 2))
+            near.append({"h": round(f["orog"] + agl, 1), "t": round(temp - 273.15, 2), "p": round(p / 100, 2)})
+    near.sort(key=lambda lv: lv["h"])
+    levels += near
     for p in levels_mb:
         z, temp = f.get(f"z{p}"), f.get(f"t{p}")
         if z is None or temp is None or not (math.isfinite(z) and math.isfinite(temp)):
             continue
-        if p * 100 < f["psfc"] and z > surface_h + 1:
+        if p * 100 < f["psfc"] and z > surface_h + 1 and all(abs(z - lv["h"]) > 1 for lv in near):
             levels.append({"h": round(z, 1), "t": round(temp - 273.15, 2), "p": float(p)})
+    levels.sort(key=lambda lv: lv["h"])
     water = f["land"] < 0.5
     prof = {"distanceKm": dist_km, "lat": round(lat, 4), "lon": round(lon, 4), "water": bool(water), "levels": levels}
     if water and "tsfc" in f and math.isfinite(f["tsfc"]):
@@ -161,26 +181,42 @@ def locked(out: Path):
             fcntl.flock(fh, fcntl.LOCK_UN)
 
 
-def gfs_clim_meta(region: dict, grid_meta: dict) -> dict:
-    """The meta.json of a region's own GFS climatology, from a stored cycle's region meta."""
+GFS_STORES = ("gfs", "gfs-near")
+
+
+def store_fields(store: str, fields: list[str], levels_mb: list[int]) -> list[str]:
+    """The fields of one of the own climatology's stores, out of a forecast cycle's `fields`."""
+    if store == "gfs":
+        return field_names(levels_mb)
+    main = set(field_names(levels_mb))                  # t2m looks like one too
+    return [n for n in fields if NEAR_FIELD.match(n) and n not in main]
+
+
+def gfs_clim_meta(region: dict, grid_meta: dict, store: str = "gfs") -> dict:
+    """The meta.json of a region's own GFS climatology store, from a stored cycle's region meta (whose
+    fields may be more than the store keeps)."""
     nslots = 24 // GFS_SLOT_HOURS
-    return {"lats": grid_meta["lats"], "lons": grid_meta["lons"], "fields": grid_meta["fields"],
+    fields = store_fields(store, grid_meta["fields"], grid_meta["levels_mb"])
+    source = "own GFS archive (first hours of each run)"
+    if store == "gfs-near":
+        source += ", air temperature at fixed heights above the ground"
+    return {"lats": grid_meta["lats"], "lons": grid_meta["lons"], "fields": fields,
             "levels_mb": grid_meta["levels_mb"], "region": region,
             "slot_hours": [GFS_SLOT_HOURS * k + GFS_SLOT_HOURS / 2 for k in range(nslots)],
-            "near_surface_agl": 2.0, "source": "own GFS archive (first hours of each run)"}
+            "near_surface_agl": 2.0, "source": source}
 
 
-def open_gfs_clim(cfg: dict, region: dict, grid_meta: dict, log) -> Path:
-    """The region's own climatology directory, created (or restarted for a changed grid) as needed.
-    Call with the region locked."""
-    out = clim_dir(cfg, "gfs", region["name"])
-    expected = gfs_clim_meta(region, grid_meta)
+def open_gfs_clim(cfg: dict, region: dict, grid_meta: dict, log, store: str = "gfs") -> Path:
+    """The region's own climatology directory for one store, created (or restarted for a changed grid)
+    as needed. Call with it locked."""
+    out = clim_dir(cfg, store, region["name"])
+    expected = gfs_clim_meta(region, grid_meta, store)
     if out.exists():
         old = json.loads((out / "meta.json").read_text())
         if any(old.get(k) != expected[k] for k in ("lats", "lons", "fields", "levels_mb", "region")):
             aside = out.with_name(out.name + f".replaced-{int(time.time())}")
-            log.warning("region %s changed: keeping the old climatology at %s and starting a new one",
-                        region["name"], aside)
+            log.warning("region %s changed: keeping the old %s climatology at %s and starting a new one",
+                        region["name"], store, aside)
             out.rename(aside)
     if not out.exists():
         nslots = 24 // GFS_SLOT_HOURS
@@ -227,12 +263,17 @@ def archive_cycle(cfg: dict, cycle: Cycle, cycle_dir: Path, log) -> None:
     for region in cfg["regions"]:
         rdir = cycle_dir / region["name"]
         meta = json.loads((rdir / "meta.json").read_text())
-        target = clim_dir(cfg, "gfs", region["name"])
-        with locked(target):
-            out = open_gfs_clim(cfg, region, meta, log)
-            if cycle.id in archived_cycles(out):
+        arrays = {h: np.load(rdir / f"f{h:03d}.npy", mmap_mode="r") for h in hours if (rdir / f"f{h:03d}.npy").exists()}
+        for store in GFS_STORES:
+            names = store_fields(store, meta["fields"], meta["levels_mb"])
+            if not names:
                 continue
-            samples = [(cycle.time + timedelta(hours=h), np.load(rdir / f"f{h:03d}.npy"))
-                       for h in hours if (rdir / f"f{h:03d}.npy").exists()]
-            added = add_samples(out, cycle.id, samples)
-        log.info("climatology %s: added %d hours of %s", region["name"], added, cycle.id)
+            idx = [meta["fields"].index(n) for n in names]
+            target = clim_dir(cfg, store, region["name"])
+            with locked(target):
+                out = open_gfs_clim(cfg, region, meta, log, store)
+                if cycle.id in archived_cycles(out):
+                    continue
+                samples = [(cycle.time + timedelta(hours=h), np.asarray(a[idx])) for h, a in arrays.items()]
+                added = add_samples(out, cycle.id, samples)
+            log.info("climatology %s (%s): added %d hours of %s", region["name"], store, added, cycle.id)
