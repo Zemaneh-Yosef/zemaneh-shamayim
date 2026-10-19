@@ -70,7 +70,7 @@ def signature(cfg_layers: dict | None) -> str | None:
     srcs = enabled_sources(cfg_layers)
     if not srcs:
         return None
-    blob = json.dumps({"v": LAYERS_VERSION, "s": [[s["name"], s["paths"]] for s in srcs]}, sort_keys=True)
+    blob = json.dumps({"v": LAYERS_VERSION, "s": [_source_key(s) for s in srcs]}, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:10]
 
 
@@ -106,6 +106,7 @@ class Builder:
         """Datasets of a source that may cover this tile. Static paths / globs are opened once and kept;
         templated paths ("{...}") are opened for this tile only (the caller closes them)."""
         import rasterio
+        opts = src.get("open_options") or {}               # GDAL open options, e.g. {"OVERVIEW_LEVEL": "0"}
         static = [p for p in src["paths"] if "{" not in p]
         templated = [p.format(**tile_fields(lat_i, lon_i)) for p in src["paths"] if "{" in p]
 
@@ -119,7 +120,7 @@ class Builder:
             kept = []
             for p in paths:
                 try:
-                    kept.append(rasterio.open(p))
+                    kept.append(rasterio.open(p, **opts))
                 except Exception as e:
                     for ds in kept:
                         ds.close()
@@ -131,7 +132,7 @@ class Builder:
         per_tile = []
         for p in templated:
             try:
-                per_tile.append(rasterio.open(p))
+                per_tile.append(rasterio.open(p, **opts))
             except Exception as e:
                 if _is_missing(e):                         # e.g. no USGS tile outside the US: expected
                     log.debug("source %s: no %s", src["name"], p)
@@ -272,8 +273,14 @@ def fine_signature(cfg_fine: dict | None) -> str | None:
     if not srcs:
         return None
     blob = json.dumps({"v": FINE_VERSION, "step": float(cfg_fine.get("step_arcsec", 1 / 3)),
-                       "s": [[s["name"], s["paths"]] for s in srcs]}, sort_keys=True)
+                       "s": [_source_key(s) for s in srcs]}, sort_keys=True)
     return hashlib.sha1(blob.encode()).hexdigest()[:10]
+
+
+def _source_key(s: dict) -> list:
+    """What of a source goes into a signature: name and paths, and its open options when it has any (so
+    sources without them keep the signature they had)."""
+    return [s["name"], s["paths"]] + ([s["open_options"]] if s.get("open_options") else [])
 
 
 class FineTiles:

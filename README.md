@@ -389,10 +389,16 @@ ground and all terrain within `max_km` (default 10 km) come from a finer bare-ea
 one of its cells (`step_arcsec`, default 1/3″ ≈ 10 m); beyond that, and wherever the fine model has no
 data, the 1″ tiles / layers are used as before.
 
-The example config uses USGS 3DEP 1/3″ (US, bare earth, read per 1×1° file from USGS's bucket like the
-1″ layer). Any GDAL-readable bare-earth source works, e.g. a 1 m lidar DTM where a state or province
-publishes one (NRCan's HRDEM in Canada). Israel has no free source finer than the 1″ layers (the Survey
-of Israel's DTM would go here, if licensed).
+The example config uses USGS 3DEP 1/3″ in the US (bare earth, read per 1×1° file from USGS's bucket like
+the 1″ layer) and, after it, NRCan's HRDEM in Canada: the 2 m lidar ground model (DTM) mosaic, 56 files of
+500 km on NRCan's bucket in Canada Atlas Lambert, read at its first overview (4 m, `"open_options":
+{"OVERVIEW_LEVEL": "0"}`, any GDAL open option can go there). The 4 m overview is within 0.1 m of the full
+2 m data at 99% of the grid's points (at most 1.3 m, at Toronto and Montreal) and builds a chunk in ~8 s
+instead of ~20; its heights match MRDEM's (the 1″ layer) to a few cm on average. HRDEM covers the lidar
+surveys, most populated areas but not all of Canada; elsewhere the 1″ data is used, and per place (see below)
+only horizons it covers change. Opening the 56 files takes ~10 s, once per server process, the first time a
+chunk needs them. Any other GDAL-readable bare-earth source works too, e.g. a state's lidar DTM. Israel has
+no free source finer than the 1″ layers (the Survey of Israel's DTM would go here, if licensed).
 
 Data is built on demand (needs rasterio) in 0.1° chunks, ~4.5 MB each at 1/3″, under
 `<data_dir>/dem-fine/<signature>/`. A chunk no source covers is a marker file, so places outside the
