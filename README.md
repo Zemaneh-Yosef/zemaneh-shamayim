@@ -397,7 +397,15 @@ of Israel's DTM would go here, if licensed).
 Data is built on demand (needs rasterio) in 0.1° chunks, ~4.5 MB each at 1/3″, under
 `<data_dir>/dem-fine/<signature>/`. A chunk no source covers is a marker file, so places outside the
 sources cost one look. A failed read is retried after an hour and the 1″ data is used meanwhile. The
-fine settings are part of the horizon cache key, so turning them on recomputes the horizons. At Monsey
+fine settings are part of a horizon's cache key only where the fine data covers it (within `max_km` of
+its vantage points), so turning them on, or adding a source, recomputes the horizons there and nowhere else.
+
+Each horizon it covers says so in `terrain.fine.version` (the sources' signature; with `-partial` added while
+a chunk there failed to build, and then not cached, so the next request tries again). `GET /v1/terrain-version`
+takes the same query as `/v1/horizon` and answers with that version alone (`{"fine": ..., "layers": ...}`)
+without computing the horizon, building the fine chunks it would read if needed. royzmanimwebsite asks it
+about once a day for each stored horizon and downloads the horizon again only when the two differ, so
+visitors get new terrain where it changed and nothing else is downloaded again. At Monsey
 (sunset over a hillside 1.2 km away) 3DEP 1/3″ moved the horizon by 1.2′ on average and up to 5.9′ against
 the 1″ data.
 

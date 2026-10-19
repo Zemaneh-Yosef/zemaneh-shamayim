@@ -324,6 +324,8 @@ class FineTiles:
                 self.cache.move_to_end(k)
                 return self.cache[k]
         a = self._load_or_build(k)
+        if a is None and k in self.failed:
+            return None                                  # not kept: retried once the hour is up
         with self.lock:
             self.cache[k] = a
             if len(self.cache) > self.max:
@@ -367,6 +369,17 @@ class FineTiles:
         log.info("built fine terrain %s in %.1f s: %s", self.chunk_name(k), time.time() - t0,
                  ", ".join(f"{n} {v:.0%}" for n, v in stats.items()))
         return np.load(f, mmap_mode="r")
+
+    def version(self, s: float, w: float, n: float, e: float) -> str | None:
+        """What the fine data adds over this box: None where it has no data, its signature where it has, and
+        the signature + '-partial' while a chunk there could not be built (retried after an hour). Loads or
+        builds every chunk in the box: the same ones a horizon there reads."""
+        f = lambda x: math.floor(x / FINE_CHUNK_DEG + 1e-9)   # noqa: E731
+        keys = [(i, j) for i in range(f(s), f(n) + 1) for j in range(f(w), f(e) + 1)]
+        data = [self.chunk(k) is not None for k in keys]
+        if any(time.time() - self.failed.get(k, 0) < 3600 for k in keys):
+            return f"{self.sig}-partial"
+        return self.sig if any(data) else None
 
     def heights(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
         """Bilinear heights (m), NaN where the fine data has none (outside its sources, or not built)."""

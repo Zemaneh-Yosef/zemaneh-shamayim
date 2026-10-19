@@ -4,6 +4,7 @@
     GET /v1/path-profiles?lat=40.71&lon=-74.01[&from=2026-10-05][&days=8][&ensemble=1]
     GET /v1/horizon?lat=31.7486&lon=35.2374[&radius_km=0.8 | &bbox=S,W,N,E][&grid_m=100][&eye=1.7][&height=..][&min_km=1][&moon=1]
     GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..]   (the official area containing the point)
+    GET /v1/terrain-version?<the same query as /v1/horizon>   ({"fine": ..., "layers": ...}: is a stored horizon current?)
     GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329
     GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &bbox=S,W,N,E][&percentile=90][&year=2026]
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
@@ -468,21 +469,41 @@ class Horizons:
             body = gzip.compress(json.dumps({**res, **extra}, separators=(",", ":")).encode())
         return body
 
+    def fine_version(self, p: dict) -> str | None:
+        """The fine terrain's part in a horizon with these params (FineTiles.version over the vantage points
+        and max_km around them): None where it has no data, so places outside its sources keep their
+        horizons (and cache keys) when it is turned on."""
+        if not self.fine:
+            return None
+        km = self.fine["km"] + (0.0 if p["bbox"] else p["radius_km"])
+        s, w, n, e = p["bbox"] or (p["lat"], p["lon"], p["lat"], p["lon"])
+        dlat = km / 111.19
+        dlon = km / (111.19 * max(0.05, math.cos(math.radians((s + n) / 2))))
+        return self.tiles.fine.version(s - dlat, w - dlon, n + dlat, e + dlon)
+
+    def terrain_version(self, q: dict, max_bbox_km: float | None = None) -> dict:
+        """/v1/terrain-version: what a horizon with this query would be made from, without computing it.
+        A stored horizon whose terrain.fine.version differs (or is missing where this has one) is out of date."""
+        return {"fine": self.fine_version(self.params(q, max_bbox_km)), "layers": self.dem}
+
     def compute(self, q: dict, max_bbox_km: float | None = None) -> bytes:
         p = self.params(q, max_bbox_km)
+        fine_v = self.fine_version(p)
+        partial = bool(fine_v and fine_v.endswith("-partial"))
         # the terrain source list and the horizon algorithm's version are part of the key, so changing either
-        # recomputes (neither changes the key while unset / at version 1, so old caches stay valid)
+        # recomputes (neither changes the key while unset / at version 1, so old caches stay valid); the fine
+        # terrain only where it has data
         key_src = {**p, "dem": self.dem} if self.dem else dict(p)
-        if self.fine:
+        if fine_v:
             key_src["fine"] = self.fine
         if terrain.ALGO_VERSION != 1:
             key_src["algo"] = terrain.ALGO_VERSION
         key = hashlib.sha1(json.dumps(key_src, sort_keys=True).encode()).hexdigest()[:20]
         f = self.dir / f"{key}.json.gz"
-        if f.exists():
+        if f.exists() and not partial:
             return f.read_bytes()
         with self.slots:
-            if f.exists():
+            if f.exists() and not partial:
                 return f.read_bytes()
             res = terrain.horizon_set(self.tiles, p["lat"], p["lon"], radius_km=p["radius_km"], bbox=p["bbox"],
                                       grid_m=p["grid_m"] or 100.0, eye=p["eye"], height=p["height"],
@@ -491,10 +512,12 @@ class Horizons:
                                       moon=p.get("moon", False), moon_percentile=p.get("moon_percentile", 90.0))
             if self.dem:
                 res["terrain"] = {"layers": self.dem, "sources": self.dem_sources}
-            if self.fine:
-                res.setdefault("terrain", {})["fine"] = {"signature": self.fine["sig"], "withinKm": self.fine["km"],
-                                                         "sources": self.tiles.fine.names}
+            if fine_v:
+                res.setdefault("terrain", {})["fine"] = {"signature": self.fine["sig"], "version": fine_v,
+                                                         "withinKm": self.fine["km"], "sources": self.tiles.fine.names}
             body = gzip.compress(json.dumps(res, separators=(",", ":")).encode())
+            if partial:
+                return body                  # a chunk failed to build: not kept, so the next request retries
             tmp = f.with_suffix(".tmp")
             tmp.write_bytes(body)
             tmp.replace(f)
@@ -638,6 +661,13 @@ class Handler(BaseHTTPRequestHandler):
                     run, extra, cap = resolve_area(self.area_index(), self.store.cfg, q)
                     return self.send_gzip_json(self.horizons.get(run, extra, cap), cache_s=7 * 86400)
                 return self.send_gzip_json(self.horizons.get(q), cache_s=30 * 86400)
+            if url.path == "/v1/terrain-version":
+                run, cap = q, None
+                if q.get("area", [""])[0] in ("auto", "1", "true"):
+                    run, _, cap = resolve_area(self.area_index(), self.store.cfg, q)
+                body = self.horizons.terrain_version(run, cap)
+                partial = (body["fine"] or "").endswith("-partial")
+                return self.send_json(200, body, cache_s=600 if partial else 86400)
             if url.path == "/v1/light-pollution":
                 body, cache_s = light_pollution_query(self.lightpol, self.area_index(), q)
                 return self.send_json(200, body, cache_s=cache_s)

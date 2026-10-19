@@ -87,6 +87,47 @@ def main():
         check(fine["ground"] == 100.0, "observer's ground from the fine data")
         check(dem_layers.fine_signature(fine_cfg) != dem_layers.fine_signature({**fine_cfg, "step_arcsec": 1}),
               "signature follows the grid and sources")
+
+        # per-place version: what the fine data adds to a horizon there (serve.Horizons.fine_version)
+        import time
+        from types import SimpleNamespace
+        import serve
+        check(ft.version(31.58, 35.28, 31.62, 35.32) == ft.sig, "version: the signature where it has data")
+        check(ft.version(31.85, 35.85, 31.9, 35.9) is None, "version: None where no source covers")
+        hz = SimpleNamespace(fine={"sig": ft.sig, "km": ft.max_km}, tiles=tiles)
+        pt = {"lat": 31.6, "lon": 35.3, "bbox": None, "radius_km": 0.0}
+        check(serve.Horizons.fine_version(hz, pt) == ft.sig, "a point inside the source's coverage")
+        check(serve.Horizons.fine_version(hz, {**pt, "lat": 31.85, "lon": 35.9}) is None,
+              "a point 15+ km from it: no fine data within max_km")
+        check(serve.Horizons.fine_version(hz, {**pt, "lat": 31.78, "lon": 35.3}) == ft.sig,
+              "a point 9 km north of its edge: within max_km, so it counts")
+        check(serve.Horizons.fine_version(SimpleNamespace(fine=None, tiles=tiles), pt) is None, "fine terrain off")
+        k = (math.floor(31.45 / 0.1), math.floor(35.05 / 0.1))   # never built so far
+        ft.failed[k] = time.time()
+        check(ft.chunk(k) is None and k not in ft.cache, "a failed chunk is not kept in memory")
+        check(ft.version(31.42, 35.02, 31.47, 35.07) == ft.sig + "-partial", "version: '-partial' while a chunk failed")
+
+        # Horizons.compute: the fine version in the answer, and an uncovered place's cache key as with it off
+        import gzip
+        import json
+        from common import load_config
+        cfg_path = tmp / "config.json"
+        terr = {"tiles_dir": str(tiles_dir), "tiles_url": "", "max_km": 25.0}
+        cfg_path.write_text(json.dumps({"data_dir": str(tmp / "h-on"), "terrain": {**terr, "fine": fine_cfg}}))
+        on = serve.Horizons(load_config(str(cfg_path)))
+        cfg_path.write_text(json.dumps({"data_dir": str(tmp / "h-off"), "terrain": terr}))
+        off = serve.Horizons(load_config(str(cfg_path)))
+        q_in, q_out = {"lat": ["31.6"], "lon": ["35.3"]}, {"lat": ["31.4"], "lon": ["35.68"]}
+        r_in = json.loads(gzip.decompress(on.get(q_in)))
+        r_out = json.loads(gzip.decompress(on.get(q_out)))
+        check(r_in.get("terrain", {}).get("fine", {}).get("version") == on.fine["sig"],
+              "covered place: terrain.fine.version in the horizon")
+        check("fine" not in r_out.get("terrain", {}), "uncovered place: no terrain.fine")
+        off.get(q_out)
+        check({f.name for f in off.dir.iterdir()} <= {f.name for f in on.dir.iterdir()},
+              "uncovered place: same cache key as with fine terrain off (its stored horizon stays valid)")
+        check(on.terrain_version(q_in)["fine"] == on.fine["sig"] and on.terrain_version(q_out)["fine"] is None,
+              "terrain_version agrees with the horizons")
         check(dem_layers.make_fine({"data_dir": str(tmp), "terrain": {"fine": {"sources": []}}}) is None,
               "off without sources")
     print("all passed" if ok else "FAILED")
