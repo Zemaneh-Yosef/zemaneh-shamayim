@@ -493,6 +493,27 @@ Real air along the path does as well as Keller & Hall's tuned rule without any t
 the winter months stay the hardest. `follow_terrain` (Keller & Hall's radiosonde shift) made it worse, so it
 is off. An eye height of 802 m, used in an earlier version of this README, fits clearly worse (rms 18–21 s).
 
+Keller & Hall's own version of `follow_terrain` used Bet Dagan radiosondes shifted along a smoothed curve of the
+terrain (their Fig. 8). `sonde_profiles.py` rebuilds that from NOAA's IGRA file for the station
+(`ISM00040179-data.txt`): the sounding nearest each sunrise (6 h before to 1.5 h after), as measured (`raw`),
+shifted with pressure recomputed (`kh-t`), or shifted with pressure kept as the paper words it (`kh-tp`). On
+the 336 of those sunrises with a sounding, and on the 24 calm (surface wind ≤ 2 m/s) November–February
+mornings whose 05–06Z sounding shows an inversion of at least 1 K in its lowest 300 m:
+
+| atmosphere | rms, 336 days | mean \|difference\|, 24 calm winter inversion mornings |
+|---|---|---|
+| ERA5 path profiles | 13.4 s | 14.8 s |
+| monthly normals + 13 h rule | 13.6 s | 17.2 s |
+| ERA5, `follow_terrain` on | 15.0 s | 18.2 s |
+| sounding, raw | 17.4 s | 22.0 s |
+| sounding, shifted, pressure kept | 22.3 s | 24.8 s |
+| sounding, shifted, pressure recomputed | 23.2 s | 28.3 s |
+
+Shifting made it worse in every version, on all days and on theirs; a column every kilometre instead of every
+5–10 km changed it by 0.1 s. Their baseline was off by 32 s on such days where these are off by ~20 s, and their
+exact days, tracer (REF2017) and terrain (25 m DTM) differ, so this does not disprove their result, but it
+gives no reason to turn `follow_terrain` on.
+
 ## Light pollution for nightfall by the stars
 
 `GET /v1/light-pollution?lat=..&lon=..` returns the artificial sky brightness at the zenith: the
@@ -667,6 +688,8 @@ all three sources; `python3 tests/test_haze_calibration.py` checks the AERONET /
 fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint);
 `python3 tests/test_ensemble.py` checks the ensembles: the representative variations (weights, mean,
 the modes' spread), the `gfs-moments` store, and GEFS members from `fetch_gefs.py` on synthetic files;
+`python3 tests/test_sonde.py` checks the radiosonde profiles on a synthetic IGRA file (missing heights,
+the three versions, which sounding a date gets);
 `python3 tests/test_era5.py` checks the ERA5 profiles for past dates on synthetic NetCDF files in both
 CDS layouts (what is requested, time interpolation, ground-following, the command line);
 `python3 tests/test_backfill.py` checks the backfill against a local fake of the AWS
@@ -686,6 +709,7 @@ Science 379, 265; average sky vs zenith: Bará, S. et al. (2022), arXiv:2202.075
 Sky Park 2020 annual report. Place lookup: © OpenStreetMap
 contributors (Nominatim), GeoNames.
 
+* Radiosondes (`sonde_profiles.py`): Durre, I. et al., Integrated Global Radiosonde Archive (IGRA) v2, NOAA NCEI.
 * Past air for checking against observations (`era5_profiles.py`): Hersbach, H. et al. (2020), ERA5 hourly
   data on pressure levels / single levels, Copernicus Climate Change Service (C3S) Climate Data Store.
 * Official areas: NYC Department of City Planning (Neighborhood Tabulation Areas), Los Angeles Times
