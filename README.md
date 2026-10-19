@@ -213,8 +213,9 @@ damaged file in the archive (an `.idx` out of step with its file) is logged and 
 average leans towards the most recent years.
 
 The 80 m / 100 m air keeps its own list of runs, so running the backfill again after upgrading fills it for
-the runs you already have, downloading only those two fields (~2 MB per forecast hour, a few GB in all). GFS
-has them from v16 (22 March 2021); earlier runs are noted in that store without data.
+the runs you already have, downloading only those two fields (~2 MB per forecast hour). GFS has them from
+v16 (22 March 2021); earlier runs are noted in that store without data. The same re-run fills `gfs-moments`
+(~8 MB per forecast hour); together, about 40 GB for the default range, from 2021.
 
 ### Upgrading
 
@@ -245,7 +246,7 @@ can be left to finish first.
 
 Upgrading to the version with the 80 m / 100 m air and ensembles: nothing to change in `config.json` (the
 GEFS ensemble and `terrain.fine` are opt-in, `follow_terrain` stays off). Run the backfill once more, which
-fills `gfs-near` and `gfs-moments` for the runs you already have; until it has, climatology dates are
+fills `gfs-near` and `gfs-moments` for the runs you already have (about 40 GB to download); until it has, climatology dates are
 served as before, without the near-surface air or ensembles. `observations.py` needs `xlrd`, installed by
 the requirements line above.
 
