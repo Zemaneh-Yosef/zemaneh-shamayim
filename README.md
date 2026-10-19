@@ -218,12 +218,15 @@ has them from v16 (22 March 2021); earlier runs are noted in that store without 
 
 ### Upgrading
 
-From a fresh checkout of the new version. `config.json` and the data in `/var/lib/zmanim-sky` are kept:
-the copy brings no `config.json`, and new config keys fall back to their defaults.
+Run these from your copy of this repository (not from your home directory: the copy line copies the
+folder you are in). `config.json`, `venv` and the data in `/var/lib/zmanim-sky` are kept, and new config
+keys fall back to their defaults.
 
 ```sh
+cd ~/zemaneh-shamayim                  # your clone of this repository
+git pull
 sudo systemctl stop zmanim-sky-fetch.timer zmanim-sky-api.service
-sudo cp -r ./* /opt/zmanim-sky-server/
+sudo rsync -a --exclude config.json --exclude venv --exclude .git ./ /opt/zmanim-sky-server/
 sudo chown -R zmanim-sky: /opt/zmanim-sky-server
 cd /opt/zmanim-sky-server
 sudo -u zmanim-sky venv/bin/pip install -r requirements.txt
