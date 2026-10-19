@@ -65,6 +65,21 @@ Dates no source covers are left out, and the app uses its next provider (e.g. mo
   `ncep_years`), the fetcher rebuilds it on its next run.
 * Optionally, `backfill_gfs.py` fills your own climatology with past GFS runs (see below), so every
   month has GFS-detail typical profiles from the start instead of waiting a year.
+* Columns on the real ground (`api.follow_terrain`, on by default): a 0.25° model smooths the terrain
+  over ~25 km (GFS has Jerusalem's ground at ~580 m; the city stands at 750–800 m), but the air near the
+  ground, a dawn inversion above all, lies along the real ground: an observer on a ridge stands in it, not
+  200 m above it. So each land column within `max_km` (150) of the observer is moved onto the mean
+  elevation within `ground_radius_m` (1 km) of its point, from the same elevation tiles as `/v1/horizon`
+  (bare-earth layers included): every level keeps its temperature and moves by the ground difference
+  times a weight that is 1 up to `full_m` (500 m) above the model's ground and falls to 0 at `fade_m`
+  (2000 m); above that the column is untouched, and the moved levels' pressures are recomputed
+  hydrostatically. This is what Keller & Hall (2022, *Computers & Geosciences* 161, 105044, Fig. 8) did
+  with radiosondes along the ray from Armon HaNatziv, which brought the winter error from 32 s to 12 s.
+  The profile then carries `groundM` and `modelGroundM`. Ground below sea level counts only where the
+  model's ground is below sea level too (the Dead Sea rift); elsewhere it is the sea floor the default
+  tiles carry offshore. Water columns and columns beyond `max_km` (where the ray is far above the
+  ground) are left as they are; if the elevation tiles can't be read, the columns stay on the model's
+  terrain rather than failing. `"follow_terrain": {"enabled": false}` restores the old profiles.
 * `serve.py` answers `GET /v1/path-profiles?lat=..&lon=..[&from=YYYY-MM-DD][&days=N]` (default:
   yesterday to a week ahead; up to `api.max_days`, 400) with, for each sunrise and sunset, profiles at
   0, 10, 25, 50, 100, 150, 200, 300 and 400 km along the Sun's azimuth, interpolated in space, time
@@ -529,7 +544,8 @@ copies, downloads filling gaps, conversion on download (bounded error, nothing l
 the HTTP endpoint); needs rasterio.
 
 `python3 tests/test_e2e.py` runs the forecast pipeline on synthetic GRIB files shaped like the grib
-filter's output; `python3 tests/test_climatology.py` checks the NOAA climatology build (on synthetic
+filter's output; `python3 tests/test_follow_terrain.py` checks the columns moved onto the real
+ground (heights, pressures, depressions and offshore depths, the fade); `python3 tests/test_climatology.py` checks the NOAA climatology build (on synthetic
 NetCDF files laid out like NOAA's: the 1991–2020 means and the rolling window of yearly files, including
 an unfinished year, a leap year and the stored yearly summaries), your own archive, and date ranges across
 all three sources; `python3 tests/test_haze_calibration.py` checks the AERONET / CAMS calibration on a

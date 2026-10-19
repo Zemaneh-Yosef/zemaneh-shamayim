@@ -36,6 +36,7 @@ import numpy as np
 from common import Cycle, field_names, write_json_atomic
 
 G0, R_DRY = 9.80665, 287.05
+DEPRESSION_M = -20.0                     # as terrain.DEPRESSION_M: below this the low ground is real
 NEAR_FIELD = re.compile(r"^t(\d+)m$")       # t80m: air temperature 80 m above the ground
 MID_MONTH_DOY = [15.5, 45, 74.5, 105, 135.5, 166, 196.5, 227.5, 258, 288.5, 319, 349.5]
 GFS_SLOT_HOURS = 3                      # own climatology: 8 slots of 3 h (UTC)
@@ -138,7 +139,10 @@ def slot_weights(t: datetime, slot_hours: list[float]):
 # Turning field values into a profile (shared with the forecast path)
 # ---------------------------------------------------------------------------------------------
 def build_profile(f: dict, levels_mb: list[int], dist_km: float, lat: float, lon: float,
-                  near_surface_agl: float = 2.0) -> dict:
+                  near_surface_agl: float = 2.0, ground_samples: list[float] | None = None,
+                  follow: dict | None = None) -> dict:
+    """One column of the path. With ground_samples (elevations around the point, see real_ground) and
+    `follow` (api.follow_terrain), its lower part is moved to stand on the real ground: see follow_terrain()."""
     surface_h = f["orog"] + near_surface_agl
     levels = [{"h": round(surface_h, 1), "t": round(f["t2m"] - 273.15, 2), "p": round(f["psfc"] / 100, 2)}]
     # fixed heights above the ground (t80m, t100m), when the source has them; their pressure is
@@ -163,7 +167,59 @@ def build_profile(f: dict, levels_mb: list[int], dist_km: float, lat: float, lon
     prof = {"distanceKm": dist_km, "lat": round(lat, 4), "lon": round(lon, 4), "water": bool(water), "levels": levels}
     if water and "tsfc" in f and math.isfinite(f["tsfc"]):
         prof["skinC"] = round(f["tsfc"] - 273.15, 2)
+    ground_m = real_ground(ground_samples, f["orog"]) if ground_samples else None
+    if ground_m is not None and follow and not water and math.isfinite(ground_m):
+        prof["levels"] = follow_terrain(levels, f["orog"], ground_m, float(follow.get("full_m", 500.0)),
+                                        float(follow.get("fade_m", 2000.0)))
+        prof["modelGroundM"], prof["groundM"] = round(f["orog"], 1), round(ground_m, 1)
     return prof
+
+
+def real_ground(samples: list[float], model_ground: float) -> float:
+    """Mean of elevation samples around a column's point. Heights below sea level count only where the
+    weather model's own ground is below it too (the Dead Sea rift, which GFS has at ~-300 m); elsewhere they
+    are the sea-floor depths the default elevation tiles carry offshore, and count as 0."""
+    if model_ground >= DEPRESSION_M:
+        samples = [max(v, 0.0) for v in samples]
+    return float(np.mean(samples))
+
+
+def follow_terrain(levels: list[dict], model_ground: float, ground: float, full_m: float, fade_m: float) -> list[dict]:
+    """Move a column's lower part onto the real ground. A 0.25 deg model smooths the terrain (GFS puts
+    Jerusalem's ground at ~580 m, the city stands at ~750-800 m), but the air near the ground - a dawn
+    inversion above all - lies along the real ground: an observer on a ridge stands in it, not hundreds of
+    metres above it. Keller & Hall (2022, Computers & Geosciences 161, 105044, Fig. 8) shifted radiosonde
+    profiles to follow the terrain along the ray and cut the winter error at Armon HaNatziv from 32 s to 12 s.
+
+    Each level keeps its temperature and is raised (or lowered) by the ground difference times a weight that
+    is 1 up to `full_m` above the model's ground and falls linearly to 0 at `fade_m` (widened to keep the
+    levels in order where the difference is large); levels above are untouched. Pressures of moved levels
+    are recomputed hydrostatically from the lowest unmoved level down (or from the surface pressure moved
+    to the real ground, when every level moved)."""
+    shift = ground - model_ground
+    if abs(shift) < 1 or not levels:
+        return levels
+    fade_m = max(fade_m, full_m + 2 * abs(shift))
+    out = []
+    for lv in levels:
+        a = lv["h"] - model_ground
+        w = 1.0 if a <= full_m else max(0.0, 1.0 - (a - full_m) / (fade_m - full_m))
+        out.append({**lv, "h": round(lv["h"] + shift * w, 1), "_moved": w > 0})
+    fixed = [i for i, lv in enumerate(out) if not lv["_moved"]]
+    tk = lambda lv: lv["t"] + 273.15                                    # noqa: E731
+    if fixed:
+        for i in range(fixed[0] - 1, -1, -1):
+            hi, lo = out[i + 1], out[i]
+            lo["p"] = round(hi["p"] * math.exp(G0 * (hi["h"] - lo["h"]) / (R_DRY * (tk(hi) + tk(lo)) / 2)), 2)
+    else:
+        b = out[0]
+        b["p"] = round(b["p"] * math.exp(-G0 * shift / (R_DRY * tk(b))), 2)
+        for i in range(1, len(out)):
+            lo, hi = out[i - 1], out[i]
+            hi["p"] = round(lo["p"] * math.exp(-G0 * (hi["h"] - lo["h"]) / (R_DRY * (tk(hi) + tk(lo)) / 2)), 2)
+    for lv in out:
+        del lv["_moved"]
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
