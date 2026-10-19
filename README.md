@@ -434,9 +434,8 @@ from its own position and height, and takes the earliest sunrise (latest sunset)
 
 Checked against Rav Druk's 521 observed sunrises at Armon HaNatziv (1993–96): with Jerusalem's monthly
 minimum temperatures the computed times are within ±7 s of the observations in every month on average
-(rms 11 s with the inversion rule). From `DRUK9396.DAT` in Keller's repository (368 sunrises of 1993–96)
-and approximate Jerusalem normals the same check gives rms 13.6 s; see "Checking against observed sunrises"
-below. For Brooklyn, the 0.8 km vantage set (100 m grid) agrees with a
+(rms 11.7 s with the inversion rule, 10.8 s with ERA5's air along the path); see "Checking against observed
+sunrises" below. For Brooklyn, the 0.8 km vantage set (100 m grid) agrees with a
 brute-force search over a 49-spot grid to within ±5 s.
 
 ## Checking against observed sunrises (`era5_profiles.py`)
@@ -478,20 +477,28 @@ Where the data comes from (`--source`):
 
 Either way the box is kept in `<data_dir>/era5`. `--nc-dir` reads files you downloaded yourself instead. ERA5 has no 80 m / 100 m levels
 (its lowest are 1000 / 975 / 950 / 925 mb), so it checks the path, the terrain and the ground-following but
-not the GFS boundary-layer levels. Results on Rabbi Druk's 368 sunrises of 1993–96 (Armon HaNatziv, eye 754.9 m, SRTM terrain; observed
-minus computed):
+not the GFS boundary-layer levels. Results on Rabbi Druk's sunrises at Armon HaNatziv
+from Keller's spreadsheet (`observations.py "DRUK_10 yr. observations.XLS"`: 521 in 1993–96, 1,400 in 1985–92;
+Keller's spot, eye 754.9 m, SRTM terrain, approximate Jerusalem monthly normals; observed minus computed):
 
-| atmosphere | mean | rms | rms Nov–Jan |
-|---|---|---|---|
-| standard 34.48′ | +5.0 s | 17.4 s | 22–24 s |
-| monthly normals (approximate Jerusalem values) | −5.2 s | 16.1 s | 23–29 s |
-| monthly normals + Keller & Hall's inversion rule | −1.5 s | 13.6 s | 18–22 s |
-| ERA5 path profiles | +0.6 s | 13.5 s | 17–23 s |
-| ERA5 path profiles, `follow_terrain` on | −1.8 s | 15.2 s | 21–26 s |
+| atmosphere | 1993–96 mean | rms | rms Nov–Jan | 1985–92 mean | rms | rms Nov–Jan |
+|---|---|---|---|---|---|---|
+| standard 34.48′ | +6.1 s | 16.3 s | 21.7 s | +4.3 s | 17.2 s | 23.7 s |
+| monthly normals | −4.5 s | 14.0 s | 25.8 s | −6.1 s | 16.2 s | 27.9 s |
+| monthly normals + Keller & Hall's inversion rule | −1.3 s | 11.7 s | 19.1 s | −2.4 s | 13.4 s | 20.3 s |
+| ERA5 path profiles | +1.4 s | 10.8 s | 16.8 s | 0.0 s | 12.2 s | 17.4 s |
 
-Real air along the path does as well as Keller & Hall's tuned rule without any tuning, and is unbiased;
-the winter months stay the hardest. `follow_terrain` (Keller & Hall's radiosonde shift) made it worse, so it
-is off. An eye height of 802 m, used in an earlier version of this README, fits clearly worse (rms 18–21 s).
+Real air along the path does best in both periods, unbiased and with nothing tuned. The winter error is
+scatter, not bias: fitted on one period and scored on the other, no winter correction (the 13 h rule at any
+size, one scaled by ERA5's own inversion, by night length, or by calm clear mornings from ERA5's wind and
+cloud) gained more than 0.5 s, and the rule's fixed 15 s made ERA5 worse (12.4 s and 13.0 s). Yisroel Golan's
+200 sunrises at Nevei Yaakov (2009–13; his shul on Kfar Ivri St, position ±50 m) rank the same: ERA5 9.1 s,
+normals + rule 10.1 s, normals 12.0 s rms (eye at ground level; 8.9 / 9.1 / 10.7 s on a roof). An eye height
+of 802 m, used in an earlier version of this README, fits clearly worse.
+
+On the 368 sunrises in Keller's text file (`DRUK9396.DAT`), which the radiosonde check below also uses, ERA5
+gave +0.6 s / 13.5 s rms and ERA5 with `follow_terrain` on −1.8 s / 15.2 s: the shift (Keller & Hall's, done
+with model air) made it worse, so it is off.
 
 Keller & Hall's own version of `follow_terrain` used Bet Dagan radiosondes shifted along a smoothed curve of the
 terrain (their Fig. 8). `sonde_profiles.py` rebuilds that from NOAA's IGRA file for the station
