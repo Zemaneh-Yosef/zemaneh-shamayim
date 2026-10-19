@@ -1,0 +1,10 @@
+[Unit]
+Description=zmanim-sky-server: check for a new GEFS run every hour (does nothing unless ensemble.enabled)
+
+[Timer]
+OnCalendar=*-*-* *:40:00
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target

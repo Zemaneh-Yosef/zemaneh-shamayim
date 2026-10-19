@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HTTP API: temperature profiles along the sunrise / sunset direction.
 
-    GET /v1/path-profiles?lat=40.71&lon=-74.01[&from=2026-10-05][&days=8]
+    GET /v1/path-profiles?lat=40.71&lon=-74.01[&from=2026-10-05][&days=8][&ensemble=1]
     GET /v1/horizon?lat=31.7486&lon=35.2374[&radius_km=0.8 | &bbox=S,W,N,E][&grid_m=100][&eye=1.7][&height=..][&min_km=1][&moon=1]
     GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..]   (the official area containing the point)
     GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329
@@ -17,6 +17,11 @@ Each event comes from the best source available for it (its "source" field):
     "climatology-gfs"   your own climatology, built from past GFS runs (once a month has enough data)
     "climatology-ncep"  NOAA reanalysis climatology of recent years (the fallback until then)
 Events no source covers are left out; the app then uses its next provider.
+
+With ensemble=1 an event can also carry "ensemble": {"kind", "members": [{"member", "weight", "profiles"}]}:
+for a forecast, every member of the stored GEFS run (fetch_gefs.py), whose spread is how sure the forecast
+is; for a date from the own climatology, the representative variations of the air (climatology.
+sigma_members), whose weighted mean time is the typical sunrise rather than the sunrise of the typical air.
 
 /v1/horizon returns terrain horizon profiles for visible sunrise / sunset (terrain.py), computed from
 elevation tiles (downloaded on first use; bare-earth layers from dem_layers.py when terrain.layers is
@@ -107,7 +112,7 @@ class Store:
             log.info("serving cycle %s", cid)
 
     def refresh_climatology(self) -> None:
-        for src in ("gfs", "gfs-near", "ncep"):
+        for src in ("gfs", "gfs-near", "gfs-moments", "ncep"):
             for r in self.cfg["regions"]:
                 path = clim_dir(self.cfg, src, r["name"])
                 key = (src, r["name"])
@@ -165,8 +170,9 @@ def sample(store: Store, region: str, hour: int, ij) -> np.ndarray:
             + blk[:, 1, 0] * fy * (1 - fx) + blk[:, 1, 1] * fy * fx)
 
 
-def profile_at(store: Store, region: str, t: datetime, lat: float, lon: float, dist_km: float, **follow):
-    """Forecast profile, or None outside the grid / forecast window."""
+def forecast_fields(store, region: str, t: datetime, lat: float, lon: float):
+    """Forecast field values at a place and time (a Store, or one GEFS member's view), or None outside the
+    grid / forecast window."""
     if store.cycle_id is None or region not in store.regions:
         return None
     ij = bilinear(store, region, lat, lon)
@@ -181,25 +187,121 @@ def profile_at(store: Store, region: str, t: datetime, lat: float, lon: float, d
     h0, h1 = hours[k], hours[k + 1]
     w = (tau - h0) / (h1 - h0)
     v = sample(store, region, h0, ij) * (1 - w) + sample(store, region, h1, ij) * w
-    f = {n: v[i] for i, n in enumerate(store.regions[region]["fields"])}
-    return build_profile(f, store.regions[region]["levels_mb"], dist_km, lat, lon, **follow)
+    return {n: v[i] for i, n in enumerate(store.regions[region]["fields"])}
 
 
-def clim_profile_at(store: Store, source: str, region: str, t: datetime, lat: float, lon: float, dist_km: float,
-                    **follow):
+def profile_at(store: Store, region: str, t: datetime, lat: float, lon: float, dist_km: float, **follow):
+    """Forecast profile, or None outside the grid / forecast window."""
+    f = forecast_fields(store, region, t, lat, lon)
+    return None if f is None else build_profile(f, store.regions[region]["levels_mb"], dist_km, lat, lon, **follow)
+
+
+def clim_min_samples(store: Store, source: str) -> int:
+    return int(store.cfg["climatology"]["min_days"]) * climatology.GFS_SLOT_HOURS if source.startswith("gfs") else 1
+
+
+def clim_fields_at(store: Store, source: str, region: str, t: datetime, lat: float, lon: float):
     g = store.clim.get((source, region))
     if g is None:
         return None
-    min_samples = 1
-    if source == "gfs":
-        min_samples = int(store.cfg["climatology"]["min_days"]) * climatology.GFS_SLOT_HOURS
-    f = g.fields_at(t, lat, lon, min_samples)
+    f = g.fields_at(t, lat, lon, clim_min_samples(store, source))
     if f is None:
         return None
     near = store.clim.get(("gfs-near", region)) if source == "gfs" else None
     if near is not None:
-        f.update(near.fields_at(t, lat, lon, min_samples) or {})   # until it has filled in: without them
+        f.update(near.fields_at(t, lat, lon, clim_min_samples(store, source)) or {})   # until it has filled in: without them
+    return f
+
+
+def clim_profile_at(store: Store, source: str, region: str, t: datetime, lat: float, lon: float, dist_km: float,
+                    **follow):
+    f = clim_fields_at(store, source, region, t, lat, lon)
+    if f is None:
+        return None
+    g = store.clim[(source, region)]
     return build_profile(f, g.levels_mb, dist_km, lat, lon, g.near_surface_agl, **follow)
+
+
+class MemberView:
+    """One GEFS member of the stored run, shaped like a Store for forecast_fields()."""
+
+    def __init__(self, cycle_id: str, hours: list[int], regions: dict, member: str):
+        self.cycle_id, self.hours, self.member = cycle_id, hours, member
+        self.regions = {name: {**meta, "dir": meta["dir"] / member} for name, meta in regions.items()}
+        self.arrays: dict = {}
+
+    array = Store.array
+
+
+class EnsembleStore:
+    """The GEFS run fetch_gefs.py published last (reloaded when it publishes a new one)."""
+
+    def __init__(self, cfg: dict):
+        self.cfg = cfg
+        self.lock = threading.Lock()
+        self.cycle_id, self.stamp, self.members = None, None, {}
+
+    def refresh(self) -> None:
+        import fetch_gefs
+        cur = fetch_gefs.gefs_dir(self.cfg) / "current.json"
+        if not cur.exists():
+            return
+        current = json.loads(cur.read_text())
+        if (current["cycle"], current.get("published")) == (self.cycle_id, self.stamp):
+            return
+        with self.lock:
+            cdir = fetch_gefs.gefs_dir(self.cfg) / current["cycle"]
+            info = json.loads((cdir / "cycle.json").read_text())
+            regions = {}
+            for name in info["regions"]:
+                meta = json.loads((cdir / name / "meta.json").read_text())
+                meta["lats"], meta["lons"], meta["dir"] = np.asarray(meta["lats"]), np.asarray(meta["lons"]), cdir / name
+                regions[name] = meta
+            self.members = {m: MemberView(current["cycle"], info["hours"], regions, m) for m in info["members"]}
+            self.cycle_id, self.stamp = current["cycle"], current.get("published")
+            log.info("serving GEFS run %s (%d members)", self.cycle_id, len(self.members))
+
+
+def ensemble_for(store: Store, ens: EnsembleStore | None, source: str, region: str, t: datetime, points,
+                 samples, follow: dict) -> dict | None:
+    """The `ensemble` of an event: every GEFS member's path for a forecast, or the representative variations
+    of a climatology date (climatology.sigma_members); None when there is none for the whole path."""
+    def build(f, levels, agl, dist, plat, plon, smp):
+        kw = {"ground_samples": smp, "follow": follow} if smp is not None else {}
+        return build_profile(f, levels, dist, plat, plon, agl, **kw)
+
+    if source == "forecast" and ens is not None and ens.members:
+        out = []
+        for name, view in ens.members.items():
+            profs = []
+            for (dist, plat, plon), smp in zip(points, samples):
+                f = forecast_fields(view, region, t, plat, plon)
+                if f is None:
+                    return None                          # beyond the GEFS run, or outside its grid
+                profs.append(build(f, view.regions[region]["levels_mb"], 2.0, dist, plat, plon, smp))
+            out.append({"member": name, "profiles": profs})
+        for m in out:
+            m["weight"] = round(1 / len(out), 6)
+        return {"kind": "gefs", "cycle": ens.cycle_id, "members": out}
+    if source == "climatology-gfs":
+        g, mg = store.clim.get(("gfs", region)), store.clim.get(("gfs-moments", region))
+        if g is None or mg is None:
+            return None
+        columns = []
+        for (dist, plat, plon), smp in zip(points, samples):
+            f = clim_fields_at(store, "gfs", region, t, plat, plon)
+            mom = mg.fields_at(t, plat, plon, clim_min_samples(store, "gfs"))
+            if f is None or mom is None:
+                return None
+            columns.append([(w, build(fm, g.levels_mb, g.near_surface_agl, dist, plat, plon, smp))
+                            for w, fm in climatology.sigma_members(f, mom)])
+        if len({len(c) for c in columns}) != 1 or len(columns[0]) < 2:
+            return None
+        return {"kind": "climatology", "members": [
+            {"member": "mean" if k == 0 else f"mode{(k + 1) // 2}{'+' if k % 2 else '-'}",
+             "weight": round(columns[0][k][0], 6), "profiles": [c[k][1] for c in columns]}
+            for k in range(len(columns[0]))]}
+    return None
 
 
 SOURCES = ("forecast", "climatology-gfs", "climatology-ncep")
@@ -224,7 +326,8 @@ class Ground:
         return [list(row) for row in h]
 
 
-def path_profiles(store: Store, lat: float, lon: float, start, days: int, ground: Ground | None = None) -> dict:
+def path_profiles(store: Store, lat: float, lon: float, start, days: int, ground: Ground | None = None,
+                  ensemble: bool = False, ens: EnsembleStore | None = None) -> dict:
     cfg = store.cfg
     region = store.region_for(lat, lon)
     if region is None:
@@ -266,12 +369,20 @@ def path_profiles(store: Store, lat: float, lon: float, start, days: int, ground
                         break                  # left the grid, the forecast window, or data too thin
                     profs.append(p)
                 if profs:
-                    events.append({"date": d.isoformat(), "event": ev, "source": src,
-                                   "timeUtc": t.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                                   "azimuthDeg": round(az, 2), "profiles": profs})
+                    e = {"date": d.isoformat(), "event": ev, "source": src,
+                         "timeUtc": t.strftime("%Y-%m-%dT%H:%M:%SZ"), "azimuthDeg": round(az, 2), "profiles": profs}
+                    if ensemble:
+                        n = len(profs)                 # the path as far as the main source reaches
+                        en = ensemble_for(store, ens, src, region, t, points[:n], samples[:n], follow)
+                        if en:
+                            e["ensemble"] = en
+                    events.append(e)
                     break
     used = {e["source"] for e in events}
     about = {"forecast": "NOAA GFS 0.25 deg via NOMADS"}
+    if any(e.get("ensemble", {}).get("kind") == "gefs" for e in events):
+        about["ensemble"] = f"NOAA GEFS 0.5 deg run {ens.cycle_id}, {len(ens.members)} members"
+        used.add("ensemble")
     for src in ("gfs", "ncep"):
         g = store.clim.get((src, region))
         if g is not None:
@@ -457,6 +568,7 @@ def light_pollution_query(lp: light_pollution.LightPollution, index: areas.AreaI
 class Handler(BaseHTTPRequestHandler):
     store: Store = None  # set in main()
     horizons: Horizons = None
+    ensemble: EnsembleStore = None
     lightpol: light_pollution.LightPollution = None
     areas: areas.AreaIndex = None
     server_version = "zmanim-sky-server/0.1"
@@ -579,7 +691,11 @@ class Handler(BaseHTTPRequestHandler):
             ground = None
             if Handler.horizons is not None:
                 ground = Ground(Handler.horizons.tiles, self.store.cfg["api"].get("follow_terrain") or {})
-            body = path_profiles(self.store, round(lat, 4), round(lon, 4), start, days, ground)
+            want_ens = q.get("ensemble", [""])[0] in ("1", "true")
+            if want_ens and Handler.ensemble is not None:
+                Handler.ensemble.refresh()
+            body = path_profiles(self.store, round(lat, 4), round(lon, 4), start, days, ground,
+                                 ensemble=want_ens, ens=Handler.ensemble)
             only_clim = body["events"] and all(e["source"] != "forecast" for e in body["events"])
             return self.send_json(200, body, cache_s=86400 if only_clim else 1800)
         except (KeyError, ValueError) as e:
@@ -605,6 +721,8 @@ def main(argv=None):
     Handler.store = Store(cfg)
     Handler.store.refresh()
     Handler.horizons = Horizons(cfg)
+    if cfg["ensemble"].get("enabled"):
+        Handler.ensemble = EnsembleStore(cfg)
     Handler.lightpol = light_pollution.LightPollution(cfg)
     Handler.areas = areas.AreaIndex(areas_path(cfg))
     log.info("%d official areas from %s", len(Handler.areas), Handler.areas.path)
