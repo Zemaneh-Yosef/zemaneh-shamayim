@@ -402,6 +402,35 @@ minimum temperatures the computed times are within ±7 s of the observations in 
 (rms 11 s with the inversion rule). For Brooklyn, the 0.8 km vantage set (100 m grid) agrees with a
 brute-force search over a 49-spot grid to within ±5 s.
 
+## Checking against observed sunrises (`era5_profiles.py`)
+
+The forecast and the climatology can't be checked against sunrises someone watched years ago. ERA5
+(ECMWF's reanalysis: the air hour by hour since 1940, 0.25°, 37 pressure levels) can.
+`era5_profiles.py` writes, for any past dates, exactly what `/v1/path-profiles` would have served (same
+JSON, `"source": "era5"`), built by the same code: columns along the Sun's azimuth, on the real ground
+(`api.follow_terrain`, unless `--no-follow-terrain`). royzmanimwebsite's `_denoDebug/validateSunrise.mjs`
+then computes the visible sunrise for each observation with those profiles, with monthly normals (with and
+without Keller & Hall's inversion rule) and with the standard refraction, and reports observed minus
+computed: mean, mean absolute and rms, overall and by month.
+
+```sh
+venv/bin/pip install cdsapi            # and a free CDS key in ~/.cdsapirc (https://cds.climate.copernicus.eu/how-to-api)
+venv/bin/python make_horizon.py 31.7486 35.2374 --height 802 --out armon.json
+venv/bin/python era5_profiles.py --lat 31.7486 --lon 35.2374 --dates druk.csv --event sunrise --out era5.json
+venv/bin/python era5_profiles.py --lat 31.7486 --lon 35.2374 --dates druk.csv --event sunrise --no-follow-terrain --out era5-flat.json
+# in royzmanimwebsite:
+node _denoDebug/validateSunrise.mjs --obs druk.csv --tz Asia/Jerusalem --horizon armon.json \
+     --profiles era5=era5.json --profiles era5-flat=era5-flat.json --normals jerusalem-normals.json --csv out.csv
+```
+
+`--dates` takes any file with a date at the start of each line (the observations CSV itself:
+`date,time[,event]`, local time). Only a box around the paths is requested from the Copernicus Climate
+Data Store, a month at a time and only the hours around the events: a few MB a year, kept in
+`<data_dir>/era5`. `--nc-dir` reads files you downloaded yourself instead. ERA5 has no 80 m / 100 m levels
+(its lowest are 1000 / 975 / 950 / 925 mb), so it checks the path, the terrain and the ground-following but
+not the GFS boundary-layer levels. Comparing `era5` with `era5-flat` on Rabbi Druk's sunrises is the test
+of `follow_terrain` that matters: Keller & Hall's radiosonde version of it helped in winter.
+
 ## Light pollution for nightfall by the stars
 
 `GET /v1/light-pollution?lat=..&lon=..` returns the artificial sky brightness at the zenith: the
@@ -574,6 +603,8 @@ NetCDF files laid out like NOAA's: the 1991–2020 means and the rolling window 
 an unfinished year, a leap year and the stored yearly summaries), your own archive, and date ranges across
 all three sources; `python3 tests/test_haze_calibration.py` checks the AERONET / CAMS calibration on a
 fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint);
+`python3 tests/test_era5.py` checks the ERA5 profiles for past dates on synthetic NetCDF files in both
+CDS layouts (what is requested, time interpolation, ground-following, the command line);
 `python3 tests/test_backfill.py` checks the backfill against a local fake of the AWS
 archive (byte ranges, the pre-2021 layout, cropping, weighting, no double counting with the fetcher). No
 network needed.
@@ -591,6 +622,8 @@ Science 379, 265; average sky vs zenith: Bará, S. et al. (2022), arXiv:2202.075
 Sky Park 2020 annual report. Place lookup: © OpenStreetMap
 contributors (Nominatim), GeoNames.
 
+* Past air for checking against observations (`era5_profiles.py`): Hersbach, H. et al. (2020), ERA5 hourly
+  data on pressure levels / single levels, Copernicus Climate Change Service (C3S) Climate Data Store.
 * Official areas: NYC Department of City Planning (Neighborhood Tabulation Areas), Los Angeles Times
   "Mapping L.A.", US Census Bureau TIGER/Line, Israel Central Bureau of Statistics (statistical areas 2022), Israel Ministry of Interior boundaries via
   OpenStreetMap contributors (ODbL, extract by Geofabrik), Statistics Canada (2021 Census boundary files,
