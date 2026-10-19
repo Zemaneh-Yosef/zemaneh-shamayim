@@ -65,7 +65,7 @@ Dates no source covers are left out, and the app uses its next provider (e.g. mo
   `ncep_years`), the fetcher rebuilds it on its next run.
 * Optionally, `backfill_gfs.py` fills your own climatology with past GFS runs (see below), so every
   month has GFS-detail typical profiles from the start instead of waiting a year.
-* Columns on the real ground (`api.follow_terrain`, on by default): a 0.25° model smooths the terrain
+* Columns on the real ground (`api.follow_terrain`, **off** by default; see the check below): a 0.25° model smooths the terrain
   over ~25 km (GFS has Jerusalem's ground at ~580 m; the city stands at 750–800 m), but the air near the
   ground, a dawn inversion above all, lies along the real ground: an observer on a ridge stands in it, not
   200 m above it. So each land column within `max_km` (150) of the observer is moved onto the mean
@@ -79,7 +79,9 @@ Dates no source covers are left out, and the app uses its next provider (e.g. mo
   there is a depression (the Dead Sea rift: GFS has it at ~−300 m, ERA5 at ~+30 m); a few offshore depths
   the default tiles carry next to a coastal column count as sea level. Water columns and columns beyond `max_km` (where the ray is far above the
   ground) are left as they are; if the elevation tiles can't be read, the columns stay on the model's
-  terrain rather than failing. `"follow_terrain": {"enabled": false}` restores the old profiles.
+  terrain rather than failing. Checked against Rabbi Druk's 368 sunrises of 1993–96 with ERA5 it made
+  the fit worse (rms 15.2 s against 13.5 s without it; in Nov–Jan 23.8 s against 20.2 s, pushing an
+  already late computed sunrise later still), so it is off; `"follow_terrain": {"enabled": true}` turns it on.
 * `serve.py` answers `GET /v1/path-profiles?lat=..&lon=..[&from=YYYY-MM-DD][&days=N]` (default:
   yesterday to a week ahead; up to `api.max_days`, 400) with, for each sunrise and sunset, profiles at
   0, 10, 25, 50, 100, 150, 200, 300 and 400 km along the Sun's azimuth, interpolated in space, time
@@ -281,7 +283,7 @@ Each answer is cached in `<data_dir>/horizons`, so a place costs its computation
 `make_horizon.py` does the same from the command line (same output as `/v1/horizon`; tiles downloaded into `./tiles` unless `--no-download`):
 
 ```sh
-venv/bin/python make_horizon.py 31.7486 35.2374 --height 802 --out armon-hanatziv.json
+venv/bin/python make_horizon.py 31.748553 35.237436 --height 754.9 --out armon-hanatziv.json
 venv/bin/python make_horizon.py 40.6092 -73.9683 --radius-km 0.8 --out brooklyn-vantage.json
 venv/bin/python make_horizon.py --bbox 40.60,-73.98,40.62,-73.955 --out midwood.json
 ```
@@ -432,7 +434,9 @@ from its own position and height, and takes the earliest sunrise (latest sunset)
 
 Checked against Rav Druk's 521 observed sunrises at Armon HaNatziv (1993–96): with Jerusalem's monthly
 minimum temperatures the computed times are within ±7 s of the observations in every month on average
-(rms 11 s with the inversion rule). For Brooklyn, the 0.8 km vantage set (100 m grid) agrees with a
+(rms 11 s with the inversion rule). From `DRUK9396.DAT` in Keller's repository (368 sunrises of 1993–96)
+and approximate Jerusalem normals the same check gives rms 13.6 s; see "Checking against observed sunrises"
+below. For Brooklyn, the 0.8 km vantage set (100 m grid) agrees with a
 brute-force search over a 49-spot grid to within ±5 s.
 
 ## Checking against observed sunrises (`era5_profiles.py`)
@@ -448,7 +452,7 @@ computed: mean, mean absolute and rms, overall and by month.
 
 ```sh
 venv/bin/pip install cdsapi            # and a free CDS key in ~/.cdsapirc (https://cds.climate.copernicus.eu/how-to-api)
-venv/bin/python make_horizon.py 31.7486 35.2374 --height 802 --out armon.json
+venv/bin/python make_horizon.py 31.748553 35.237436 --height 754.9 --out armon.json
 venv/bin/python era5_profiles.py --lat 31.7486 --lon 35.2374 --dates druk.csv --event sunrise --out era5.json
 venv/bin/python era5_profiles.py --lat 31.7486 --lon 35.2374 --dates druk.csv --event sunrise --no-follow-terrain --out era5-flat.json
 # in royzmanimwebsite:
@@ -474,8 +478,20 @@ Where the data comes from (`--source`):
 
 Either way the box is kept in `<data_dir>/era5`. `--nc-dir` reads files you downloaded yourself instead. ERA5 has no 80 m / 100 m levels
 (its lowest are 1000 / 975 / 950 / 925 mb), so it checks the path, the terrain and the ground-following but
-not the GFS boundary-layer levels. Comparing `era5` with `era5-flat` on Rabbi Druk's sunrises is the test
-of `follow_terrain` that matters: Keller & Hall's radiosonde version of it helped in winter.
+not the GFS boundary-layer levels. Results on Rabbi Druk's 368 sunrises of 1993–96 (Armon HaNatziv, eye 754.9 m, SRTM terrain; observed
+minus computed):
+
+| atmosphere | mean | rms | rms Nov–Jan |
+|---|---|---|---|
+| standard 34.48′ | +5.0 s | 17.4 s | 22–24 s |
+| monthly normals (approximate Jerusalem values) | −5.2 s | 16.1 s | 23–29 s |
+| monthly normals + Keller & Hall's inversion rule | −1.5 s | 13.6 s | 18–22 s |
+| ERA5 path profiles | +0.6 s | 13.5 s | 17–23 s |
+| ERA5 path profiles, `follow_terrain` on | −1.8 s | 15.2 s | 21–26 s |
+
+Real air along the path does as well as Keller & Hall's tuned rule without any tuning, and is unbiased;
+the winter months stay the hardest. `follow_terrain` (Keller & Hall's radiosonde shift) made it worse, so it
+is off. An eye height of 802 m, used in an earlier version of this README, fits clearly worse (rms 18–21 s).
 
 ## Light pollution for nightfall by the stars
 
