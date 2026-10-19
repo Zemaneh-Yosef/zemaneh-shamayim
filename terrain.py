@@ -24,6 +24,10 @@ spot in a few km it is seen from. So each azimuth carries its own spot's terrain
 `tiltDeg`: how much higher the Moon stands from that spot than from the reference point (the spot is
 s metres from it towards bearing B: s/R * cos(azimuth - B)), so the client computes the Moon once.
 
+With terrain.fine configured (dem_layers.FineTiles: e.g. USGS 3DEP 1/3", ~10 m), the observer's ground and
+the terrain within its max_km come from that finer model, sampled every one of its cells; the 1" tiles fill
+whatever it doesn't cover.
+
 Terrain closer than min_km to an observer is ignored ("near obstructions removed"): buildings, trees
 and the observer's own surroundings, which the elevation data represents badly.
 The highest point is chosen with a standard refraction coefficient (k = 0.13); the calculator then
@@ -67,6 +71,8 @@ class Tiles:
     wherever they exist; `builder` (optional) is called to make a missing one. Without them, or if
     building fails, the skadi tiles are used as before.
     """
+
+    fine = None                                            # dem_layers.FineTiles for the near range, if set
 
     def __init__(self, folder: Path, url_template: str | None = SKADI, max_in_memory: int = 12,
                  user_agent: str = "zmanim-sky-server/0.1", layered_dir: Path | None = None,
@@ -174,6 +180,17 @@ class Tiles:
     def height(self, lat: float, lon: float) -> float:
         return float(self.heights(np.array([lat]), np.array([lon]))[0])
 
+    def ground_heights(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+        """Heights where people stand: the fine data where it has them, else heights()."""
+        h = self.heights(lat, lon)
+        if self.fine is not None:
+            f = self.fine.heights(lat, lon)
+            h = np.where(np.isfinite(f), f, h)
+        return h
+
+    def ground(self, lat: float, lon: float) -> float:
+        return float(self.ground_heights(np.array([lat]), np.array([lon]))[0])
+
 
 def destinations(lat: float, lon: float, az_deg: np.ndarray, d_m: np.ndarray):
     """Great-circle destinations for every (azimuth, distance) pair: arrays shaped (len(az), len(d))."""
@@ -244,14 +261,26 @@ def moon_azimuth_ranges(lat: float, max_horizon_deg: float = MOON_MAX_HORIZON_DE
             "moonset": (270 - spread - margin, 270 + spread + margin)}
 
 
-def distance_steps(min_km: float, max_km: float, fine: bool = True) -> np.ndarray:
-    """~One elevation cell apart nearby, growing with range (coarser for the vantage pre-screen)."""
+def distance_steps(min_km: float, max_km: float, fine: bool = True, near_step_m: float | None = None,
+                   near_km: float = 0.0) -> np.ndarray:
+    """~One elevation cell apart nearby, growing with range (coarser for the vantage pre-screen). With
+    near_step_m, every near_step_m out to near_km (one cell of the fine near-range data) when fine."""
     out, d = [], max(30.0, min_km * 1000)
     grow, floor = (0.004, 15.0) if fine else (0.015, 40.0)
     while d <= max_km * 1000:
         out.append(d)
-        d += max(floor, d * grow)
+        step = max(floor, d * grow)
+        if fine and near_step_m and d < near_km * 1000:
+            step = near_step_m
+        d += step
     return np.array(out)
+
+
+def steps_for(tiles: "Tiles", min_km: float, max_km: float, fine: bool = True) -> np.ndarray:
+    f = tiles.fine
+    if f is None:
+        return distance_steps(min_km, max_km, fine)
+    return distance_steps(min_km, max_km, fine, near_step_m=f.step_m, near_km=f.max_km)
 
 
 # The AWS "skadi" tiles carry ocean depths (bathymetry) where SRTM has no land: off New York they go to
@@ -273,7 +302,13 @@ def _angles(tiles: Tiles, lat, lon, h_obs, az, ds, chunk: int = 128, floor: floa
     for s in range(0, len(az), chunk):                   # in chunks, to keep memory small
         a = az[s:s + chunk]
         plat, plon = destinations(lat, lon, a, ds)
-        H = np.maximum(tiles.heights(plat, plon), floor)
+        H = tiles.heights(plat, plon)
+        if tiles.fine is not None:                       # the near range from the fine data (where it has any)
+            near = ds <= tiles.fine.max_km * 1000
+            if near.any():
+                Hf = tiles.fine.heights(plat[:, near], plon[:, near])
+                H[:, near] = np.where(np.isfinite(Hf), Hf, H[:, near])
+        H = np.maximum(H, floor)
         ang = (H - h_obs) / ds[None, :] - ds[None, :] / (2 * REFF)
         k = np.argmax(ang, axis=1)
         rows = np.arange(len(a))
@@ -285,11 +320,11 @@ def horizon_for_point(tiles: Tiles, lat: float, lon: float, *, eye: float = 1.7,
                       min_km: float = 1.0, max_km: float = 150.0, az_step: float = 0.1,
                       sides=("sunrise", "sunset"), az_ranges: dict | None = None,
                       floor: float | None = None) -> dict:
-    raw = tiles.height(lat, lon)
+    raw = tiles.ground(lat, lon)
     floor = surface_floor(raw) if floor is None else floor
     ground = max(raw, floor)
     h_obs = height if height is not None else ground + eye
-    ds = distance_steps(min_km, max_km, fine=True)
+    ds = steps_for(tiles, min_km, max_km, fine=True)
     out = {"lat": round(lat, 6), "lon": round(lon, 6), "ground": round(ground, 1), "height": round(h_obs, 1)}
     ranges = az_ranges or azimuth_ranges(lat)
     for side in sides:
@@ -357,17 +392,17 @@ def vantage_search(tiles: Tiles, lat: float, lon: float, radius_km: float = 0.0,
     while max_candidates and len(cands) > max_candidates:
         grid_m *= math.sqrt(len(cands) / max_candidates) * 1.02
         cands = candidate_grid(lat, lon, radius_km=radius_km, bbox=bbox, grid_m=grid_m)
-    floor = surface_floor(tiles.height(lat, lon))
-    raw = tiles.heights(np.array([c[0] for c in cands]), np.array([c[1] for c in cands])) if cands else np.array([])
+    floor = surface_floor(tiles.ground(lat, lon))
+    raw = tiles.ground_heights(np.array([c[0] for c in cands]), np.array([c[1] for c in cands])) if cands else np.array([])
     # spots in the sea / a bay (below sea level where the area isn't a depression) can't be stood on
     dry = raw >= floor - 3.0
     if dry.any():
         cands, raw = [c for c, k in zip(cands, dry) if k], raw[dry]
     if not cands:
-        cands, raw = [(lat, lon)], np.array([tiles.height(lat, lon)])
+        cands, raw = [(lat, lon)], np.array([tiles.ground(lat, lon)])
     grounds = np.maximum(raw, floor)
     ranges = azimuth_ranges(lat)
-    ds_coarse = distance_steps(min_km, max_km, fine=False)
+    ds_coarse = steps_for(tiles, min_km, max_km, fine=False)
     winners: dict[int, dict] = {}
     for side, (lo, hi) in ranges.items():
         az = np.arange(lo, hi + 1e-9, 0.5)
@@ -420,8 +455,8 @@ def moon_horizon(tiles: Tiles, lat0: float, lon0: float, spots, heights, *, floo
     heights = np.asarray(heights, dtype=float)
     dist, bearing = _offsets(lat0, lon0, spots)
     ranges = moon_azimuth_ranges(lat0)
-    ds_coarse = distance_steps(min_km, max_km, fine=False)
-    ds_fine = distance_steps(min_km, max_km, fine=True)
+    ds_coarse = steps_for(tiles, min_km, max_km, fine=False)
+    ds_fine = steps_for(tiles, min_km, max_km, fine=True)
     out = {"lat": round(lat0, 6), "lon": round(lon0, 6), "percentile": percentile, "spots": len(spots)}
     used = set()
     for side, (lo, hi) in ranges.items():
@@ -497,7 +532,7 @@ def horizon_set(tiles: Tiles, lat: float | None = None, lon: float | None = None
         hz["wins"] = {s: [[round(a % 360, 2), round(b % 360, 2)]] for s, (a, b) in r.items()}
         res = {"mode": "point", "points": [hz]}
         if moon:
-            fl = surface_floor(tiles.height(lat, lon))
+            fl = surface_floor(tiles.ground(lat, lon))
             res["moon"] = moon_horizon(tiles, lat, lon, [(lat, lon)], [hz["height"]], floor=fl,
                                        min_km=min_km, max_km=max_km, percentile=moon_percentile)
     else:

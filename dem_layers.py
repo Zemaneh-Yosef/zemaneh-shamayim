@@ -34,6 +34,7 @@ import math
 import os
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -150,15 +151,61 @@ class Builder:
         return not (b[2] < ds.bounds.left or b[0] > ds.bounds.right or b[3] < ds.bounds.bottom or b[1] > ds.bounds.top)
 
     # -- building -----------------------------------------------------------------------------------------
+    def merge(self, transform, n: int, bounds: tuple[float, float, float, float], label: str,
+              tiles: list[tuple[int, int]]):
+        """An n x n grid (geographic, `transform`) filled pixel by pixel from the sources in order: (float32
+        array with NaN where no source has data, {source name: fraction filled}). bounds: west, south, east,
+        north of the grid (with its half-pixel margin); tiles: the 1x1 degree tiles whose per-tile files
+        (templated paths) are read."""
+        import rasterio
+        from rasterio.warp import Resampling, reproject
+
+        west, south, east, north = bounds
+        dst = np.full((n, n), np.nan, dtype=np.float32)
+        stats: dict[str, float] = {}
+        with rasterio.Env(**self.env):
+            for src in self.sources:
+                if not np.isnan(dst).any():
+                    break
+                filled = 0
+                opened = []
+                for lat_i, lon_i in tiles:
+                    for ds in self._open(src, lat_i, lon_i):
+                        if not any(ds is o for o in opened):
+                            opened.append(ds)
+                kept = self._datasets.get(src["name"], [])
+                for ds in opened:
+                    if not self._overlaps(ds, west, south, east, north):
+                        continue
+                    tmp = np.full((n, n), np.nan, dtype=np.float32)
+                    try:
+                        reproject(source=rasterio.band(ds, 1), destination=tmp,
+                                  src_nodata=ds.nodata, dst_transform=transform, dst_crs="EPSG:4326",
+                                  dst_nodata=np.nan, resampling=Resampling.bilinear)
+                    except Exception as e:
+                        for o in opened:
+                            if not any(o is k for k in kept):
+                                o.close()
+                        raise SourceError(f"source {src['name']}: reading {ds.name} for {label} failed: {e}") from e
+                    if src.get("min_valid") is not None:  # e.g. sentinel values some products use
+                        tmp[tmp < float(src["min_valid"])] = np.nan
+                    take = np.isnan(dst) & np.isfinite(tmp)
+                    dst[take] = tmp[take]
+                    filled += int(take.sum())
+                for ds in opened:                          # per-tile files are not reused
+                    if not any(ds is k for k in kept):
+                        ds.close()
+                if filled:
+                    stats[src["name"]] = filled / dst.size
+        return dst, stats
+
     def path(self, lat_i: int, lon_i: int) -> Path:
         return self.out / f"{terrain.tile_name(lat_i, lon_i)}.npy"
 
     def build(self, lat_i: int, lon_i: int, force: bool = False) -> "np.ndarray | None":
         """The merged tile (float32, N x N, row 0 = north edge), built and saved if not there yet;
         None for open sea (no source has data and there is no skadi tile), like Tiles.tile()."""
-        import rasterio
         from rasterio.transform import Affine
-        from rasterio.warp import Resampling, reproject
 
         f = self.path(lat_i, lon_i)
         sea = f.with_suffix(".sea")
@@ -174,40 +221,8 @@ class Builder:
             t0 = time.time()
             # sample centres on the 1" grid lines, edges included (like .hgt)
             transform = Affine(STEP, 0, lon_i - STEP / 2, 0, -STEP, lat_i + 1 + STEP / 2)
-            west, south, east, north = lon_i - STEP, lat_i - STEP, lon_i + 1 + STEP, lat_i + 1 + STEP
-            dst = np.full((N, N), np.nan, dtype=np.float32)
-            stats: dict[str, float] = {}
-            with rasterio.Env(**self.env):
-                for src in self.sources:
-                    if not np.isnan(dst).any():
-                        break
-                    filled = 0
-                    opened = self._open(src, lat_i, lon_i)
-                    kept = self._datasets.get(src["name"], [])
-                    for ds in opened:
-                        if not self._overlaps(ds, west, south, east, north):
-                            continue
-                        tmp = np.full((N, N), np.nan, dtype=np.float32)
-                        try:
-                            reproject(source=rasterio.band(ds, 1), destination=tmp,
-                                      src_nodata=ds.nodata, dst_transform=transform, dst_crs="EPSG:4326",
-                                      dst_nodata=np.nan, resampling=Resampling.bilinear)
-                        except Exception as e:
-                            for o in opened:
-                                if not any(o is k for k in kept):
-                                    o.close()
-                            raise SourceError(f"source {src['name']}: reading {ds.name} for "
-                                              f"{terrain.tile_name(lat_i, lon_i)} failed: {e}") from e
-                        if src.get("min_valid") is not None:  # e.g. sentinel values some products use
-                            tmp[tmp < float(src["min_valid"])] = np.nan
-                        take = np.isnan(dst) & np.isfinite(tmp)
-                        dst[take] = tmp[take]
-                        filled += int(take.sum())
-                    for ds in opened:                          # per-tile files are not reused
-                        if not any(ds is k for k in kept):
-                            ds.close()
-                    if filled:
-                        stats[src["name"]] = filled / dst.size
+            dst, stats = self.merge(transform, N, (lon_i - STEP, lat_i - STEP, lon_i + 1 + STEP, lat_i + 1 + STEP),
+                                    terrain.tile_name(lat_i, lon_i), [(lat_i, lon_i)])
             rest = np.isnan(dst)
             if rest.any():
                 base = self.base.tile(lat_i, lon_i) if self.base is not None else None
@@ -243,6 +258,142 @@ def tile_fields(lat_i: int, lon_i: int) -> dict:
             "NS": "N" if top >= 0 else "S", "EW": "E" if lon_i >= 0 else "W",
             "lat_top": abs(top), "lon_left": abs(lon_i), "lat": lat_i, "lon": lon_i,
             "name": terrain.tile_name(lat_i, lon_i)}
+
+
+# ------------------------------------------------------------------------------------------------------------
+# Fine near-range terrain (terrain.fine): a finer grid for the terrain close to the observer
+# ------------------------------------------------------------------------------------------------------------
+FINE_CHUNK_DEG = 0.1        # fine data is kept in 0.1 x 0.1 degree chunks (1081 x 1081 at 1/3")
+FINE_VERSION = 1
+
+
+def fine_signature(cfg_fine: dict | None) -> str | None:
+    srcs = enabled_sources(cfg_fine)
+    if not srcs:
+        return None
+    blob = json.dumps({"v": FINE_VERSION, "step": float(cfg_fine.get("step_arcsec", 1 / 3)),
+                       "s": [[s["name"], s["paths"]] for s in srcs]}, sort_keys=True)
+    return hashlib.sha1(blob.encode()).hexdigest()[:10]
+
+
+class FineTiles:
+    """Heights from a finer elevation model, for terrain within `max_km` of the observer (terrain.py).
+
+    The angle a ridge subtends is its height error over its distance, so the terrain nearby needs the most
+    precise data: 5 m at 5 km is 3.4' - about 15 s of sunrise at 32 N, more at higher latitudes (Keller &
+    Hall 2022) - while the same 5 m at 50 km is 0.3'. A 1" (30 m) grid also shaves the tops off narrow
+    ridges. Where a finer bare-earth model is free (USGS 3DEP 1/3", ~10 m, in the US; lidar DTMs) this reads
+    it for the near range only: built on demand in 0.1 degree chunks of `step_arcsec`, merged from
+    terrain.fine.sources like the 1" layers, and NaN where none of them has data (the caller then uses the
+    1" tiles). A chunk with no data at all is a marker file."""
+
+    def __init__(self, cfg: dict, max_in_memory: int = 48):
+        fine = cfg["terrain"].get("fine") or {}
+        self.sig = fine_signature(fine)
+        if not self.sig:
+            raise ValueError("terrain.fine.sources has no enabled source")
+        self.max_km = float(fine.get("max_km", 10.0))
+        self.step = float(fine.get("step_arcsec", 1 / 3)) / 3600.0
+        self.n = int(round(FINE_CHUNK_DEG / self.step)) + 1
+        self.names = [s["name"] for s in enabled_sources(fine)]
+        base = Path(fine.get("dir") or Path(cfg["data_dir"]) / "dem-fine")
+        self.dir = base / self.sig
+        self.dir.mkdir(parents=True, exist_ok=True)
+        self.builder = None
+        if fine.get("auto_build", True):
+            try:
+                self.builder = Builder(fine, self.dir, None)
+            except ImportError:
+                log.warning("terrain.fine needs rasterio to build chunks: only prebuilt ones are used")
+        self.cache: "OrderedDict[tuple[int, int], np.ndarray | None]" = OrderedDict()
+        self.max = max_in_memory
+        self.lock = threading.Lock()
+        self.failed: dict[tuple[int, int], float] = {}     # chunk -> when a build failed (retried later)
+        self.build_lock = threading.Lock()                 # one chunk built at a time
+
+    @property
+    def step_m(self) -> float:
+        return self.step * 111195.0
+
+    def chunk_name(self, k: tuple[int, int]) -> str:
+        return f"{'n' if k[0] >= 0 else 's'}{abs(k[0]):04d}{'e' if k[1] >= 0 else 'w'}{abs(k[1]):04d}"
+
+    def chunk(self, k: tuple[int, int]) -> "np.ndarray | None":
+        with self.lock:
+            if k in self.cache:
+                self.cache.move_to_end(k)
+                return self.cache[k]
+        a = self._load_or_build(k)
+        with self.lock:
+            self.cache[k] = a
+            if len(self.cache) > self.max:
+                self.cache.popitem(last=False)
+        return a
+
+    def _load_or_build(self, k: tuple[int, int]) -> "np.ndarray | None":
+        f = self.dir / f"{self.chunk_name(k)}.npy"
+        if f.exists():
+            return np.load(f, mmap_mode="r")
+        if f.with_suffix(".none").exists() or self.builder is None:
+            return None
+        with self.build_lock:
+            if f.exists() or f.with_suffix(".none").exists():
+                return self._load_or_build(k)
+            return self._build(k, f)
+
+    def _build(self, k: tuple[int, int], f: Path) -> "np.ndarray | None":
+        if time.time() - self.failed.get(k, 0) < 3600:
+            return None
+        from rasterio.transform import Affine
+        lat0, lon0 = k[0] * FINE_CHUNK_DEG, k[1] * FINE_CHUNK_DEG
+        st, top = self.step, lat0 + FINE_CHUNK_DEG
+        transform = Affine(st, 0, lon0 - st / 2, 0, -st, top + st / 2)
+        bounds = (lon0 - st, lat0 - st, lon0 + FINE_CHUNK_DEG + st, top + st)
+        t0 = time.time()
+        try:
+            # the 1x1 degree files around the chunk: its edge samples can lie in a neighbour's
+            dst, stats = self.builder.merge(transform, self.n, bounds, self.chunk_name(k),
+                                            tiles_in(lat0 - st, lon0 - st, top + st, lon0 + FINE_CHUNK_DEG + st))
+        except SourceError as e:
+            self.failed[k] = time.time()
+            log.warning("fine terrain %s not built (%s); using the 1\" tiles there", self.chunk_name(k), e)
+            return None
+        if not stats:
+            f.with_suffix(".none").write_text("")
+            return None
+        tmpf = f.with_name(f.stem + ".tmp.npy")
+        np.save(tmpf, dst)
+        os.replace(tmpf, f)
+        log.info("built fine terrain %s in %.1f s: %s", self.chunk_name(k), time.time() - t0,
+                 ", ".join(f"{n} {v:.0%}" for n, v in stats.items()))
+        return np.load(f, mmap_mode="r")
+
+    def heights(self, lat: np.ndarray, lon: np.ndarray) -> np.ndarray:
+        """Bilinear heights (m), NaN where the fine data has none (outside its sources, or not built)."""
+        lat = np.asarray(lat, dtype=np.float64)
+        lon = (np.asarray(lon, dtype=np.float64) + 180) % 360 - 180
+        out = np.full(lat.shape, np.nan)
+        ki = np.floor(lat / FINE_CHUNK_DEG + 1e-9).astype(int)
+        kj = np.floor(lon / FINE_CHUNK_DEG + 1e-9).astype(int)
+        keys = ki * 100000 + kj
+        for key in np.unique(keys):
+            m = keys == key
+            k = (int(ki[m].flat[0]), int(kj[m].flat[0]))
+            a = self.chunk(k)
+            if a is None:
+                continue
+            r = (k[0] * FINE_CHUNK_DEG + FINE_CHUNK_DEG - lat[m]) / self.step
+            c = (lon[m] - k[1] * FINE_CHUNK_DEG) / self.step
+            i = np.clip(r.astype(int), 0, self.n - 2)
+            j = np.clip(c.astype(int), 0, self.n - 2)
+            fy, fx = r - i, c - j
+            out[m] = (a[i, j] * (1 - fy) * (1 - fx) + a[i, j + 1] * (1 - fy) * fx
+                      + a[i + 1, j] * fy * (1 - fx) + a[i + 1, j + 1] * fy * fx)
+        return out
+
+
+def make_fine(cfg: dict) -> "FineTiles | None":
+    return FineTiles(cfg) if fine_signature(cfg["terrain"].get("fine")) else None
 
 
 def make_builder(cfg: dict, base_tiles: "terrain.Tiles | None") -> "Builder | None":

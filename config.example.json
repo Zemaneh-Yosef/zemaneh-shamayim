@@ -97,6 +97,19 @@
           ]
         }
       ]
+    },
+    "fine": {
+      "max_km": 10.0,
+      "step_arcsec": 0.3333333333,
+      "auto_build": true,
+      "sources": [
+        {
+          "name": "usgs-3dep-13arcsec",
+          "paths": [
+            "/vsicurl/https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/{ns}{lat_top:02d}{ew}{lon_left:03d}/USGS_13_{ns}{lat_top:02d}{ew}{lon_left:03d}.tif"
+          ]
+        }
+      ]
     }
   },
   "light_pollution": {

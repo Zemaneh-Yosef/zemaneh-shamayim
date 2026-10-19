@@ -302,6 +302,12 @@ class Horizons:
         if self.dem:
             log.info("bare-earth layers %s (%s): %s", self.dem, layered_dir, ", ".join(self.dem_sources))
         self.tiles = terrain.Tiles(folder, url, user_agent=ua, layered_dir=layered_dir, builder=builder)
+        # finer terrain for the near range (terrain.fine), e.g. USGS 3DEP 1/3"
+        self.tiles.fine = dem_layers.make_fine(cfg)
+        self.fine = self.tiles.fine and {"sig": self.tiles.fine.sig, "km": self.tiles.fine.max_km}
+        if self.fine:
+            log.info("fine near-range terrain %s within %g km: %s", self.fine["sig"], self.fine["km"],
+                     ", ".join(self.tiles.fine.names))
         self.dir = data / "horizons"
         self.dir.mkdir(parents=True, exist_ok=True)
         self.slots = threading.BoundedSemaphore(int(t["max_parallel"]))
@@ -356,6 +362,8 @@ class Horizons:
         # the terrain source list and the horizon algorithm's version are part of the key, so changing either
         # recomputes (neither changes the key while unset / at version 1, so old caches stay valid)
         key_src = {**p, "dem": self.dem} if self.dem else dict(p)
+        if self.fine:
+            key_src["fine"] = self.fine
         if terrain.ALGO_VERSION != 1:
             key_src["algo"] = terrain.ALGO_VERSION
         key = hashlib.sha1(json.dumps(key_src, sort_keys=True).encode()).hexdigest()[:20]
@@ -372,6 +380,9 @@ class Horizons:
                                       moon=p.get("moon", False), moon_percentile=p.get("moon_percentile", 90.0))
             if self.dem:
                 res["terrain"] = {"layers": self.dem, "sources": self.dem_sources}
+            if self.fine:
+                res.setdefault("terrain", {})["fine"] = {"signature": self.fine["sig"], "withinKm": self.fine["km"],
+                                                         "sources": self.tiles.fine.names}
             body = gzip.compress(json.dumps(res, separators=(",", ":")).encode())
             tmp = f.with_suffix(".tmp")
             tmp.write_bytes(body)

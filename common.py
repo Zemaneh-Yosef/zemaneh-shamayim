@@ -81,6 +81,16 @@ DEFAULT_CONFIG = {
                                   # otherwise only tiles built with `dem_layers.py build` are used
             "sources": [],
         },
+        # Finer elevation data for the terrain near the observer (dem_layers.FineTiles), where a height error
+        # costs the most time. Off while "sources" is empty. Sources as in "layers" (e.g. USGS 3DEP 1/3",
+        # lidar DTMs); built on demand in 0.1 degree chunks (needs rasterio), ~4.5 MB each at 1/3".
+        "fine": {
+            "dir": "",            # default: <data_dir>/dem-fine (a subfolder per source list)
+            "max_km": 10.0,       # terrain this close comes from the fine data, sampled every cell
+            "step_arcsec": 1 / 3,
+            "auto_build": True,
+            "sources": [],
+        },
     },
     "light_pollution": {
         # World Atlas of Artificial Night Sky Brightness (Falchi et al. 2016, CC BY-NC 4.0), in the

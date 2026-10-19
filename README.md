@@ -311,6 +311,27 @@ sea-only tiles are a marker file). The signature is a hash of the enabled source
 horizon cache key: changing the source list starts a new tile set and recomputes horizons. Horizons
 from merged data carry `"terrain": {"layers": <signature>, "sources": [...]}`.
 
+### Fine terrain near the observer (`terrain.fine`)
+
+A height error turns into an angle divided by its distance: 5 m at 5 km is 3.4′, about 15 s of sunrise at
+32°N (more at higher latitudes), while the same 5 m at 50 km is 0.3′ (Keller & Hall 2022). A 1″ (30 m) grid
+also shaves the tops off narrow ridges and hillsides. So with `terrain.fine.sources` set, the observer's
+ground and all terrain within `max_km` (default 10 km) come from a finer bare-earth model, sampled every
+one of its cells (`step_arcsec`, default 1/3″ ≈ 10 m); beyond that, and wherever the fine model has no
+data, the 1″ tiles / layers are used as before.
+
+The example config uses USGS 3DEP 1/3″ (US, bare earth, read per 1×1° file from USGS's bucket like the
+1″ layer). Any GDAL-readable bare-earth source works, e.g. a 1 m lidar DTM where a state or province
+publishes one (NRCan's HRDEM in Canada). Israel has no free source finer than the 1″ layers (the Survey
+of Israel's DTM would go here, if licensed).
+
+Data is built on demand (needs rasterio) in 0.1° chunks, ~4.5 MB each at 1/3″, under
+`<data_dir>/dem-fine/<signature>/`. A chunk no source covers is a marker file, so places outside the
+sources cost one look. A failed read is retried after an hour and the 1″ data is used meanwhile. The
+fine settings are part of the horizon cache key, so turning them on recomputes the horizons. At Monsey
+(sunset over a hillside 1.2 km away) 3DEP 1/3″ moved the horizon by 1.2′ on average and up to 5.9′ against
+the 1″ data.
+
 ### Official areas (`area=auto`)
 
 With `area=auto` the client sends only its coordinates; the server finds the official area it is in -
@@ -537,6 +558,9 @@ policy asks that its use acknowledge the AERONET network and the station PIs.
 from the Israeli grid, open sea, aborting on unreadable sources) on synthetic rasters; needs rasterio.
 
 `python3 tests/test_areas.py` checks build_areas.py, the lookup and `area=auto` without network.
+
+`python3 tests/test_fine_terrain.py` checks the near-range fine terrain on a synthetic 1/3″ source (a
+narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers); needs rasterio.
 
 `python3 tests/test_light_pollution.py` checks the light-pollution lookup on synthetic atlas tiles (pixel
 indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC
