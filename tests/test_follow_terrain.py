@@ -74,6 +74,7 @@ def main():
     check(m["groundM"] == -420.0 and m["levels"][0]["h"] == -418.0, f"moved down to {m['levels'][0]['h']} m")
     check(real_ground([-85.0, 10.0, -20.0, 30.0], 12.0) == 10.0, "off the coast the sea floor counts as sea level")
     check(real_ground([-400.0, -420.0], -306.0) == -410.0, "in a depression the model has, it counts")
+    check(real_ground([-400.0, -420.0], 33.0) == -410.0, "and in one a smoother model (ERA5) has lost")
 
     print("3. no change over water, or when the grounds agree")
     f = fields(0.0); f["land"] = 0.0

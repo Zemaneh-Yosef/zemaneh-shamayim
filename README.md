@@ -75,9 +75,9 @@ Dates no source covers are left out, and the app uses its next provider (e.g. mo
   (2000 m); above that the column is untouched, and the moved levels' pressures are recomputed
   hydrostatically. This is what Keller & Hall (2022, *Computers & Geosciences* 161, 105044, Fig. 8) did
   with radiosondes along the ray from Armon HaNatziv, which brought the winter error from 32 s to 12 s.
-  The profile then carries `groundM` and `modelGroundM`. Ground below sea level counts only where the
-  model's ground is below sea level too (the Dead Sea rift); elsewhere it is the sea floor the default
-  tiles carry offshore. Water columns and columns beyond `max_km` (where the ray is far above the
+  The profile then carries `groundM` and `modelGroundM`. Ground below sea level counts where the ground
+  there is a depression (the Dead Sea rift: GFS has it at ~−300 m, ERA5 at ~+30 m); a few offshore depths
+  the default tiles carry next to a coastal column count as sea level. Water columns and columns beyond `max_km` (where the ray is far above the
   ground) are left as they are; if the elevation tiles can't be read, the columns stay on the model's
   terrain rather than failing. `"follow_terrain": {"enabled": false}` restores the old profiles.
 * `serve.py` answers `GET /v1/path-profiles?lat=..&lon=..[&from=YYYY-MM-DD][&days=N]` (default:
@@ -85,6 +85,36 @@ Dates no source covers are left out, and the app uses its next provider (e.g. mo
   0, 10, 25, 50, 100, 150, 200, 300 and 400 km along the Sun's azimuth, interpolated in space, time
   of day and season, plus the `source` used. `GET /v1/status` shows the live cycle and, per region,
   how many days of your own climatology each month holds (`days_per_month`, `months_ready`).
+
+### Ensembles (`&ensemble=1`): typical outcomes and error bars
+
+`GET /v1/path-profiles?...&ensemble=1` adds to each event an `"ensemble": {"kind", "members": [{"member",
+"weight", "profiles"}]}`. The app traces every member and sums up the times (royzmanimwebsite's
+`ensemble.js`: weighted mean, standard deviation, quantiles):
+
+* **Climatology dates** (`kind: "climatology"`): the sunrise of the typical air is not the typical
+  sunrise. Refraction grows faster than linearly with an inversion's strength: on a real Jerusalem
+  January profile, cooling the lowest 150 m by 4 K moved sunrise 12.7 s earlier, while warming them by 4 K
+  moved it only 10.3 s later. So the own climatology also keeps a third store, `gfs-moments`: running sums
+  of eight low-level temperatures (2 m, 80 m, 1000–850 mb) and of their pairwise products, i.e. their
+  spread and how they vary together, by month and slot like the rest. For each column the server takes
+  the three strongest ways they vary together (eigenvectors of the covariance: usually the whole column
+  warmer or colder, then an inversion stronger or weaker), and sends the typical air plus the air moved
+  ±2 standard deviations along each. That is seven members, with unscented-transform weights (1/4, then
+  1/8 each). Their weighted mean time is the typical sunrise to second order; their spread is how far a
+  given year's morning strays from it. The store fills like `gfs-near`: from live runs, and from a backfill
+  re-run, which for runs already added downloads only those eight fields (~8 MB per forecast hour). It is
+  ~670 MB for the US box, a few MB for Israel.
+* **Forecast dates** (`kind: "gefs"`): every member of the GFS ensemble. `fetch_gefs.py` (with
+  `"ensemble": {"enabled": true}`; its own timer, `deploy/zmanim-sky-gefs.*`) stores the control run and
+  `ensemble.members` (default 10) of GEFS's 30 perturbed runs. GEFS's two 0.5° files together have the
+  same fields as GFS here (13 levels, 2 m / 80 m / 100 m, surface), every 3 hours to `max_hours` (168),
+  from the 00Z run, through NOMADS's grib filter. That is ~1250 requests per region per run (~45 min at
+  2 s apart), ~0.7 GB stored for the US box. Where the members agree on the morning's air the sunrise is
+  well forecast (a few seconds); where an inversion may or may not form, the spread says so.
+
+Without `&ensemble=1` the answer is as before. Members are built by the same code as the main profiles
+(the 80 m / 100 m levels, `follow_terrain`).
 
 ## Install (Debian/Ubuntu)
 
@@ -147,6 +177,9 @@ Then the services:
 sudo cp deploy/zmanim-sky-fetch.service deploy/zmanim-sky-fetch.timer deploy/zmanim-sky-api.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now zmanim-sky-fetch.timer zmanim-sky-api.service
+# with "ensemble": {"enabled": true} in config.json (see "Ensembles"):
+sudo cp deploy/zmanim-sky-gefs.service deploy/zmanim-sky-gefs.timer /etc/systemd/system/
+sudo systemctl daemon-reload && sudo systemctl enable --now zmanim-sky-gefs.timer
 curl http://127.0.0.1:8787/v1/status
 ```
 
@@ -424,9 +457,22 @@ node _denoDebug/validateSunrise.mjs --obs druk.csv --tz Asia/Jerusalem --horizon
 ```
 
 `--dates` takes any file with a date at the start of each line (the observations CSV itself:
-`date,time[,event]`, local time). Only a box around the paths is requested from the Copernicus Climate
-Data Store, a month at a time and only the hours around the events: a few MB a year, kept in
-`<data_dir>/era5`. `--nc-dir` reads files you downloaded yourself instead. ERA5 has no 80 m / 100 m levels
+`date,time[,event]`, local time). `observations.py` writes that CSV from Chaim Keller's observation files
+(github.com/chaimkeller/software, `observations-all-places/`): Rabbi Druk's at Armon HaNatziv 1985–96
+(`DRUK.001`, `DRUK9396.DAT`), Yisroel Golan's at Nevei Yaakov 2009–13, Rabbi Zuriel's in Bnei Brak 1961–92;
+all in standard time all year (`--tz Etc/GMT-2`). Druk's spot is 31.748553, 35.237436 (Keller's DRUK
+program), eye 754.9 m above sea level (Keller & Hall).
+
+Where the data comes from (`--source`):
+
+* `cds` (default): the Copernicus Climate Data Store. Only a box around the paths is requested, a month at
+  a time and only the hours around the events: a few MB a year. Needs a free key, and requests queue.
+* `ncar`: NSF NCAR's copy on AWS (no key; `pip install h5py fsspec requests aiohttp`). It stores the whole
+  globe per hour in one compressed chunk, so each hour of temperature and geopotential means reading
+  ~110 MB (only the box is kept): about 20 GB per 100 sunrises, ~1 min per month of observations with
+  `--parallel 8`.
+
+Either way the box is kept in `<data_dir>/era5`. `--nc-dir` reads files you downloaded yourself instead. ERA5 has no 80 m / 100 m levels
 (its lowest are 1000 / 975 / 950 / 925 mb), so it checks the path, the terrain and the ground-following but
 not the GFS boundary-layer levels. Comparing `era5` with `era5-flat` on Rabbi Druk's sunrises is the test
 of `follow_terrain` that matters: Keller & Hall's radiosonde version of it helped in winter.
@@ -603,6 +649,8 @@ NetCDF files laid out like NOAA's: the 1991–2020 means and the rolling window 
 an unfinished year, a leap year and the stored yearly summaries), your own archive, and date ranges across
 all three sources; `python3 tests/test_haze_calibration.py` checks the AERONET / CAMS calibration on a
 fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint);
+`python3 tests/test_ensemble.py` checks the ensembles: the representative variations (weights, mean,
+the modes' spread), the `gfs-moments` store, and GEFS members from `fetch_gefs.py` on synthetic files;
 `python3 tests/test_era5.py` checks the ERA5 profiles for past dates on synthetic NetCDF files in both
 CDS layouts (what is requested, time interpolation, ground-following, the command line);
 `python3 tests/test_backfill.py` checks the backfill against a local fake of the AWS
@@ -611,7 +659,7 @@ network needed.
 
 ## Data credits
 
-GFS: NOAA/NCEP. Elevation: NASA SRTM and USGS 3DEP (via the AWS Terrain Tiles open dataset); with
+GFS and GEFS: NOAA/NCEP. Elevation: NASA SRTM and USGS 3DEP (via the AWS Terrain Tiles open dataset); with
 `terrain.layers`: USGS 3DEP, Natural Resources Canada MRDEM (Open Government Licence - Canada), and
 FABDEM V1-2 (Hawker et al. 2022, University of Bristol; CC BY-NC-SA 4.0, contains modified Copernicus
 Service information). Reanalysis climatology: NCEP/NCAR Reanalysis 1, data provided by the NOAA PSL,

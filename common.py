@@ -58,6 +58,19 @@ DEFAULT_CONFIG = {
         "hourly": "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25_1hr.pl",
         "three_hourly": "https://nomads.ncep.noaa.gov/cgi-bin/filter_gfs_0p25.pl",
     },
+    # The GFS ensemble (fetch_gefs.py): how sure each forecast sunrise is (/v1/path-profiles?...&ensemble=1)
+    "ensemble": {
+        "enabled": False,
+        "members": 10,            # perturbed members besides the control (GEFS has 30)
+        "cycles": [0],            # runs fetched (each ~45 min of requests per region at 2 s apart)
+        "max_hours": 168,
+        "step_hours": 3,
+        "cycles_to_keep": 1,
+        "grib_filter": {
+            "a": "https://nomads.ncep.noaa.gov/cgi-bin/filter_gefs_atmos_0p50a.pl",
+            "b": "https://nomads.ncep.noaa.gov/cgi-bin/filter_gefs_atmos_0p50b.pl",
+        },
+    },
     "terrain": {
         "tiles_dir": "",          # default: <data_dir>/tiles (SRTM tiles are downloaded there as needed)
         "tiles_url": "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{ns}/{name}.hgt.gz",

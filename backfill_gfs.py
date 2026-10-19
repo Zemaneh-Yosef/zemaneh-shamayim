@@ -20,7 +20,8 @@ fetcher keeps), so nothing is downloaded or counted twice, and it can run alongs
 A damaged archive file is logged and skipped.
 
 The air 80 m and 100 m above the ground (`near_surface_m`) goes to its own store ("gfs-near", see
-climatology.py), which keeps its own list of runs. A backfill run after those levels were added therefore
+climatology.py), which keeps its own list of runs; so do the low-level temperatures' sums and products
+("gfs-moments": 8 fields, ~8 MB per forecast hour for runs the other stores already have). A backfill run after those levels were added therefore
 fetches, for runs the main store already has, only those two fields (~2 MB per forecast hour). GFS has them
 from v16 (22 March 2021); earlier runs are recorded in that store without data, so they aren't asked again.
 
@@ -239,7 +240,7 @@ def backfill(cfg: dict, start: date, end: date, every: int, parallel: int, base:
              phase: int | None = None) -> int:
     grids = region_grids(cfg)
     all_fields = cycle_field_names(cfg)
-    store_names = {s: climatology.store_fields(s, all_fields, cfg["pressure_levels_mb"]) for s in climatology.GFS_STORES}
+    store_names = {s: climatology.store_inputs(s, all_fields, cfg["pressure_levels_mb"]) for s in climatology.GFS_STORES}
     stores = [s for s in climatology.GFS_STORES if store_names[s]]
     targets = {r["name"]: climatology.clim_dir(cfg, "gfs", r["name"]) for r in cfg["regions"]}
     if phase is None:
@@ -250,10 +251,11 @@ def backfill(cfg: dict, start: date, end: date, every: int, parallel: int, base:
                                   for r in cfg["regions"])) if cfg["regions"] else set() for s in stores}
     todo = [c for c in cycles if any(c.id not in done[s] for s in stores)]
     full = sum(1 for c in todo if c.id not in done["gfs"])
+    mb = sum(22 if c.id not in done["gfs"] else 1.1 * len({n for st in stores if c.id not in done[st] for n in store_names[st]})
+             for c in todo)
     log.info("%s .. %s, every %d days (phase %d): %d runs, %d already in the climatology, %d to add, %d of them "
-             "only the near-surface fields (~%.0f GB to download)", start, end, every, phase % every, len(cycles),
-             len(cycles) - len(todo), len(todo), len(todo) - full,
-             (full * 22 + (len(todo) - full) * 2) * len(HOURS) / 1024)
+             "only some fields (~%.0f GB to download)", start, end, every, phase % every, len(cycles),
+             len(cycles) - len(todo), len(todo), len(todo) - full, mb * len(HOURS) / 1024)
     if dry_run or not todo:
         return 0
     t0, nbytes, added_runs = time.time(), 0, 0
@@ -261,7 +263,7 @@ def backfill(cfg: dict, start: date, end: date, every: int, parallel: int, base:
         for n, cycle in enumerate(todo, 1):
             need = [s for s in stores if cycle.id not in done[s]]
             names = [f for f in all_fields if any(f in store_names[s] for s in need)]
-            optional = store_names.get("gfs-near", [])      # GFS has them only from v16 (March 2021)
+            optional = [n for n in names if climatology.NEAR_FIELD.match(n) and n != "t2m"]   # from GFS v16 (March 2021)
             paths = [Path(tmpd) / f"f{h:03d}.grib2" for h in HOURS]
             def one(hp):
                 try:
@@ -294,7 +296,8 @@ def backfill(cfg: dict, start: date, end: date, every: int, parallel: int, base:
                     for r in cfg["regions"]:
                         g = grids[r["name"]]
                         rows, cols = crop_index(glats, glons, g["lats"], g["lons"])
-                        per_store[(s, r["name"])].append((cycle.time + timedelta(hours=h), arr[idx][:, rows][:, :, cols]))
+                        per_store[(s, r["name"])].append((cycle.time + timedelta(hours=h),
+                                                          climatology.store_sample(s, arr[idx][:, rows][:, :, cols])))
             for s in need:
                 for r in cfg["regions"]:
                     with climatology.locked(climatology.clim_dir(cfg, s, r["name"])):
