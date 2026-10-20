@@ -436,6 +436,21 @@ sudo -u zmanim-sky venv/bin/python dem_layers.py test-fine 48.8566 2.3522 --exam
 It builds that 0.1° chunk in a temporary folder, says which source filled it and how long it took, and
 compares it with the 1″ data your server uses (a median difference over 3 m means a datum or units problem,
 or the wrong layer). At Toronto HRDEM differs from the 1″ data by +0.4 m (median), at Montreal −1.1 m.
+On your server, IGN's service took ~15-20 s per chunk (Paris: −1.2 m against FABDEM, Nice: +0.5 m).
+
+Chunks are built when a horizon first needs them, one at a time: ~9 for a point (the 10 km around it), more
+for a city's area, so the first horizon request in a new area can take minutes and outlast a web server's
+timeout (it carries on building, and the next request is quick). Build the places you serve ahead of time
+instead; chunks already built are skipped, and a failed one is listed (run it again):
+
+```sh
+sudo -u zmanim-sky venv/bin/python dem_layers.py build-fine --around 48.8566 2.3522 --km 25   # Paris and its suburbs
+sudo -u zmanim-sky venv/bin/python dem_layers.py build-fine --bbox 43.6 7.1 43.8 7.4         # Nice
+```
+
+`--km` is the radius to cover: the area's own radius plus `terrain.fine.max_km` (10). With `--example` it uses
+the example config's sources before `config.json` has them; the chunks go where the server will look once it
+has the same ones. ~4.5 MB a chunk (Paris within 25 km: ~60 chunks, ~270 MB, ~20 min from IGN).
 
 Data is built on demand (needs rasterio) in 0.1° chunks, ~4.5 MB each at 1/3″, under
 `<data_dir>/dem-fine/<signature>/`. A chunk no source covers is a marker file, so places outside the

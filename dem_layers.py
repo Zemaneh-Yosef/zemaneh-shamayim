@@ -438,6 +438,43 @@ class FineTiles:
         return out
 
 
+def build_fine(cfg: dict, around, bbox, km: float | None, example: bool = False) -> int:
+    """dem_layers.py build-fine: every fine chunk within km of a point (or in a box), built and kept, one at a
+    time (as the server does). Chunks already built are skipped; a failed one is listed and built by running it
+    again (or by the first request that needs it)."""
+    fine = json.loads((HERE / "config.example.json").read_text())["terrain"]["fine"] if example \
+        else cfg["terrain"].get("fine")
+    if not fine_signature(fine):
+        print("no enabled terrain.fine sources" + ("" if example else " in config.json (try --example)"))
+        return 1
+    ft = FineTiles({**cfg, "terrain": {**cfg["terrain"], "fine": fine}})
+    if around:
+        r = km if km is not None else ft.max_km
+        dlat, dlon = r / 111.19, r / (111.19 * max(0.05, math.cos(math.radians(around[0]))))
+        bbox = (around[0] - dlat, around[1] - dlon, around[0] + dlat, around[1] + dlon)
+    s, w, n, e = bbox
+    f = lambda x: math.floor(x / FINE_CHUNK_DEG + 1e-9)   # noqa: E731
+    keys = [(i, j) for i in range(f(s), f(n) + 1) for j in range(f(w), f(e) + 1)]
+    have = lambda k: (ft.dir / f"{ft.chunk_name(k)}.npy").exists() or (ft.dir / f"{ft.chunk_name(k)}.none").exists()  # noqa: E731
+    todo = [k for k in keys if not have(k)]
+    log.info("%d chunks (%.2f..%.2f N, %.2f..%.2f E) in %s: %d already built, %d to build", len(keys), s, n, w, e,
+             ft.dir, len(keys) - len(todo), len(todo))
+    t0, built, empty, failed = time.time(), 0, 0, []
+    for m, k in enumerate(todo, 1):
+        a = ft.chunk(k)
+        if a is not None:
+            built += 1
+        elif k in ft.failed:
+            failed.append(ft.chunk_name(k))
+        else:
+            empty += 1
+        el = time.time() - t0
+        log.info("%d/%d %s; about %.0f min left", m, len(todo), ft.chunk_name(k), el / m * (len(todo) - m) / 60)
+    log.info("done in %.1f min: %d built, %d without fine data, %d failed%s", (time.time() - t0) / 60, built, empty,
+             len(failed), f" ({', '.join(failed)}: run again)" if failed else "")
+    return 1 if failed else 0
+
+
 def test_fine(cfg: dict, lat: float, lon: float, example: bool = False) -> int:
     """dem_layers.py test-fine: one 0.1 degree chunk of fine terrain at (lat, lon), built in a temporary folder
     from the configured (or the example config's) fine sources, against the 1" data the server uses now."""
@@ -520,6 +557,15 @@ def main():
                    "restart the API afterwards: it keeps tiles in memory)")
     b.add_argument("--existing", action="store_true", help="only tiles already built (with --force: rebuild "
                    "those; the others are built from the new files when first needed)")
+    bf = sub.add_parser("build-fine", help="build the fine-terrain chunks around a place ahead of time, so the first "
+                        "horizon request there doesn't wait for them")
+    gf = bf.add_mutually_exclusive_group(required=True)
+    gf.add_argument("--around", nargs=2, type=float, metavar=("LAT", "LON"))
+    gf.add_argument("--bbox", nargs=4, type=float, metavar=("S", "W", "N", "E"))
+    bf.add_argument("--km", type=float, default=None, help="radius for --around (default terrain.fine.max_km: what "
+                    "a horizon at that point reads; give the city's radius + that for a whole city)")
+    bf.add_argument("--example", action="store_true", help="use config.example.json's terrain.fine sources (the "
+                    "chunks are kept where the server will look once config.json has the same sources)")
     tf = sub.add_parser("test-fine", help="build the fine-terrain chunk at a place in a temporary folder, time it "
                         "and compare it with the 1\" data (nothing is kept)")
     tf.add_argument("lat", type=float)
@@ -537,6 +583,8 @@ def main():
     t = cfg["terrain"]
     if a.cmd == "test-fine":
         return test_fine(cfg, a.lat, a.lon, a.example)
+    if a.cmd == "build-fine":
+        return build_fine(cfg, a.around, a.bbox, a.km, a.example)
     out = layers_dir(cfg)
     if out is None:
         raise SystemExit("terrain.layers.sources has no enabled source in the config: nothing to build")
