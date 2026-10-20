@@ -45,6 +45,24 @@ def run(tmp: Path, json_out: Path | None):
     assert fetch_gfs.main(["--config", str(cfg_path), "--cycle", cycle.id, "--source-dir", str(src)]) == 0
     # second run must be a no-op
     assert fetch_gfs.main(["--config", str(cfg_path), "--cycle", cycle.id, "--source-dir", str(src)]) == 0
+    # a region added: the stored cycle is fetched again, keeping nyc (its files are not in src2, so it must)
+    reg2 = {"name": "extra", "north": 33.0, "south": 30.0, "west": 33.0, "east": 36.0}
+    cfg2_path = tmp / "config2.json"
+    cfg2_path.write_text(json.dumps({**cfg, "regions": [REGION, reg2]}))
+    src2 = tmp / "src2"
+    for h in forecast_hours(full):
+        write(src2 / reg2["name"] / fetch_gfs.grib_file_name(cycle, h), reg2,
+              t2m_land=283.15, t2m_sea=285.15, skin_sea=289.15, coast_lon=34.5, near_inversion_k=3.0)
+    (src2 / REGION["name"]).mkdir(parents=True)
+    first = sorted((src / REGION["name"]).iterdir())[-1]           # the availability probe's file only
+    (src2 / REGION["name"] / first.name).write_bytes(first.read_bytes())
+    nyc_before = (fetch_gfs.gfs_dir(full) / cycle.id / "nyc" / "f000.npy").stat().st_ino
+    assert fetch_gfs.main(["--config", str(cfg2_path), "--cycle", cycle.id, "--source-dir", str(src2)]) == 0
+    stored = fetch_gfs.gfs_dir(full) / cycle.id
+    assert (stored / "extra" / "f000.npy").exists()
+    assert (stored / "nyc" / "f000.npy").stat().st_ino == nyc_before, "nyc kept (linked), not fetched again"
+    # back to the original config for the rest (the API serves this cycle)
+    assert fetch_gfs.main(["--config", str(cfg_path), "--cycle", cycle.id, "--source-dir", str(src)]) == 0
 
     serve.Handler.store = serve.Store(full)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)

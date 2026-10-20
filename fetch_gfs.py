@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import logging
 import shutil
 import sys
@@ -169,6 +170,36 @@ def stored_matches_config(cfg: dict, cdir: Path, hours: list[int], partial: bool
         return False
 
 
+def reuse_regions(cfg: dict, final: Path, work: Path, hours: list[int]) -> None:
+    """When a stored cycle is fetched again because the regions changed (one added, say), the regions it
+    already holds unchanged are linked into the new one instead of downloaded again."""
+    if not (final / "complete").exists():
+        return
+    try:
+        stored_hours = json.loads((final / "cycle.json").read_text())["hours"]
+    except (OSError, ValueError, KeyError):
+        return
+    if stored_hours != hours:
+        return
+    for r in cfg["regions"]:
+        src, dst = final / r["name"], work / r["name"]
+        try:
+            meta = json.loads((src / "meta.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if meta.get("region") != r or meta.get("levels_mb") != cfg["pressure_levels_mb"] \
+                or meta.get("fields") != cycle_field_names(cfg) or dst.exists() \
+                or not all((src / f"f{h:03d}.npy").exists() for h in hours):
+            continue
+        dst.mkdir()
+        for f in src.iterdir():
+            try:
+                os.link(f, dst / f.name)                  # same disk: no copy
+            except OSError:
+                shutil.copy2(f, dst / f.name)
+        log.info("%s %s: kept from the stored cycle", final.name, r["name"])
+
+
 def fetch_cycle(cfg: dict, cycle: Cycle, source_dir: Path | None = None) -> bool:
     hours = forecast_hours(cfg)
     root = gfs_dir(cfg)
@@ -182,6 +213,7 @@ def fetch_cycle(cfg: dict, cycle: Cycle, source_dir: Path | None = None) -> bool
     if work.exists() and not stored_matches_config(cfg, work, hours, partial=True):
         shutil.rmtree(work)                       # leftover from an older configuration
     work.mkdir(parents=True, exist_ok=True)
+    reuse_regions(cfg, final, work, hours)
     delay = float(cfg.get("request_delay_s", 2.0))
 
     def get(hour: int, region: dict, dest: Path) -> bool:
