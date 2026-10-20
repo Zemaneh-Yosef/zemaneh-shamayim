@@ -848,9 +848,10 @@ Real air along the path does best in both periods, unbiased and with nothing tun
 scatter, not bias: fitted on one period and scored on the other, no winter correction (the 13 h rule at any
 size, one scaled by ERA5's own inversion, by night length, or by calm clear mornings from ERA5's wind and
 cloud) gained more than 0.5 s, and the rule's fixed 15 s made ERA5 worse (12.4 s and 13.0 s). Yisroel Golan's
-200 sunrises at Nevei Yaakov (2009–13; his shul on Kfar Ivri St, position ±50 m) rank the same: ERA5 9.1 s,
-normals + rule 10.1 s, normals 12.0 s rms (eye at ground level; 8.9 / 9.1 / 10.7 s on a roof). An eye height
-of 802 m, used in an earlier version of this README, fits clearly worse.
+200 sunrises at Nevei Yaakov (2009–13, from the "MA" shul, 31.842162 N 35.246491 E, ground 692.5 m) rank the
+same: ERA5 9.2 s rms (mean +2.1 s), normals + rule 9.5 s, normals 10.9 s, the standard 34.48′ 15.9 s, with the
+eye at ground level; an eye on the roof (+10 m) fits worse (10.7 / 10.5 / 11.1 s). An eye height of 802 m at
+Armon HaNatziv, used in an earlier version of this README, fits clearly worse.
 
 ### Columns on the real ground (`follow_terrain`) and radiosondes
 

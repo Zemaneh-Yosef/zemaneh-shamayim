@@ -21,7 +21,8 @@ output's time zone is Etc/GMT-2 (POSIX sign: UTC+2), written as a comment line a
     python3 observations.py Golan_20*.csv --out golan.csv
 
 Places (Keller & Hall): Armon HaNatziv 31.748553 N 35.237436 E (Rabbi Druk's shul, from Keller's DRUK
-program), observer 754.9 m above sea level; Nevei Yaakov and Bnei Brak as in their paper.
+program), observer 754.9 m above sea level; Nevei Yaakov: Golan's "MA" shul, 31.842162 N 35.246491 E (ground
+692.5 m); Bnei Brak as in their paper.
 """
 from __future__ import annotations
 
