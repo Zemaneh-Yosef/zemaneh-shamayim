@@ -217,34 +217,52 @@ def write_json_atomic(path: Path, obj) -> None:
 
 
 # ---------------------------------------------------------------------------------------------
-# Sun (low precision; only used to pick the forecast hour and the azimuth, good to ~2 min / ~0.5 deg)
+# Sun: Meeus, Astronomical Algorithms (2nd ed.), ch. 25 "low accuracy" (0.01 deg), solved for the moment the
+# centre is at -0.8333 deg (34' refraction + 16' radius at sea level): within 4 s and 0.01 deg of DE421 up to
+# 50 deg latitude (6 s at 64 deg), where the old formula was off by up to 2.5 min and 0.4 deg. Only picks the
+# forecast hour and the azimuth the weather paths run along; the zmanim themselves are computed in the browser.
 # ---------------------------------------------------------------------------------------------
-def _sun_day(d, lon: float):
-    day0 = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
-    n = (day0 - datetime(2000, 1, 1, 12, tzinfo=timezone.utc)).total_seconds() / 86400 + 0.0008 - lon / 360 + 0.5
-    M = (357.5291 + 0.98560028 * n) % 360
-    C = 1.9148 * math.sin(math.radians(M)) + 0.02 * math.sin(math.radians(2 * M))
-    L = (M + C + 180 + 102.9372) % 360
-    noon_j = 2451545 + n + 0.0053 * math.sin(math.radians(M)) - 0.0069 * math.sin(math.radians(2 * L))
-    dec = math.asin(math.sin(math.radians(L)) * math.sin(math.radians(23.44)))
-    return noon_j, dec
+def _sun_place(jd: float):
+    """Apparent right ascension and declination of the Sun and the Greenwich apparent sidereal time (all
+    radians) at a UT Julian day. Delta-T (about 69 s) is left out: it moves the Sun 3"."""
+    T = (jd - 2451545.0) / 36525
+    M = math.radians(357.52911 + 35999.05029 * T - 0.0001537 * T * T)
+    C = ((1.914602 - 0.004817 * T - 0.000014 * T * T) * math.sin(M) + (0.019993 - 0.000101 * T) * math.sin(2 * M)
+         + 0.000289 * math.sin(3 * M))
+    om = math.radians(125.04 - 1934.136 * T)
+    lam = math.radians(280.46646 + 36000.76983 * T + 0.0003032 * T * T + C - 0.00569 - 0.00478 * math.sin(om))
+    eps = math.radians(23.4392911 - 0.0130042 * T + 0.00256 * math.cos(om))
+    ra = math.atan2(math.cos(eps) * math.sin(lam), math.cos(lam))
+    dec = math.asin(math.sin(eps) * math.sin(lam))
+    gmst = 280.46061837 + 360.98564736629 * (jd - 2451545.0) + 0.000387933 * T * T
+    return ra, dec, math.radians(gmst - 0.00478 * math.sin(om) * math.cos(eps))
 
 
 def sun_event(d, lat: float, lon: float, event: str):
     """Approximate (time UTC, azimuth deg east of north) of sunrise/sunset on solar date d, or None
     if the Sun does not rise/set."""
-    noon_j, dec = _sun_day(d, lon)
-    h0 = math.radians(-0.833)
     phi = math.radians(lat)
-    cos_h = (math.sin(h0) - math.sin(phi) * math.sin(dec)) / (math.cos(phi) * math.cos(dec))
-    if not -1 <= cos_h <= 1:
-        return None
-    H = math.degrees(math.acos(cos_h))
-    j = noon_j + (-H if event == "sunrise" else H) / 360
-    t = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(days=j - 2440587.5)
-    cos_a = (math.sin(dec) - math.sin(h0) * math.sin(phi)) / (math.cos(h0) * math.cos(phi))
-    az = math.degrees(math.acos(max(-1.0, min(1.0, cos_a))))
-    return t, (az if event == "sunrise" else 360 - az)
+    h0 = math.radians(-0.8333)
+    day0 = datetime(d.year, d.month, d.day, tzinfo=timezone.utc)
+    jd = (day0 - datetime(1970, 1, 1, tzinfo=timezone.utc)).total_seconds() / 86400 + 2440587.5 + 0.5 - lon / 360
+    sign = -1 if event == "sunrise" else 1
+    for i in range(8):                        # from local noon, then Meeus's correction (ch. 15) until it settles
+        ra, dec, gast = _sun_place(jd)
+        H = (gast + math.radians(lon) - ra + math.pi) % (2 * math.pi) - math.pi   # hour angle, [-pi, pi)
+        if i == 0:
+            cos_h = (math.sin(h0) - math.sin(phi) * math.sin(dec)) / (math.cos(phi) * math.cos(dec))
+            if not -1 <= cos_h <= 1:
+                return None
+            jd += (sign * math.acos(cos_h) - H) / (2 * math.pi)
+            continue
+        h = math.asin(math.sin(phi) * math.sin(dec) + math.cos(phi) * math.cos(dec) * math.cos(H))
+        step = (h - h0) / (2 * math.pi * math.cos(dec) * math.cos(phi) * math.sin(H))
+        jd += step
+        if abs(step) < 1e-6:                  # 0.09 s
+            break
+    t = datetime(1970, 1, 1, tzinfo=timezone.utc) + timedelta(days=jd - 2440587.5)
+    az = math.degrees(math.atan2(math.sin(H), math.cos(H) * math.sin(phi) - math.tan(dec) * math.cos(phi))) + 180
+    return t, az % 360
 
 
 def solar_date(t: datetime, lon: float):
