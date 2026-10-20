@@ -1,6 +1,7 @@
 """Shared helpers for zmanim-sky-server: config, storage layout, sun and geodesy."""
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -261,3 +262,21 @@ def destination(lat: float, lon: float, azimuth_deg: float, distance_km: float):
     p2 = math.asin(math.sin(p1) * math.cos(d) + math.cos(p1) * math.sin(d) * math.cos(a))
     l2 = l1 + math.atan2(math.sin(a) * math.sin(d) * math.cos(p1), math.cos(d) - math.sin(p1) * math.sin(p2))
     return math.degrees(p2), (math.degrees(l2) + 540) % 360 - 180
+
+
+@contextlib.contextmanager
+def single_run(lock_file: Path):
+    """Yields True if this process holds the lock (released at exit), False if another process does: one
+    fetcher at a time, whether started by its timer or by hand (two would write the same cycle's files)."""
+    import fcntl
+    lock_file.parent.mkdir(parents=True, exist_ok=True)
+    with open(lock_file, "w") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)

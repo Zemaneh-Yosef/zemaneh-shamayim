@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common import Cycle, cycle_field_names, forecast_hours, gfs_dir, load_config, write_json_atomic
+from common import Cycle, cycle_field_names, forecast_hours, gfs_dir, load_config, single_run, write_json_atomic
 
 log = logging.getLogger("fetch_gfs")
 
@@ -306,6 +306,14 @@ def main(argv=None) -> int:
                         format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
     gfs_dir(cfg).mkdir(parents=True, exist_ok=True)
+    with single_run(gfs_dir(cfg) / ".fetch.lock") as mine:
+        if not mine:
+            log.info("another fetch_gfs.py is running (the timer's, or one started by hand): leaving it to that one")
+            return 0
+        return fetch_latest(cfg, args)
+
+
+def fetch_latest(cfg: dict, args) -> int:
     cycles = [Cycle.parse(args.cycle)] if args.cycle else latest_cycles(cfg, datetime.now(timezone.utc))
     for cycle in cycles:
         try:

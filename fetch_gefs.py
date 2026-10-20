@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common import Cycle, cycle_field_names, load_config, write_json_atomic
+from common import Cycle, cycle_field_names, load_config, single_run, write_json_atomic
 from fetch_gfs import decode, download, latest_cycles
 
 log = logging.getLogger("fetch_gefs")
@@ -152,6 +152,14 @@ def main(argv=None) -> int:
         log.info("ensemble.enabled is off in the config: nothing to do")
         return 0
     gefs_dir(cfg).mkdir(parents=True, exist_ok=True)
+    with single_run(gefs_dir(cfg) / ".fetch.lock") as mine:
+        if not mine:
+            log.info("another fetch_gefs.py is running (the timer's, or one started by hand): leaving it to that one")
+            return 0
+        return fetch_latest(cfg, a)
+
+
+def fetch_latest(cfg: dict, a) -> int:
     ecfg = {**cfg, "cycles": cfg["ensemble"].get("cycles", [0])}
     cycles = [Cycle.parse(a.cycle)] if a.cycle else latest_cycles(ecfg, datetime.now(timezone.utc))
     for cycle in cycles:
