@@ -452,6 +452,10 @@ sudo -u zmanim-sky venv/bin/python dem_layers.py build-fine --bbox 43.6 7.1 43.8
 the example config's sources before `config.json` has them; the chunks go where the server will look once it
 has the same ones. ~4.5 MB a chunk (Paris within 25 km: ~60 chunks, ~270 MB, ~20 min from IGN).
 
+`deploy/prebuild-fine.sh` does this for a list of communities in the US, Canada and France (New York, Monsey,
+Lakewood, Los Angeles, Baltimore, Chicago, Toronto, Paris, ...; ~750 chunks, ~3.5 GB): add `--example` until
+`config.json` has the fine sources, `--only NAME` for one place. Edit its list for your own places.
+
 Data is built on demand (needs rasterio) in 0.1° chunks, ~4.5 MB each at 1/3″, under
 `<data_dir>/dem-fine/<signature>/`. A chunk no source covers is a marker file, so places outside the
 sources cost one look. A failed read is retried after an hour and the 1″ data is used meanwhile. The
