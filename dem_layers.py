@@ -42,6 +42,8 @@ import numpy as np
 from common import load_config
 import terrain
 
+HERE = Path(__file__).resolve().parent
+
 log = logging.getLogger("dem_layers")
 
 N = 3601                    # samples per side, as in 1 arc-second .hgt (edges shared with neighbours)
@@ -113,10 +115,13 @@ class Builder:
         if src["name"] not in self._datasets:
             paths: list[str] = []
             for p in static:
+                p = os.path.expanduser(p)
+                if not p.startswith(("/", "/vsi", "<")) and "://" not in p and (HERE / p).exists():
+                    p = str(HERE / p)                      # e.g. sources/ign-rgealti-5m.xml, shipped here
                 if any(ch in p for ch in "*?[") and not p.startswith("/vsi"):
-                    paths += sorted(glob.glob(os.path.expanduser(p)))
+                    paths += sorted(glob.glob(p))
                 else:
-                    paths.append(os.path.expanduser(p))
+                    paths.append(p)
             kept = []
             for p in paths:
                 try:
@@ -433,6 +438,54 @@ class FineTiles:
         return out
 
 
+def test_fine(cfg: dict, lat: float, lon: float, example: bool = False) -> int:
+    """dem_layers.py test-fine: one 0.1 degree chunk of fine terrain at (lat, lon), built in a temporary folder
+    from the configured (or the example config's) fine sources, against the 1" data the server uses now."""
+    import shutil
+    import tempfile
+    fine = json.loads((HERE / "config.example.json").read_text())["terrain"]["fine"] if example \
+        else cfg["terrain"].get("fine")
+    if not fine_signature(fine):
+        print("no enabled terrain.fine sources" + ("" if example else " in config.json (try --example)"))
+        return 1
+    tmp = tempfile.mkdtemp(prefix="test-fine-")
+    try:
+        ft = FineTiles({"data_dir": tmp, "terrain": {"fine": {**fine, "dir": tmp, "auto_build": True}}})
+        if ft.builder is None:
+            print("rasterio is not installed: it is needed to build fine terrain")
+            return 1
+        k = (math.floor(lat / FINE_CHUNK_DEG + 1e-9), math.floor(lon / FINE_CHUNK_DEG + 1e-9))
+        t0 = time.time()
+        a = ft.chunk(k)
+        took = time.time() - t0
+        if a is None:
+            print(f"no fine data at {lat}, {lon}" + (" (the build FAILED: see the warning above)" if k in ft.failed
+                                                       else " (no source covers it)") + f"; {took:.1f} s")
+            return 1
+        a = np.asarray(a)
+        st = ft.step
+        i, j = np.mgrid[0:ft.n:9, 0:ft.n:9]
+        plat = k[0] * FINE_CHUNK_DEG + FINE_CHUNK_DEG - i * st
+        plon = k[1] * FINE_CHUNK_DEG + j * st
+        t = cfg["terrain"]
+        coarse = terrain.Tiles(Path(t["tiles_dir"] or Path(cfg["data_dir"]) / "tiles"), t["tiles_url"] or None,
+                               layered_dir=layers_dir(cfg))
+        c = coarse.heights(plat.ravel(), plon.ravel()).reshape(plat.shape)
+        f = a[i, j]
+        d = f - c
+        ok = np.isfinite(d)
+        print(f"chunk {ft.chunk_name(k)} built in {took:.1f} s; fine data at {np.isfinite(a).mean():.0%} of it, "
+              f"{np.nanmin(a):.1f} .. {np.nanmax(a):.1f} m")
+        print(f"fine - 1\" data: median {np.median(d[ok]):+.2f} m, middle half {np.percentile(d[ok], 25):+.2f} .. "
+              f"{np.percentile(d[ok], 75):+.2f} m, 99% within {np.percentile(np.abs(d[ok]), 99):.1f} m "
+              f"({ok.sum()} points)")
+        if abs(np.median(d[ok])) > 3:
+            print("WARNING: the median differs by more than 3 m: a datum or units problem, or the wrong layer")
+        return 0
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def make_fine(cfg: dict) -> "FineTiles | None":
     return FineTiles(cfg) if fine_signature(cfg["terrain"].get("fine")) else None
 
@@ -467,15 +520,23 @@ def main():
                    "restart the API afterwards: it keeps tiles in memory)")
     b.add_argument("--existing", action="store_true", help="only tiles already built (with --force: rebuild "
                    "those; the others are built from the new files when first needed)")
+    tf = sub.add_parser("test-fine", help="build the fine-terrain chunk at a place in a temporary folder, time it "
+                        "and compare it with the 1\" data (nothing is kept)")
+    tf.add_argument("lat", type=float)
+    tf.add_argument("lon", type=float)
+    tf.add_argument("--example", action="store_true", help="try config.example.json's terrain.fine sources "
+                    "(before copying them into config.json)")
     i = sub.add_parser("info", help="show which sources a built tile came from")
     i.add_argument("tile", help="e.g. N40W074")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-    # GDAL's own notes, e.g. the 404 of a per-tile source (USGS 3DEP) outside its coverage: expected, not news
-    logging.getLogger("rasterio").setLevel(logging.WARNING)
+    if a.cmd != "test-fine":   # GDAL's own notes, e.g. a per-tile source's (USGS 3DEP) 404 outside its coverage
+        logging.getLogger("rasterio").setLevel(logging.WARNING)
 
     cfg = load_config(a.config)
     t = cfg["terrain"]
+    if a.cmd == "test-fine":
+        return test_fine(cfg, a.lat, a.lon, a.example)
     out = layers_dir(cfg)
     if out is None:
         raise SystemExit("terrain.layers.sources has no enabled source in the config: nothing to build")
@@ -494,4 +555,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

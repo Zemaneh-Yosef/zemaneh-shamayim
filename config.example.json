@@ -104,12 +104,6 @@
       "auto_build": true,
       "sources": [
         {
-          "name": "usgs-3dep-13arcsec",
-          "paths": [
-            "/vsicurl/https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/{ns}{lat_top:02d}{ew}{lon_left:03d}/USGS_13_{ns}{lat_top:02d}{ew}{lon_left:03d}.tif"
-          ]
-        },
-        {
           "name": "nrcan-hrdem-2m-dtm",
           "open_options": {
             "OVERVIEW_LEVEL": "0"
@@ -171,6 +165,19 @@
             "/vsicurl/https://canelevation-dem.s3.ca-central-1.amazonaws.com/hrdem-mosaic-2m/9_3-mosaic-2m-dtm.tif",
             "/vsicurl/https://canelevation-dem.s3.ca-central-1.amazonaws.com/hrdem-mosaic-2m/9_4-mosaic-2m-dtm.tif",
             "/vsicurl/https://canelevation-dem.s3.ca-central-1.amazonaws.com/hrdem-mosaic-2m/9_5-mosaic-2m-dtm.tif"
+          ]
+        },
+        {
+          "name": "usgs-3dep-13arcsec",
+          "paths": [
+            "/vsicurl/https://prd-tnm.s3.amazonaws.com/StagedProducts/Elevation/13/TIFF/current/{ns}{lat_top:02d}{ew}{lon_left:03d}/USGS_13_{ns}{lat_top:02d}{ew}{lon_left:03d}.tif"
+          ]
+        },
+        {
+          "name": "ign-rgealti-5m",
+          "min_valid": -500,
+          "paths": [
+            "sources/ign-rgealti-5m.xml"
           ]
         }
       ]

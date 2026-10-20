@@ -403,16 +403,39 @@ ground and all terrain within `max_km` (default 10 km) come from a finer bare-ea
 one of its cells (`step_arcsec`, default 1/3″ ≈ 10 m); beyond that, and wherever the fine model has no
 data, the 1″ tiles / layers are used as before.
 
-The example config uses USGS 3DEP 1/3″ in the US (bare earth, read per 1×1° file from USGS's bucket like
-the 1″ layer) and, after it, NRCan's HRDEM in Canada: the 2 m lidar ground model (DTM) mosaic, 56 files of
-500 km on NRCan's bucket in Canada Atlas Lambert, read at its first overview (4 m, `"open_options":
-{"OVERVIEW_LEVEL": "0"}`, any GDAL open option can go there). The 4 m overview is within 0.1 m of the full
-2 m data at 99% of the grid's points (at most 1.3 m, at Toronto and Montreal) and builds a chunk in ~8 s
-instead of ~20; its heights match MRDEM's (the 1″ layer) to a few cm on average. HRDEM covers the lidar
-surveys, most populated areas but not all of Canada; elsewhere the 1″ data is used, and per place (see below)
-only horizons it covers change. Opening the 56 files takes ~10 s, once per server process, the first time a
-chunk needs them. Any other GDAL-readable bare-earth source works too, e.g. a state's lidar DTM. Israel has
-no free source finer than the 1″ layers (the Survey of Israel's DTM would go here, if licensed).
+The example config has three fine sources, tried in this order point by point:
+
+* **NRCan HRDEM** (Canada): the 2 m lidar ground model (DTM) mosaic, 56 files of 500 km on NRCan's bucket in
+  Canada Atlas Lambert, read at its first overview (4 m, `"open_options": {"OVERVIEW_LEVEL": "0"}`; any GDAL
+  open option can go there). The 4 m overview is within 0.1 m of the full 2 m data at 99% of the grid's points
+  (at most 1.3 m, at Toronto and Montreal) and builds a chunk in ~8 s instead of ~20; its heights match
+  MRDEM's (the 1″ layer) to a few cm on average. It covers the lidar surveys, most populated areas but not
+  all of Canada. Opening the 56 files takes ~10 s, once per server process, the first time a chunk needs
+  them. It comes first because USGS's files near the border reach into Canada with resampled coarse data
+  (at Toronto they match the 1″ data to 0.4 m), which would otherwise hide the lidar; it has no data in the
+  US, where 3DEP then fills in.
+* **USGS 3DEP 1/3″** (US): bare earth, read per 1×1° file from USGS's bucket like the 1″ layer.
+* **IGN RGE ALTI** (France, metropolitan and Corsica): the national ground model (MNT; lidar where surveyed,
+  0.2–0.5 m, ~7 m on steep mountain slopes), read at 5 m from the Géoplateforme's raster WMS
+  (`data.geopf.fr/wms-r`, layer `ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES`, float32 GeoTIFF in Lambert-93)
+  through `sources/ign-rgealti-5m.xml`, a GDAL WMS description; a relative path in `paths` is looked up in
+  the server's folder. Licence Ouverte Etalab 2.0. Not yet tried against the real service from here: run
+  the check below first. If the service is too slow or refuses, the alternative is IGN's per-département
+  downloads (RGE ALTI 5 m, `.7z`) as a local source.
+
+Elsewhere (Israel: no free source finer than the 1″ layers; the Survey of Israel's DTM would go here, if
+licensed) the 1″ data is used, and per place (see below) only horizons a source covers change. Any other
+GDAL-readable bare-earth source works too, e.g. a state's lidar DTM.
+
+Before turning a source on, try it at a place; nothing is kept:
+
+```sh
+sudo -u zmanim-sky venv/bin/python dem_layers.py test-fine 48.8566 2.3522 --example    # Paris, with the example's sources
+```
+
+It builds that 0.1° chunk in a temporary folder, says which source filled it and how long it took, and
+compares it with the 1″ data your server uses (a median difference over 3 m means a datum or units problem,
+or the wrong layer). At Toronto HRDEM differs from the 1″ data by +0.4 m (median), at Montreal −1.1 m.
 
 Data is built on demand (needs rasterio) in 0.1° chunks, ~4.5 MB each at 1/3″, under
 `<data_dir>/dem-fine/<signature>/`. A chunk no source covers is a marker file, so places outside the
@@ -770,7 +793,8 @@ network needed.
 GFS and GEFS: NOAA/NCEP. Elevation: NASA SRTM and USGS 3DEP (via the AWS Terrain Tiles open dataset); with
 `terrain.layers`: USGS 3DEP, Natural Resources Canada MRDEM (Open Government Licence - Canada), and
 FABDEM V1-2 (Hawker et al. 2022, University of Bristol; CC BY-NC-SA 4.0, contains modified Copernicus
-Service information). Reanalysis climatology: NCEP/NCAR Reanalysis 1, data provided by the NOAA PSL,
+Service information). With `terrain.fine`: Natural Resources Canada HRDEM (Open Government Licence -
+Canada), USGS 3DEP 1/3″, and IGN RGE ALTI (Licence Ouverte Etalab 2.0; "IGN - RGE ALTI"). Reanalysis climatology: NCEP/NCAR Reanalysis 1, data provided by the NOAA PSL,
 Boulder, Colorado, USA, from their website at https://psl.noaa.gov. Light pollution: Falchi, F. et al. (2016), Supplement to: The New World Atlas of
 Artificial Night Sky Brightness, GFZ Data Services, doi:10.5880/GFZ.1.4.2016.001 (CC BY-NC 4.0, non-commercial
 only), via the tiles in github.com/astertaylor/halakhic_calc; growth of skyglow: Kyba, C. C. M. et al. (2023),

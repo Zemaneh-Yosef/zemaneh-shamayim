@@ -1,0 +1,34 @@
+<GDAL_WMS>
+  <!-- IGN's RGE ALTI (France's national ground model, MNT: lidar where surveyed, 0.2-0.5 m), from the
+       Géoplateforme's raster WMS as float32 GeoTIFF, read by GDAL's WMS driver as one dataset in Lambert-93
+       (EPSG:2154) at 5 m over metropolitan France and Corsica. Licence Ouverte Etalab 2.0: credit "IGN - RGE ALTI".
+       Used as a terrain.fine source (config.example.json); `dem_layers.py test-fine 48.8566 2.3522 --example`
+       tries it at a place. -->
+  <Service name="WMS">
+    <Version>1.3.0</Version>
+    <ServerUrl>https://data.geopf.fr/wms-r?</ServerUrl>
+    <Layers>ELEVATION.ELEVATIONGRIDCOVERAGE.HIGHRES</Layers>
+    <Styles></Styles>
+    <CRS>EPSG:2154</CRS>
+    <ImageFormat>image/geotiff</ImageFormat>
+    <Transparent>FALSE</Transparent>
+  </Service>
+  <DataWindow>
+    <UpperLeftX>100000</UpperLeftX>
+    <UpperLeftY>7130000</UpperLeftY>
+    <LowerRightX>1250000</LowerRightX>
+    <LowerRightY>6030000</LowerRightY>
+    <SizeX>230000</SizeX>
+    <SizeY>220000</SizeY>
+  </DataWindow>
+  <Projection>EPSG:2154</Projection>
+  <BandsCount>1</BandsCount>
+  <DataType>Float32</DataType>
+  <DataValues NoData="-99999"/>
+  <BlockSizeX>1024</BlockSizeX>
+  <BlockSizeY>1024</BlockSizeY>
+  <OverviewCount>0</OverviewCount>
+  <Timeout>90</Timeout>
+  <MaxConnections>4</MaxConnections>
+  <UserAgent>zmanim-sky-server</UserAgent>
+</GDAL_WMS>
