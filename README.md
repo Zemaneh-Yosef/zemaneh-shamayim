@@ -868,6 +868,12 @@ on average (at most 4 s) and lower the rms in all three sets. The alternates cha
 morning and leave every rms as it was (`era5:noalt`); `terrainImages.mjs` found no morning in the three sets
 where a ridge near the Sun's azimuth had a second image. Nov–Jan rms is unchanged by either.
 
+No sunrises have been timed at a cold-water shore, so there the runs only show how often a raised far-shore
+image moves the time. With ERA5 air for every sunrise of 2023, horizons with `floorM`, and the client's image
+search on and off (`setTerrainImageSearch`), it changed one sunrise in 2,920: Chicago, Loyola Beach, eye 10 m
+over Lake Michigan, 28 May, 23.8 s later. Milwaukee, Duluth, the Toronto waterfront, Montreal, Great Neck,
+Copenhagen (Amager Strand) and Helsinki had none.
+
 ### Columns on the real ground (`follow_terrain`) and radiosondes
 
 On the 368 sunrises in Keller's text file (`DRUK9396.DAT`), ERA5 gave +0.6 s / 13.5 s rms, and ERA5 with
