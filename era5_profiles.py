@@ -161,7 +161,20 @@ def _read_cols(ds, lead, rows: slice, cols: np.ndarray):
 
 
 def _ncar_hour(args):
-    """One hour of temperature and geopotential in the box: (t, z) arrays [level, lat, lon]."""
+    """One hour of temperature and geopotential in the box: (t, z) arrays [level, lat, lon]. A read cut short
+    (S3 or a proxy dropping a 50 MB chunk midway) is tried again, up to 4 times, rather than losing the month."""
+    import time
+    import aiohttp
+    for attempt in range(4):
+        try:
+            return _ncar_hour_once(args)
+        except (OSError, aiohttp.ClientError) as e:
+            log.warning("NCAR ERA5 %s %02dZ: %s; retrying", args[0], args[1], e)
+            time.sleep(5 * 2 ** attempt)
+    return _ncar_hour_once(args)
+
+
+def _ncar_hour_once(args):
     day, hour, box, levels = args
     out = []
     for code, var in (("128_130_t", "T"), ("128_129_z", "Z")):
