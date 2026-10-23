@@ -160,18 +160,23 @@ def _read_cols(ds, lead, rows: slice, cols: np.ndarray):
     return np.concatenate(parts, axis=-1)
 
 
-def _ncar_hour(args):
-    """One hour of temperature and geopotential in the box: (t, z) arrays [level, lat, lon]. A read cut short
-    (S3 or a proxy dropping a 50 MB chunk midway) is tried again, up to 4 times, rather than losing the month."""
+def _retried(what: str, fn, *args):
+    """fn(*args), tried again up to 4 times when a read is cut short (S3 or a proxy dropping a 50 MB chunk
+    midway), rather than losing the month."""
     import time
     import aiohttp
     for attempt in range(4):
         try:
-            return _ncar_hour_once(args)
+            return fn(*args)
         except (OSError, aiohttp.ClientError) as e:
-            log.warning("NCAR ERA5 %s %02dZ: %s; retrying", args[0], args[1], e)
+            log.warning("NCAR ERA5 %s: %s; retrying", what, e)
             time.sleep(5 * 2 ** attempt)
-    return _ncar_hour_once(args)
+    return fn(*args)
+
+
+def _ncar_hour(args):
+    """One hour of temperature and geopotential in the box: (t, z) arrays [level, lat, lon]."""
+    return _retried(f"{args[0]} {args[1]:02d}Z", _ncar_hour_once, args)
 
 
 def _ncar_hour_once(args):
@@ -205,12 +210,16 @@ def download_ncar(cache: Path, month: str, need: dict, box, parallel: int = 4) -
     nxt = datetime(y + m // 12, m % 12 + 1, 1)
     span = f"{y:04d}{m:02d}0100_{nxt - timedelta(hours=1):%Y%m%d%H}"
     sfc = {}
-    for code, var, name in (("128_167_2t", "VAR_2T", "t2m"), ("128_134_sp", "SP", "sp"), ("128_235_skt", "SKT", "skt")):
+
+    def surface(code, var):
         with _ncar_open(f"{NCAR}/e5.oper.an.sfc/{month}/e5.oper.an.sfc.{code}.ll025sc.{span}.nc") as h:
             rows, cols = _box_index(h["latitude"][:], h["longitude"][:], box)
-            lat = np.asarray(h["latitude"][rows])
-            lon = (np.asarray(h["longitude"][:])[cols] + 180) % 360 - 180
-            sfc[name] = np.stack([_read_cols(h[var], ((hh.day - 1) * 24 + hh.hour,), rows, cols) for hh in hours])
+            la = np.asarray(h["latitude"][rows])
+            lo = (np.asarray(h["longitude"][:])[cols] + 180) % 360 - 180
+            return la, lo, np.stack([_read_cols(h[var], ((hh.day - 1) * 24 + hh.hour,), rows, cols) for hh in hours])
+
+    for code, var, name in (("128_167_2t", "VAR_2T", "t2m"), ("128_134_sp", "SP", "sp"), ("128_235_skt", "SKT", "skt")):
+        lat, lon, sfc[name] = _retried(f"{month} {name}", surface, code, var)
     for code, var, name in (("128_129_z", "Z", "z"), ("128_172_lsm", "LSM", "lsm")):
         with _ncar_open(f"{NCAR}/e5.oper.invariant/197901/e5.oper.invariant.{code}.ll025sc.1979010100_1979010100.nc") as h:
             rows, cols = _box_index(h["latitude"][:], h["longitude"][:], box)
