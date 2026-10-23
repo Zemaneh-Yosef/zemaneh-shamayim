@@ -416,7 +416,11 @@ works for any place between 60°S and 60°N, inside your regions or not.
 
 How it is computed: for every 0.1° of azimuth across the year's sunrise and sunset directions, out to
 150 km, the terrain point with the highest apparent elevation is kept (distance and height; the
-calculator adds Earth curvature and refraction for the day's air). With a radius, candidates are first
+calculator adds Earth curvature and refraction for the day's air). Which point that is depends on the
+refraction it is chosen with (standard air, k = 0.13): a strong inversion can make a farther, higher ridge
+the one that hides the Sun. So where another coefficient from −0.2 to 0.9 would pick a different point,
+the entry also lists it under `alternates` (`[[distanceKm, heightM], ...]`, usually absent); the
+calculator traces the ray to each through the day's air and keeps the highest. With a radius, candidates are first
 compared at 0.5° steps; the smallest set of spots that together see lowest in every direction (within
 0.003°) is kept, each with the azimuth ranges where it wins (`wins`), and only those are computed in
 full. The calculator then traces each winning spot whose range contains the day's sunrise direction,

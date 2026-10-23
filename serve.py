@@ -4,7 +4,7 @@
     GET /v1/path-profiles?lat=40.71&lon=-74.01[&from=2026-10-05][&days=8][&ensemble=1]
     GET /v1/horizon?lat=31.7486&lon=35.2374[&radius_km=0.8 | &bbox=S,W,N,E][&grid_m=100][&eye=1.7][&height=..][&min_km=1][&moon=1]
     GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..]   (the official area containing the point)
-    GET /v1/terrain-version?<the same query as /v1/horizon>   ({"fine": ..., "layers": ...}: is a stored horizon current?)
+    GET /v1/terrain-version?<the same query as /v1/horizon>   ({"fine": ..., "layers": ..., "algo": ...}: is a stored horizon current?)
     GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329
     GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &bbox=S,W,N,E][&percentile=90][&year=2026]
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
@@ -500,9 +500,10 @@ class Horizons:
 
     def terrain_version(self, q: dict, max_bbox_km: float | None = None) -> dict:
         """/v1/terrain-version: what a horizon with this query would be made from, without computing it.
-        A stored horizon whose terrain.fine.version or terrain.layers differs is out of date."""
+        A stored horizon whose terrain.fine.version, terrain.layers or terrain.algo (absent: 1) differs is out
+        of date."""
         p = self.params(q, max_bbox_km)
-        return {"fine": self.fine_version(p), "layers": self.layers_version(p)}
+        return {"fine": self.fine_version(p), "layers": self.layers_version(p), "algo": terrain.ALGO_VERSION}
 
     def compute(self, q: dict, max_bbox_km: float | None = None) -> bytes:
         p = self.params(q, max_bbox_km)
@@ -534,6 +535,8 @@ class Horizons:
             if fine_v:
                 res.setdefault("terrain", {})["fine"] = {"signature": self.fine["sig"], "version": fine_v,
                                                          "withinKm": self.fine["km"], "sources": self.tiles.fine.names}
+            if terrain.ALGO_VERSION != 1:
+                res.setdefault("terrain", {})["algo"] = terrain.ALGO_VERSION
             body = gzip.compress(json.dumps(res, separators=(",", ":")).encode())
             if partial:
                 return body                  # a chunk failed to build: not kept, so the next request retries

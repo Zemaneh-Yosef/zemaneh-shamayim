@@ -13,7 +13,7 @@ Tiles (SRTM .hgt / .hgt.gz, 1" or 3", named like N31E035.hgt.gz) are read from D
 Output (a HorizonSet; pass it straight to getVisibleSunrise / getVisibleSunset / getSunrises):
     {"mode": "point" | "vantage",
      "points": [{"lat", "lon", "ground", "height",
-                 "sunrise": [{"azimuthDeg", "distanceKm", "heightM"}, ...], "sunset": [...],
+                 "sunrise": [{"azimuthDeg", "distanceKm", "heightM", ["alternates"]}, ...], "sunset": [...],
                  "wins": {"sunrise": [[az1, az2], ...], "sunset": [...]}}, ...], "params": {...}}
 
 --radius-km 0 (default): the exact coordinates. With a radius (or --bbox), a grid of candidate spots (--grid-m)
