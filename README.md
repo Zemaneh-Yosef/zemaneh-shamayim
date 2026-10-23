@@ -854,8 +854,8 @@ size, one scaled by ERA5's own inversion, by night length, or by calm clear morn
 cloud) gained more than 0.5 s, and the rule's fixed 15 s made ERA5 worse (12.4 s and 13.0 s). Yisroel Golan's
 200 sunrises at Nevei Yaakov (2009–13, from the "MA" shul, 31.842162 N 35.246491 E, ground 692.5 m) rank the
 same: ERA5 8.9 s rms (mean +1.5 s), normals + rule 9.5 s, normals 10.9 s, the standard 34.48′ 15.8 s, with the
-eye at ground level; an eye on the roof (+10 m) fits worse (10.2 / 10.5 / 11.1 s). An eye height of 802 m at Armon HaNatziv, used in an earlier version of this README, fits
-clearly worse.
+eye at ground level; an eye on the roof (+10 m) fits worse (10.2 / 10.5 / 11.1 s). An eye height of 802 m
+at Armon HaNatziv, used in an earlier version of this README, fits clearly worse.
 
 These numbers use horizons from `terrain.py` version 2 (with `alternates`) and the client's terrain rays
 traced through the day's air (royzmanimwebsite `terrainElevation`). With the earlier one-curvature terrain
