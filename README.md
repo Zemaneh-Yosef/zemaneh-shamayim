@@ -786,7 +786,7 @@ policy asks that its use acknowledge the AERONET network and the station PIs.
 ## 4. Validation: checking against observed sunrises
 
 Summary: on Rav Druk's 521 observed sunrises at Armon HaNatziv (1993–96), the computed visible sunrise
-with ERA5's air along the path is unbiased and 10.6 s rms (11.6 s with Jerusalem's monthly normals and
+with ERA5's air along the path is unbiased and 10.6 s rms (11.7 s with Jerusalem's monthly normals and
 Keller & Hall's inversion rule); his 1,400 earlier sunrises and Yisroel Golan's 200 at Nevei Yaakov rank the
 same. There are no observations yet from outside Jerusalem.
 
@@ -846,10 +846,10 @@ Keller's spot, eye 754.9 m, SRTM terrain, approximate Jerusalem monthly normals;
 
 | atmosphere | 1993–96 mean | rms | rms Nov–Jan | 1985–92 mean | rms | rms Nov–Jan |
 |---|---|---|---|---|---|---|
-| standard 34.48′ | +6.1 s | 16.3 s | 21.7 s | +4.3 s | 17.2 s | 23.7 s |
-| monthly normals | −4.5 s | 14.0 s | 25.8 s | −6.1 s | 16.2 s | 27.9 s |
-| monthly normals + Keller & Hall's inversion rule | −1.3 s | 11.6 s | 19.1 s | −2.4 s | 13.4 s | 20.2 s |
-| ERA5 path profiles | +0.8 s | 10.6 s | 16.8 s | −0.5 s | 12.1 s | 17.3 s |
+| standard 34.48′ | +6.3 s | 16.4 s | 21.7 s | +4.3 s | 17.2 s | 23.8 s |
+| monthly normals | −4.3 s | 14.0 s | 25.8 s | −6.2 s | 16.2 s | 27.9 s |
+| monthly normals + Keller & Hall's inversion rule | −1.1 s | 11.7 s | 19.2 s | −2.4 s | 13.4 s | 20.3 s |
+| ERA5 path profiles | +1.0 s | 10.6 s | 16.9 s | −0.5 s | 12.1 s | 17.3 s |
 
 Real air along the path does best in both periods, unbiased and with nothing tuned. The winter error is
 scatter, not bias: fitted on one period and scored on the other, no winter correction (the 13 h rule at any
@@ -860,7 +860,7 @@ same: ERA5 8.9 s rms (mean +1.5 s), normals + rule 9.5 s, normals 10.9 s, the st
 eye at ground level; an eye on the roof (+10 m) fits worse (10.2 / 10.5 / 11.1 s). An eye height of 802 m
 at Armon HaNatziv, used in an earlier version of this README, fits clearly worse.
 
-These numbers use horizons from `terrain.py` version 2 (with `alternates`) and the client's terrain rays
+These numbers use horizons from `terrain.py` version 3 (with `alternates` and `floorM`) and the client's terrain rays
 traced through the day's air (royzmanimwebsite `terrainElevation`). With the earlier one-curvature terrain
 formula (`validateSunrise.mjs --terrain-compare`, row `era5:formula`) ERA5 scored +1.5 s / 10.8 s, +0.1 s /
 12.2 s and +2.1 s / 9.2 s (Druk 1993–96, Druk 1985–92, Golan): the traced rays move sunrise about 0.65 s later
