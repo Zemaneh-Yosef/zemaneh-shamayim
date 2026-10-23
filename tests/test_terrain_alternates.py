@@ -3,6 +3,8 @@ that is the highest under standard refraction and a farther, higher one that ove
 
     python3 tests/test_terrain_alternates.py
 
+Also floorM: the lowest surface the line of sight crosses (0 m here; a lake's own surface over a lake).
+
 Eye 800 m over flat 0 m ground; to the east a 1000 m ridge 30 km out and a 3000 m one 149-149.9 km out. Under
 k = 0.13 the near ridge is highest (0.265 deg against 0.263 deg); from k ~ 0.15 up the far one is.
 """
@@ -59,6 +61,20 @@ def main():
           "the main point is not repeated among the alternates")
     west = [q for q in hz["sunset"] if "alternates" in q]
     check(not west, "no alternates over flat ground (sunset side)")
+    check(e["floorM"] == 0.0, f"floorM: the flat ground the line of sight crosses ({e['floorM']})")
+
+    class LakeTiles(StubTiles):
+        """A lake at 176 m from 1 to 100 km east, then a 230 m shore; the observer on the shore at 176 m."""
+        def heights(self, lat, lon):
+            x = (np.asarray(lon) - OBS[1]) * KX
+            return np.where(x < 100000, 176.0, 230.0)
+
+        def ground(self, lat, lon):
+            return 176.0
+
+    lake = terrain.horizon_for_point(LakeTiles(), *OBS, eye=10.0, sides=("sunrise",), max_km=150)
+    e = next(q for q in lake["sunrise"] if abs(q["azimuthDeg"] - 90) < 0.05)
+    check(e["floorM"] == 176.0, f"floorM over a lake is its surface, not sea level ({e['floorM']})")
     three = terrain._angles(StubTiles(), *OBS, 800.0, np.array([90.0]), terrain.steps_for(StubTiles(), 1, 150))
     check(len(three) == 3, "without alternates=True, _angles still returns three items")
     print("ALL PASS" if ok else "SOME FAILED")

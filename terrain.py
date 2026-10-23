@@ -36,6 +36,12 @@ refraction (an inversion) a farther, higher ridge can overtake a nearer one, and
 reverse. So each sunrise / sunset entry also carries `alternates`, [[distanceKm, heightM], ...], the points
 that are highest for some other coefficient in K_ALTERNATES (only where they differ from the main point);
 the calculator traces each in the day's air and takes the highest.
+
+Each entry also carries `floorM`: the lowest surface the line of sight crosses on its way out to the
+farthest of its points (the terrain from min_km out, raised to sea level over the sea as below). The
+calculator lets rays come down no lower than that: a lake's own surface (Lake Michigan, 176 m), a valley
+floor, or the sea; before version 3 it used sea level everywhere above it, so rays to a far shore could
+pass beneath a lake.
 """
 from __future__ import annotations
 
@@ -56,7 +62,7 @@ log = logging.getLogger("terrain")
 # Bump when a change here alters the horizons computed from the same terrain data (selection, sampling,
 # floors, ...): it is part of serve.py's cache key, so cached horizons are recomputed. Version 1 leaves the
 # key as it always was, so existing caches stay valid.
-ALGO_VERSION = 2                                         # 2: alternates
+ALGO_VERSION = 3                                         # 2: alternates; 3: floorM
 
 R_EARTH = 6371008.8
 K_SELECT = 0.13
@@ -307,9 +313,11 @@ def _angles(tiles: Tiles, lat, lon, h_obs, az, ds, chunk: int = 128, floor: floa
             alternates: bool = False):
     """For each azimuth: (best angle proxy [rad], its distance [m], its terrain height [m]). With alternates,
     also a fourth item: for each azimuth the [(distance, height), ...] of the points that are highest under
-    the coefficients of K_ALTERNATES but are not the main one (usually none)."""
+    the coefficients of K_ALTERNATES but are not the main one (usually none), and a fifth: the lowest terrain
+    height out to the farthest of them (floorM, see the module notes)."""
     best_a, best_d, best_h = np.empty(len(az)), np.empty(len(az)), np.empty(len(az))
     alts: list[list[tuple[float, float]]] = [[] for _ in range(len(az))]
+    lows = np.empty(len(az))
     for s in range(0, len(az), chunk):                   # in chunks, to keep memory small
         a = az[s:s + chunk]
         plat, plon = destinations(lat, lon, a, ds)
@@ -333,8 +341,11 @@ def _angles(tiles: Tiles, lat, lon, h_obs, az, ds, chunk: int = 128, floor: floa
                     pt = (float(ds[ka[r]]), float(H[r, ka[r]]))
                     if pt not in alts[s + r]:
                         alts[s + r].append(pt)
+            for r in range(len(a)):
+                far = max([best_d[s + r]] + [d for d, _ in alts[s + r]])
+                lows[s + r] = H[r, ds <= far].min()
     if alternates:
-        return best_a, best_d, best_h, alts
+        return best_a, best_d, best_h, alts, lows
     return best_a, best_d, best_h
 
 
@@ -352,11 +363,11 @@ def horizon_for_point(tiles: Tiles, lat: float, lon: float, *, eye: float = 1.7,
     for side in sides:
         lo, hi = ranges[side]
         az = np.arange(lo, hi + 1e-9, az_step)
-        _, dist, hgt, alts = _angles(tiles, lat, lon, h_obs, az, ds, floor=floor, alternates=True)
+        _, dist, hgt, alts, lows = _angles(tiles, lat, lon, h_obs, az, ds, floor=floor, alternates=True)
         out[side] = []
-        for a, d, h, al in zip(az, dist, hgt, alts):
+        for a, d, h, al, lo_ in zip(az, dist, hgt, alts, lows):
             e = {"azimuthDeg": round(float(a) % 360, 2), "distanceKm": round(float(d) / 1000, 3),
-                 "heightM": round(float(h), 1)}
+                 "heightM": round(float(h), 1), "floorM": round(float(lo_), 1)}
             if al:
                 e["alternates"] = [[round(dd / 1000, 3), round(hh, 1)] for dd, hh in al]
             out[side].append(e)

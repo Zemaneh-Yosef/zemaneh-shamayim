@@ -420,7 +420,10 @@ calculator adds Earth curvature and refraction for the day's air). Which point t
 refraction it is chosen with (standard air, k = 0.13): a strong inversion can make a farther, higher ridge
 the one that hides the Sun. So where another coefficient from −0.2 to 0.9 would pick a different point,
 the entry also lists it under `alternates` (`[[distanceKm, heightM], ...]`, usually absent); the
-calculator traces the ray to each through the day's air and keeps the highest. With a radius, candidates are first
+calculator traces the ray to each through the day's air and keeps the highest. Each entry also has
+`floorM`, the lowest surface the line of sight crosses out to its farthest point (a lake's own surface,
+the sea, or level ground), and rays come down no lower; before algorithm 3 the calculator used sea level
+everywhere, which let rays to the far shore of Lake Michigan pass under the lake. With a radius, candidates are first
 compared at 0.5° steps; the smallest set of spots that together see lowest in every direction (within
 0.003°) is kept, each with the azimuth ranges where it wins (`wins`), and only those are computed in
 full. The calculator then traces each winning spot whose range contains the day's sunrise direction,
