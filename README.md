@@ -868,11 +868,33 @@ on average (at most 4 s) and lower the rms in all three sets. The alternates cha
 morning and leave every rms as it was (`era5:noalt`); `terrainImages.mjs` found no morning in the three sets
 where a ridge near the Sun's azimuth had a second image. Nov–Jan rms is unchanged by either.
 
-No sunrises have been timed at a cold-water shore, so there the runs only show how often a raised far-shore
-image moves the time. With ERA5 air for every sunrise of 2023, horizons with `floorM`, and the client's image
-search on and off (`setTerrainImageSearch`), it changed one sunrise in 2,920: Chicago, Loyola Beach, eye 10 m
-over Lake Michigan, 28 May, 23.8 s later. Milwaukee, Duluth, the Toronto waterfront, Montreal, Great Neck,
-Copenhagen (Amager Strand) and Helsinki had none.
+No sunrises have been timed at a shore, so the runs below only show how often the client's handling of air
+over water moves the time: ERA5 air for every sunrise (sunset for Tel Aviv and Santa Monica) of 2023 and
+horizons with `floorM`. Mornings changed by more than 0.5 s:
+
+| place | refraction table near the horizon (fine against 0.1° steps) | image search on − off | early Sun images on − off |
+|---|---|---|---|
+| Chicago, Loyola Beach (Lake Michigan) | 127, up to 92.5 s | 1: 28 May, +100.8 s | 47, up to −57.9 s |
+| Milwaukee (Lake Michigan) | 49, up to 14.7 s | 1: 11 Apr, +4.6 s | 2, up to −18.0 s |
+| Duluth (Lake Superior) | 3, up to 0.9 s | 0 | 0 |
+| Toronto waterfront (Lake Ontario) | 87, up to 18.5 s | 0 | 0 |
+| Montreal, Côte-Saint-Luc | 0 | 0 | 0 |
+| Great Neck, Steppingstone Park | 6, up to 3.8 s | 0 | 0 |
+| Copenhagen, Amager Strand (Øresund) | 144, up to 12.9 s | 0 | 0 |
+| Helsinki (Gulf of Finland) | 33, up to 5.7 s | 0 | 1, −3.7 s |
+| Brooklyn, Manhattan Beach (Atlantic) | 32, up to 5.2 s | 0 | 0 |
+| Tel Aviv beach, sunset (Mediterranean) | 0 | 0 | 0 |
+| Santa Monica, sunset (Pacific) | 0 | 0 | 0 |
+| Armon HaNatziv, Druk 1993–96 / 1985–92 (521 / 1,400) | 11 / 31, up to 1.3 s | 0 (1993–96) | 0 |
+| Nevei Yaakov, Golan (200) | 4, up to 0.9 s | 0 | 0 |
+
+The refraction table (`_refractionTable`) halves its 0.1° steps in the lowest degree above the sea horizon
+wherever the refraction midway misses the straight line by more than 1e-4°, down to 0.1/32°, and traces
+directly where it still misses (a jump between rays that run along a warm layer over the water and rays that
+clear it). The image search (`setTerrainImageSearch('auto')`, on by default) finds the water's or far shore's
+visible edge above rays that only skim the water. Early Sun images (`setEarlySunImages`, off by default) let a
+ray aimed just above the horizon that the air bends more than the horizon ray see the Sun first. The Jerusalem
+validation numbers above are unchanged by all three.
 
 ### Columns on the real ground (`follow_terrain`) and radiosondes
 
