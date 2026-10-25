@@ -153,40 +153,47 @@ class Trend:
 class Measurements:
     """Sky-meter readings: {"measurements": [{"lat", "lon", "date": "YYYY-MM-DD", "sqm": mag/arcsec^2
     (or "artificialMcdM2"), "note"}]}, taken at the zenith on clear, moonless nights after astronomical
-    twilight. Reloaded when the file changes."""
+    twilight. From one or more files (your own readings, and Globe at Night's from build_sky_measurements.py);
+    each reloaded when it changes."""
 
-    def __init__(self, path: Path | None):
-        self.path = Path(path) if path else None
+    def __init__(self, paths):
+        paths = paths if isinstance(paths, (list, tuple)) else [paths]
+        self.paths = [Path(p) for p in paths if p]
         self.lock = threading.Lock()
-        self.stamp = None
+        self.stamps: dict = {}
+        self.by_file: dict = {}
         self.items: list[dict] = []
 
     def refresh(self) -> None:
-        if self.path is None:
-            return
-        try:
-            st = self.path.stat()
-        except FileNotFoundError:
-            self.stamp, self.items = None, []
-            return
-        stamp = (st.st_mtime_ns, st.st_size)
-        if stamp == self.stamp:
-            return
-        with self.lock:
+        changed = False
+        for path in self.paths:
+            try:
+                st = path.stat()
+                stamp = (st.st_mtime_ns, st.st_size)
+            except FileNotFoundError:
+                stamp = None
+            if stamp == self.stamps.get(path, "unread"):
+                continue
+            changed = True
             items = []
-            for i, m in enumerate(json.loads(self.path.read_text()).get("measurements", [])):
-                try:
-                    art = (float(m["artificialMcdM2"]) if "artificialMcdM2" in m else sqm_to_artificial(m["sqm"]))
-                    d = str(m["date"])
-                    year = int(d[:4]) + (int(d[5:7]) - 0.5) / 12 if len(d) >= 7 else int(d[:4]) + 0.5
-                    items.append({"lat": float(m["lat"]), "lon": float(m["lon"]), "year": year,
-                                  "artificialMcdM2": max(art, 0.0), "date": d,
-                                  **({"sqm": float(m["sqm"])} if "sqm" in m else {}),
-                                  **({"note": m["note"]} if m.get("note") else {})})
-                except (KeyError, TypeError, ValueError) as e:
-                    log.warning("%s: measurement %d skipped (%s)", self.path, i, e)
-            self.items, self.stamp = items, stamp
-            log.info("%d sky measurements from %s", len(items), self.path)
+            if stamp is not None:
+                for i, m in enumerate(json.loads(path.read_text()).get("measurements", [])):
+                    try:
+                        art = (float(m["artificialMcdM2"]) if "artificialMcdM2" in m else sqm_to_artificial(m["sqm"]))
+                        d = str(m["date"])
+                        year = int(d[:4]) + (int(d[5:7]) - 0.5) / 12 if len(d) >= 7 else int(d[:4]) + 0.5
+                        items.append({"lat": float(m["lat"]), "lon": float(m["lon"]), "year": year,
+                                      "artificialMcdM2": max(art, 0.0), "date": d,
+                                      **({"sqm": float(m["sqm"])} if "sqm" in m else {}),
+                                      **({"note": m["note"]} if m.get("note") else {})})
+                    except (KeyError, TypeError, ValueError) as e:
+                        log.warning("%s: measurement %d skipped (%s)", path, i, e)
+                log.info("%d sky measurements from %s", len(items), path)
+            with self.lock:
+                self.by_file[path], self.stamps[path] = items, stamp
+        if changed:
+            with self.lock:
+                self.items = [m for p in self.paths for m in self.by_file.get(p, [])]
 
     def select(self, lat: float, lon: float, radius_km: float, area=None) -> list[dict]:
         """Readings within radius_km of the point, and (for an area) inside its boundary."""
@@ -253,7 +260,8 @@ class LightPollution:
         self.trend = Trend(lp.get("trend"))
         self.sky_factor = float(lp.get("sky_average_factor", SKY_AVERAGE_FACTOR))
         meas = lp.get("measurements") or {}
-        self.measurements = Measurements(meas.get("file") or Path(cfg["data_dir"]) / "sky-measurements.json")
+        self.measurements = Measurements([meas.get("file") or Path(cfg["data_dir"]) / "sky-measurements.json",
+                                          meas.get("globe_at_night_file") or Path(cfg["data_dir"]) / "sky-measurements-gan.json"])
         self.meas_radius_km = float(meas.get("radius_km", 15.0))
         self.ua = f"zmanim-sky-server/0.1 ({cfg.get('contact') or 'no contact'})"
         self.lock = threading.Lock()
