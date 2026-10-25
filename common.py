@@ -120,7 +120,9 @@ DEFAULT_CONFIG = {
         # Bringing the 2014 atlas to today. Sky-meter readings (a JSON file, see sky-measurements.example.json)
         # within radius_km of a place, or inside its area, calibrate it there; elsewhere the measured growth of
         # skyglow since the atlas (Kyba et al. 2023) is applied. "trend": {} = the atlas as it is.
-        "measurements": {"file": "", "radius_km": 15.0},     # file default: <data_dir>/sky-measurements.json
+        # file: your own readings (default <data_dir>/sky-measurements.json); globe_at_night_file: Globe at Night's,
+        # written by build_sky_measurements.py (default <data_dir>/sky-measurements-gan.json)
+        "measurements": {"file": "", "globe_at_night_file": "", "radius_km": 15.0},
         "trend": {
             "base_year": 2014, "data_until": 2022, "rate": 0.096,
             "regions": [

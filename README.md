@@ -684,7 +684,16 @@ from 2011 to 2022 (10.4% in North America, 6.5% in Europe), against ~2% seen fro
    area. For each reading the measured total brightness (artificial + natural) is divided by the atlas's
    at that spot; the median ratio is applied to the atlas. Readings from other years are carried to `year`
    by the trend. See `sky-measurements.example.json` for the format; it holds the Ramon Crater dark-sky
-   park's 12 monitoring sites (2020).
+   park's 12 monitoring sites (2020). Globe at Night's public sky-meter readings are read beside your own
+   (`measurements.globe_at_night_file`, default `<data_dir>/sky-measurements-gan.json`), built once a year by
+
+   ```sh
+   sudo -u zmanim-sky venv/bin/python build_sky_measurements.py [--since 2020]
+   ```
+
+   which keeps the readings taken on a clear night with the Sun 18 degrees down and the Moon below the
+   horizon (2020-2025: ~3,600 readings worldwide, most in North America and Europe; 28 within 15 km of
+   Lakewood, NJ, one of Jerusalem). Data: globeatnight.org, NSF NOIRLab, CC BY 4.0.
 2. `"method": "trend"`: the atlas times (1 + rate)^(year − 2014), rate by region (`light_pollution.trend`;
    first box containing the point, else the worldwide 9.6%). After 2023 it is an extrapolation and says so
    (`"extrapolated": true`). The rate is for the whole sky as seen; applying it to the artificial part only
