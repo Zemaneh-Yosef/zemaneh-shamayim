@@ -72,6 +72,10 @@ def run(tmp: Path, json_out: Path | None):
     assert status["cycle"] == cycle.id, status
     body = json.loads(urllib.request.urlopen(base + "/v1/path-profiles?lat=40.7128&lon=-74.006&days=2").read())
     assert body["events"], body
+    assert any(x["source"] == "forecast" for x in body["events"]), body
+    # typical=1 (printed calendars that run past the forecast): no forecast events, climatology or nothing
+    typ = json.loads(urllib.request.urlopen(base + "/v1/path-profiles?lat=40.7128&lon=-74.006&days=2&typical=1").read())
+    assert all(x["source"] != "forecast" for x in typ["events"]), typ
     e = next(x for x in body["events"] if x["event"] == "sunrise")
     p0, plast = e["profiles"][0], e["profiles"][-1]
     print(f"cycle {body['cycle']}: {len(body['events'])} events; first {e['date']} {e['event']} "
