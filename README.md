@@ -769,9 +769,12 @@ For every AERONET station inside the configured regions (plus `haze_calibration.
 the median over days of measured / modelled daytime haze (AERONET's daily averages, Level 1.5, carried from
 500 to 550 nm with each day's Angstrom exponent; CAMS averaged over local solar 8-16 h), from stations with at
 least `min_days` (60) days of both. A model's errors follow the kind of haze a region has (desert dust, city
-pollution, wildfire smoke), so a station speaks for its surroundings: a place's factor blends the stations
-within `radius_km` (300), weighted by their days of data and nearness, and fades to 1 (no correction) with
-distance - 1 where no station is near. A region added later gets its stations on the next run.
+pollution, wildfire smoke), so a station speaks for its surroundings. A place's factor is estimated from the
+stations by kriging: the variogram of the stations' log ratios (how alike two stations are at each distance) is
+fitted to them (exponential model, Cressie's weighted least squares), each station's own uncertainty (from its
+days and spread) is counted as measurement error, and the estimate goes to the network's mean far from every
+station. The answer gives the factor, its standard error (`sdLog`), each station's weight and the fitted
+variogram. A region added later gets its stations on the next run.
 
 ```sh
 sudo -u zmanim-sky venv/bin/python haze_calibration.py

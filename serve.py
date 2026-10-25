@@ -44,8 +44,8 @@ or with area=auto / bbox the `percentile` (default light_pollution.area_percenti
 pixel in the area.
 
 /v1/haze-calibration returns the factor the app multiplies CAMS's aerosol optical depth by at a place:
-AERONET's measured haze over CAMS's at the stations within haze_calibration.radius_km, blended (and 1 where
-none is near). Built by haze_calibration.py; 503 until it has run.
+AERONET's measured haze over CAMS's, estimated at the place from the stations by kriging (the network's
+average where none is near). Built by haze_calibration.py; 503 until it has run.
 
 Run behind nginx (or any reverse proxy) for TLS. Standard library only, plus numpy (and rasterio for
 /v1/light-pollution).
@@ -701,8 +701,7 @@ class Handler(BaseHTTPRequestHandler):
                 lat, lon = float(q["lat"][0]), float(q["lon"][0])
                 if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                     raise ValueError("lat/lon out of range")
-                radius = float(self.store.cfg.get("haze_calibration", {}).get("radius_km", 300))
-                body = haze_calibration.calibration_at(self.haze_calibration(), lat, lon, radius)
+                body = haze_calibration.calibration_at(self.haze_calibration(), lat, lon)
                 return self.send_json(200, body, cache_s=7 * 86400)
             if url.path == "/v1/area":
                 lat, lon = float(q["lat"][0]), float(q["lon"][0])

@@ -129,7 +129,8 @@ DEFAULT_CONFIG = {
             ],
         },
         # blpCdM2 = the sky's average artificial luminance = this x the zenith (measured horizontal-illuminance /
-        # zenith-luminance ratios peak at 2.25 pi under light pollution; calc_time.py itself uses pi)
+        # zenith-luminance ratios peak at 2.25 pi under light pollution, Bara et al. 2022, MNRAS 512:2125; calc_time.py
+        # itself uses pi)
         "sky_average_factor": 2.25,
         "area_percentile": 90.0,  # area=auto / bbox: this percentile of the area's pixels (brighter = later)
         "max_radius_km": 30.0,    # largest area / bbox (centre to corner) summarised
@@ -141,7 +142,6 @@ DEFAULT_CONFIG = {
         "level": "1.5",           # AERONET level: 1.5 cloud-screened (recent), 2.0 quality-assured (trails)
         "min_days": 60,           # days with both measurement and model a station needs
         "margin_deg": 2.0,        # stations this far outside the regions count too
-        "radius_km": 300.0,       # stations blended into a place's factor
         "request_delay_s": 8.0,   # between CAMS requests (each counts as ~25 Open-Meteo calls a year)
         "max_sites_per_run": None,
     },
