@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """HTTP API: temperature profiles along the sunrise / sunset direction.
 
-    GET /v1/path-profiles?lat=40.71&lon=-74.01[&from=2026-10-05][&days=8][&ensemble=1]
+    GET /v1/path-profiles?lat=40.71&lon=-74.01[&from=2026-10-05][&days=8][&ensemble=1][&typical=1]
     GET /v1/horizon?lat=31.7486&lon=35.2374[&radius_km=0.8 | &bbox=S,W,N,E][&grid_m=100][&eye=1.7][&height=..][&min_km=1][&moon=1]
     GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..]   (the official area containing the point)
     GET /v1/terrain-version?<the same query as /v1/horizon>   ({"fine": ..., "layers": ..., "algo": ...}: is a stored horizon current?)
@@ -17,7 +17,9 @@ Each event comes from the best source available for it (its "source" field):
     "forecast"          the latest GFS run (about 7 days ahead)
     "climatology-gfs"   your own climatology, built from past GFS runs (once a month has enough data)
     "climatology-ncep"  NOAA reanalysis climatology of recent years (the fallback until then)
-Events no source covers are left out; the app then uses its next provider.
+Events no source covers are left out; the app then uses its next provider. With typical=1 the forecast is
+skipped and every date comes from climatology: a printed calendar that runs past the forecast uses the
+same kind of air on every day, with no step where the forecast ends.
 
 With ensemble=1 an event can also carry "ensemble": {"kind", "members": [{"member", "weight", "profiles"}]}:
 for a forecast, every member of the stored GEFS run (fetch_gefs.py), whose spread is how sure the forecast
@@ -328,7 +330,7 @@ class Ground:
 
 
 def path_profiles(store: Store, lat: float, lon: float, start, days: int, ground: Ground | None = None,
-                  ensemble: bool = False, ens: EnsembleStore | None = None) -> dict:
+                  ensemble: bool = False, ens: EnsembleStore | None = None, typical: bool = False) -> dict:
     cfg = store.cfg
     region = store.region_for(lat, lon)
     if region is None:
@@ -363,6 +365,8 @@ def path_profiles(store: Store, lat: float, lon: float, start, days: int, ground
                 except Exception as e:                # never fail the profiles over the terrain
                     log.warning("no ground heights for %.4f,%.4f (%s): columns left on the model's terrain", lat, lon, e)
             for src in SOURCES:
+                if typical and src == "forecast":
+                    continue
                 profs = []
                 for (dist, plat, plon), smp in zip(points, samples):
                     p = getters[src](t, plat, plon, dist, smp)
@@ -746,8 +750,9 @@ class Handler(BaseHTTPRequestHandler):
             want_ens = q.get("ensemble", [""])[0] in ("1", "true")
             if want_ens and Handler.ensemble is not None:
                 Handler.ensemble.refresh()
+            typical = q.get("typical", [""])[0] in ("1", "true")
             body = path_profiles(self.store, round(lat, 4), round(lon, 4), start, days, ground,
-                                 ensemble=want_ens, ens=Handler.ensemble)
+                                 ensemble=want_ens, ens=Handler.ensemble, typical=typical)
             only_clim = body["events"] and all(e["source"] != "forecast" for e in body["events"])
             return self.send_json(200, body, cache_s=86400 if only_clim else 1800)
         except (KeyError, ValueError) as e:
