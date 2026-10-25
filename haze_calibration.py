@@ -10,8 +10,9 @@ regions, how far CAMS is off on average:
 
     ratio = exp(median over days of ln(AERONET AOD / CAMS AOD))      (daily daytime means)
 
-and writes them to <data_dir>/haze-calibration.json. /v1/haze-calibration then blends the stations around a
-place into one factor for the app (calibration_at below): 1 where no station is near.
+and writes them to <data_dir>/haze-calibration.json. /v1/haze-calibration then estimates the factor at a place
+from the stations by kriging (calibration_at below): the textbook estimate between scattered measurements, its
+weights set by how alike the stations' ratios actually are at each distance (their variogram, fitted to them).
 
     python3 haze_calibration.py [--config config.json] [--years 2] [--max-sites N] [--level 1.5]
 
@@ -170,7 +171,7 @@ def site_ratio(aero: dict[str, float], cams: dict[str, float], min_days: int) ->
         return None
     med = logs[len(logs) // 2] if len(logs) % 2 else (logs[len(logs) // 2 - 1] + logs[len(logs) // 2]) / 2
     mad = sorted(abs(x - med) for x in logs)[len(logs) // 2]
-    return {"ratio": round(min(2.5, max(0.4, math.exp(med))), 3), "n": len(logs), "spreadLog": round(mad, 3)}
+    return {"ratio": round(math.exp(med), 3), "n": len(logs), "spreadLog": round(mad, 3)}
 
 
 def boxes(cfg: dict) -> list[tuple[float, float, float, float]]:
@@ -251,24 +252,132 @@ def distance_km(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * 6371.0 * math.asin(math.sqrt(a))
 
 
-def calibration_at(cal: dict, lat: float, lon: float, radius_km: float = 300.0) -> dict:
-    """One factor for a place: the stations within radius_km, each weighted by its days of data and by
-    nearness, pulled toward 1 (no correction) - fully 1 with no station near. Blended in log space."""
-    near = []
-    for s in cal.get("sites", []):
-        d = distance_km(lat, lon, s["lat"], s["lon"])
-        if d <= radius_km:
-            w = s["n"] / (s["n"] + 30) / (1 + (d / 100) ** 2)
-            near.append((w, s, d))
-    prior = 0.15                                 # weight of "no correction": ~1/7 of a close, well-measured station
-    num = sum(w * math.log(s["ratio"]) for w, s, _ in near)
-    den = sum(w for w, _, _ in near) + prior
+# ---------------------------------------------------------------------------------------------
+# A factor for a place: kriging
+#
+# z = ln(ratio) at each station. Its spatial structure is the variogram gamma(h) = E[(z(x) - z(x + h))^2] / 2,
+# estimated from the station pairs (Matheron's estimator) and fitted with the exponential model
+# c0 + c1 (1 - exp(-h / a)) by weighted least squares, weights N(h) / gamma(h)^2 (Cressie 1985, Math. Geol.
+# 17:563). Lags as Journel & Huijbregts (1978, Mining Geostatistics, p. 194) advise: at least 30 pairs each, out
+# to half the largest distance. Each station's own ratio is uncertain - the median of n daily log ratios with
+# spread MAD has variance pi/2 (1.4826 MAD)^2 / n (the sample median's, normal errors) - which the nugget c0
+# holds on average; kriging with measurement error (Cressie 1993, Statistics for Spatial Data, sec. 3.2.1) puts
+# each station's own on its diagonal and the rest of c0 as small-scale variation. The mean is the generalised
+# least squares mean of all stations (the kriging mean), so far from every station the factor is the network's
+# average, not 1. Stations beyond the practical range (3a: correlation under 5%) are left out.
+# ---------------------------------------------------------------------------------------------
+def _error_var(s: dict) -> float:
+    sd = 1.4826 * float(s.get("spreadLog") or 0.0)
+    return math.pi / 2 * sd * sd / max(int(s.get("n") or 1), 1)
+
+
+def fit_variogram(sites: list[dict]) -> dict:
+    """{"nugget": c0, "sill": c1, "rangeKm": a, "lags": [[h, gamma, pairs], ...]} from the stations' log ratios.
+    With too few pairs to fit (under two lags), a pure nugget: no spatial correlation."""
+    z = [math.log(s["ratio"]) for s in sites]
+    pairs = sorted((distance_km(a["lat"], a["lon"], b["lat"], b["lon"]), (z[i] - z[j]) ** 2 / 2)
+                   for i, a in enumerate(sites) for j, b in enumerate(sites) if j > i)
+    var = sum((v - sum(z) / len(z)) ** 2 for v in z) / max(len(z) - 1, 1) if z else 0.0
+    if not pairs:
+        return {"nugget": var, "sill": 0.0, "rangeKm": 1.0, "lags": []}
+    half = pairs[-1][0] / 2
+    pairs = [p for p in pairs if p[0] <= half]
+    lags = []
+    for k in range(0, len(pairs) - 29, 30):
+        chunk = pairs[k:k + 30] if len(pairs) - k >= 60 else pairs[k:]
+        lags.append([sum(p[0] for p in chunk) / len(chunk), sum(p[1] for p in chunk) / len(chunk), len(chunk)])
+        if len(chunk) > 30:
+            break
+    if len(lags) < 2:
+        return {"nugget": var, "sill": 0.0, "rangeKm": 1.0, "lags": lags}
+    best = None
+    for k in range(200):                                    # a from 5 km to 5000 km, evenly in log
+        a = 5.0 * 1000 ** (k / 199)
+        rows = [(1.0, 1 - math.exp(-h / a), g, n / max(g, 1e-12) ** 2) for h, g, n in lags]
+        # weighted least squares for c0, c1 >= 0 (the two-variable normal equations, then the bounds)
+        sw = sum(w for *_, w in rows)
+        sx = sum(w * x for _, x, _, w in rows); sxx = sum(w * x * x for _, x, _, w in rows)
+        sy = sum(w * y for _, _, y, w in rows); sxy = sum(w * x * y for _, x, y, w in rows)
+        det = sw * sxx - sx * sx
+        cands = []
+        if det > 0:
+            c0, c1 = (sy * sxx - sx * sxy) / det, (sw * sxy - sx * sy) / det
+            if c0 >= 0 and c1 >= 0:
+                cands.append((c0, c1))
+        cands += [(0.0, max(sxy / sxx, 0.0) if sxx else 0.0), (max(sy / sw, 0.0), 0.0)]
+        for c0, c1 in cands:
+            sse = sum(w * (c0 + c1 * x - y) ** 2 for _, x, y, w in rows)
+            if best is None or sse < best[0]:
+                best = (sse, c0, c1, a)
+    _, c0, c1, a = best
+    return {"nugget": c0, "sill": c1, "rangeKm": a, "lags": [[round(h, 1), round(g, 5), n] for h, g, n in lags]}
+
+
+def _solve(m: list[list[float]], v: list[float]) -> list[float]:
+    """m x = v by Gaussian elimination with partial pivoting (m symmetric positive definite here)."""
+    n = len(v)
+    a = [row[:] + [v[i]] for i, row in enumerate(m)]
+    for c in range(n):
+        p = max(range(c, n), key=lambda r: abs(a[r][c]))
+        a[c], a[p] = a[p], a[c]
+        for r in range(c + 1, n):
+            f = a[r][c] / a[c][c]
+            for k in range(c, n + 1):
+                a[r][k] -= f * a[c][k]
+    x = [0.0] * n
+    for r in range(n - 1, -1, -1):
+        x[r] = (a[r][n] - sum(a[r][k] * x[k] for k in range(r + 1, n))) / a[r][r]
+    return x
+
+
+def kriging_model(cal: dict) -> dict:
+    """The fitted variogram and the network's mean log ratio (cached in `cal`)."""
+    if "_model" in cal:
+        return cal["_model"]
+    sites = [s for s in cal.get("sites", []) if s.get("ratio", 0) > 0]
+    vg = fit_variogram(sites) if sites else {"nugget": 0.0, "sill": 0.0, "rangeKm": 1.0, "lags": []}
+    errs = [_error_var(s) for s in sites]
+    micro = max(vg["nugget"] - (sum(errs) / len(errs) if errs else 0.0), 0.0)
+    cov = lambda d: vg["sill"] * math.exp(-d / vg["rangeKm"])   # noqa: E731
+    mean = 0.0
+    if sites:
+        n = len(sites)
+        K = [[cov(distance_km(a["lat"], a["lon"], b["lat"], b["lon"])) + (micro + errs[i] if i == j else 0.0)
+              for j, b in enumerate(sites)] for i, a in enumerate(sites)]
+        z = [math.log(s["ratio"]) for s in sites]
+        ki1, kiz = _solve(K, [1.0] * n), _solve(K, z)
+        mean = sum(kiz) / sum(ki1)
+    cal["_model"] = {"sites": sites, "errs": errs, "micro": micro, "variogram": vg, "meanLog": mean}
+    return cal["_model"]
+
+
+def calibration_at(cal: dict, lat: float, lon: float) -> dict:
+    """The factor at a place by simple kriging of ln(ratio) about the network's mean (see above), with its
+    standard error (sdLog, in ln units) and the stations it used."""
+    m = kriging_model(cal)
+    vg, sites = m["variogram"], m["sites"]
+    reach = 3 * vg["rangeKm"] if vg["sill"] > 0 else 0.0
+    near = [(i, distance_km(lat, lon, s["lat"], s["lon"])) for i, s in enumerate(sites)]
+    near = [(i, d) for i, d in near if d <= reach]
+    cov = lambda d: vg["sill"] * math.exp(-d / vg["rangeKm"])   # noqa: E731
+    z, var0 = m["meanLog"], vg["sill"] + m["micro"]
+    weights = []
+    if near:
+        K = [[cov(distance_km(sites[i]["lat"], sites[i]["lon"], sites[j]["lat"], sites[j]["lon"]))
+              + (m["micro"] + m["errs"][i] if i == j else 0.0) for j, _ in near] for i, _ in near]
+        k = [cov(d) for _, d in near]
+        weights = _solve(K, k)
+        z += sum(w * (math.log(sites[i]["ratio"]) - m["meanLog"]) for w, (i, _) in zip(weights, near))
+        var0 -= sum(w * c for w, c in zip(weights, k))
     return {
-        "factor": round(math.exp(num / den), 3) if near else 1.0,
-        "stations": [{"site": s["site"], "lat": s["lat"], "lon": s["lon"], "distanceKm": round(d, 1),
-                      "ratio": s["ratio"], "days": s["n"]} for w, s, d in sorted(near, key=lambda x: x[2])],
-        "radiusKm": radius_km, "period": cal.get("period"), "built": cal.get("built"),
-        "source": cal.get("source"),
+        "factor": round(math.exp(z), 3),
+        "sdLog": round(math.sqrt(max(var0, 0.0)), 3),
+        "stations": [{"site": sites[i]["site"], "lat": sites[i]["lat"], "lon": sites[i]["lon"], "distanceKm": round(d, 1),
+                      "ratio": sites[i]["ratio"], "days": sites[i]["n"], "weight": round(w, 3)}
+                     for w, (i, d) in sorted(zip(weights, near), key=lambda x: x[1][1])],
+        "networkFactor": round(math.exp(m["meanLog"]), 3),
+        "variogram": {"nugget": round(vg["nugget"], 5), "sill": round(vg["sill"], 5), "rangeKm": round(vg["rangeKm"], 1)},
+        "period": cal.get("period"), "built": cal.get("built"), "source": cal.get("source"),
     }
 
 

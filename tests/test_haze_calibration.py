@@ -114,15 +114,31 @@ def run(tmp: Path):
     hc.build(cfg, 2, "1.5", max_sites=None, get=get, sleep=lambda s: None, today=TODAY)
     check(calls["cams"] == n_cams, "a third run asks CAMS for nothing (all cached / done)")
 
-    print("3. a factor for a place")
+    print("3. a factor for a place: kriging")
     cal = json.loads(hc.calibration_path(cfg).read_text())
     nyc = hc.calibration_at(cal, 40.65, -73.95)
-    check(1.22 < nyc["factor"] < 1.30 and nyc["stations"][0]["site"] == "CCNY",
-          f"Brooklyn: {nyc['factor']} from {[s['site'] for s in nyc['stations']]} (pulled a little toward 1)")
-    far = hc.calibration_at(cal, 35.0, -100.0)
-    check(far["factor"] == 1.0 and far["stations"] == [], "no station within 300 km: factor 1")
-    jer = hc.calibration_at(cal, 31.78, 35.23)
-    check(0.80 < jer["factor"] < 0.9, f"Jerusalem from Sede Boker (~105 km): {jer['factor']}")
+    check(nyc["stations"] == [] or nyc["stations"][0]["site"] in ("CCNY", "GSFC"),
+          f"three stations: too few pairs for a variogram, so the network mean everywhere ({nyc['factor']})")
+    # a field of 150 stations: ln ratio = 0.3 within 400 km of New York, -0.2 within 400 km of the Negev, else
+    # 0, plus each station's own scatter; kriging should find the regions and fade to the mean between them
+    import random
+    rnd = random.Random(7)
+    sites = []
+    for k in range(150):
+        lat, lon = rnd.uniform(25, 50), rnd.uniform(-125, 40) if k % 3 else rnd.uniform(-80, -65)
+        z = 0.3 if hc.distance_km(lat, lon, 40.7, -74.0) < 400 else -0.2 if hc.distance_km(lat, lon, 30.9, 34.8) < 400 else 0.0
+        sites.append({"site": f"S{k}", "lat": lat, "lon": lon, "ratio": math.exp(z + rnd.gauss(0, 0.05)), "n": 400, "spreadLog": 0.3})
+    for k in range(12):                                      # a few in the Negev region
+        lat, lon = 30.9 + rnd.uniform(-2, 2), 34.8 + rnd.uniform(-2, 2)
+        sites.append({"site": f"N{k}", "lat": lat, "lon": lon, "ratio": math.exp(-0.2 + rnd.gauss(0, 0.05)), "n": 400, "spreadLog": 0.3})
+    field = {"sites": sites}
+    ny, jer, far = hc.calibration_at(field, 40.65, -73.95), hc.calibration_at(field, 31.78, 35.23), hc.calibration_at(field, -10.0, 100.0)
+    vg = ny["variogram"]
+    check(vg["sill"] > 0 and 50 < vg["rangeKm"] < 2000, f"variogram fitted: {vg}")
+    check(abs(math.log(ny["factor"]) - 0.3) < 0.08, f"New York: {ny['factor']} (true {math.exp(0.3):.3f}), sd {ny['sdLog']}")
+    check(abs(math.log(jer["factor"]) + 0.2) < 0.08, f"Jerusalem: {jer['factor']} (true {math.exp(-0.2):.3f})")
+    check(far["stations"] == [] and far["factor"] == ny["networkFactor"] and far["sdLog"] > ny["sdLog"],
+          f"Indonesia, no station in range: the network mean {far['factor']}, less sure (sd {far['sdLog']})")
 
     print("4. /v1/haze-calibration")
     serve.Handler.store = serve.Store(cfg)
@@ -130,7 +146,7 @@ def run(tmp: Path):
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
     body = json.loads(urllib.request.urlopen(base + "/v1/haze-calibration?lat=40.65&lon=-73.95").read())
-    check(body["factor"] == nyc["factor"] and body["radiusKm"] == 300.0, f"endpoint answers {body['factor']}")
+    check(body["factor"] == nyc["factor"] and "variogram" in body, f"endpoint answers {body['factor']}")
     hc.calibration_path(cfg).unlink()
     try:
         urllib.request.urlopen(base + "/v1/haze-calibration?lat=40.65&lon=-73.95")
