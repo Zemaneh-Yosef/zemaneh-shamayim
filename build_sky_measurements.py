@@ -31,6 +31,8 @@ import logging
 import math
 import re
 import sys
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,9 +47,22 @@ SQM_MIN, SQM_MAX = 15.0, 22.5
 SUN_MAX_DEG = -18.0
 
 
-def get(url: str, ua: str) -> bytes:
-    with urllib.request.urlopen(urllib.request.Request(url, headers={"User-Agent": ua}), timeout=300) as r:
-        return r.read()
+def get(url: str, ua: str, attempts: int = 3) -> bytes:
+    """The file at url. Globe at Night answers with a redirect to a signed S3 link that is good for a short time,
+    and the redirect itself may be cached for up to an hour: a stale one fails at S3 (400 / 403). So a failure is
+    asked again with caching off and a fresh query, which gets a new link."""
+    for k in range(attempts):
+        u = url if k == 0 else f"{url}{'&' if '?' in url else '?'}fresh={int(time.time())}{k}"
+        headers = {"User-Agent": ua} if k == 0 else {"User-Agent": ua, "Cache-Control": "no-cache", "Pragma": "no-cache"}
+        try:
+            with urllib.request.urlopen(urllib.request.Request(u, headers=headers), timeout=300) as r:
+                return r.read()
+        except urllib.error.HTTPError as e:
+            if k == attempts - 1 or e.code not in (400, 403, 500, 502, 503, 504):
+                raise
+            log.warning("%s: HTTP %d (from %s); asking again for a fresh link", url, e.code, e.url)
+            time.sleep(2 * (k + 1))
+    raise RuntimeError("unreachable")
 
 
 def yearly_files(page: str) -> dict[int, str]:
@@ -142,10 +157,18 @@ def main(argv=None) -> int:
         return 1
     allr, years = [], []
     for y, url in sorted(files.items()):
-        rows, why = readings(get(url, ua).decode("utf-8", "replace"))
+        try:
+            text = get(url, ua).decode("utf-8", "replace")
+        except (urllib.error.URLError, OSError) as e:
+            log.warning("%d: not downloaded (%s); left out this time, run again later", y, e)
+            continue
+        rows, why = readings(text)
         log.info("%d: %d readings kept; left out: %s", y, len(rows), why)
         allr += rows
         years.append(y)
+    if not years:
+        log.error("no yearly file could be downloaded")
+        return 1
     write_json_atomic(out, {
         "about": f"Globe at Night sky-meter readings {years[0]}-{years[-1]} (globeatnight.org, NSF NOIRLab, CC BY 4.0), "
                  "clear, Sun below -18 deg, Moon down; built by build_sky_measurements.py",
