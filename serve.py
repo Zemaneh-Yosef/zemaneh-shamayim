@@ -8,6 +8,7 @@
     GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329
     GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &bbox=S,W,N,E][&percentile=90][&year=2026]
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
+    GET /v1/terrain-tiles/{z}/{x}/{y}.png   (Terrarium-encoded heights for the website's 3D horizon view)
     GET /v1/status
 
 With api.follow_terrain on (off by default: it made the fit to Rabbi Druk's sunrises worse), each column's
@@ -47,6 +48,9 @@ pixel in the area.
 AERONET's measured haze over CAMS's, estimated at the place from the stations by kriging (the network's
 average where none is near). Built by haze_calibration.py; 503 until it has run.
 
+/v1/terrain-tiles serves the ground the horizons are computed from as web-map tiles (terrain_tiles.py), so the
+website's 3D view shows the same terrain; 404 where the server doesn't have it (the view then uses AWS's tiles).
+
 Run behind nginx (or any reverse proxy) for TLS. Standard library only, plus numpy (and rasterio for
 /v1/light-pollution).
 """
@@ -58,6 +62,7 @@ import hashlib
 import json
 import logging
 import math
+import re
 import threading
 from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
@@ -73,6 +78,7 @@ import dem_layers
 import haze_calibration
 import light_pollution
 import terrain
+import terrain_tiles
 from climatology import ClimGrid, build_profile, clim_dir
 from common import Cycle, destination, gfs_dir, load_config, solar_date, sun_event
 
@@ -427,6 +433,12 @@ class Horizons:
                      ", ".join(self.tiles.fine.names))
         self.dir = data / "horizons"
         self.dir.mkdir(parents=True, exist_ok=True)
+        # the same terrain as web-map tiles; low zooms only from data already here (no downloads / builds)
+        local = terrain.Tiles(folder, None, max_in_memory=4, user_agent=ua, layered_dir=layered_dir)
+        local.fine = self.tiles.fine
+        self.map_tiles = terrain_tiles.TerrainTiles(
+            self.tiles, local, data / "terrain-tiles",
+            f"{self.dem or 'srtm'}-{self.fine['sig'] if self.fine else 'nofine'}")
         self.slots = threading.BoundedSemaphore(int(t["max_parallel"]))
 
     def params(self, q: dict, max_bbox_km: float | None = None) -> dict:
@@ -655,6 +667,23 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_terrain_tile(self, path: str) -> None:
+        m = re.fullmatch(r"/v1/terrain-tiles/(\d+)/(\d+)/(\d+)\.png", path)
+        if not m:
+            return self.send_json(404, {"error": "not found"})
+        try:
+            body = self.horizons.map_tiles.get(*map(int, m.groups()))
+        except (ValueError, LookupError) as e:
+            # short cache: a missing tile appears once horizons nearby bring its data
+            return self.send_json(404, {"error": str(e)}, cache_s=3600)
+        self.send_response(200)
+        self.send_header("Content-Type", "image/png")
+        self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
+        self.send_header("Cache-Control", "public, max-age=2592000")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     _cal: tuple = (None, None)          # (mtime, data) of haze-calibration.json
 
     def haze_calibration(self) -> dict:
@@ -694,6 +723,8 @@ class Handler(BaseHTTPRequestHandler):
                 body = self.horizons.terrain_version(run, cap)
                 partial = (body["fine"] or "").endswith("-partial")
                 return self.send_json(200, body, cache_s=600 if partial else 86400)
+            if url.path.startswith("/v1/terrain-tiles/"):
+                return self.send_terrain_tile(url.path)
             if url.path == "/v1/light-pollution":
                 body, cache_s = light_pollution_query(self.lightpol, self.area_index(), q)
                 return self.send_json(200, body, cache_s=cache_s)

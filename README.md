@@ -15,6 +15,7 @@ inputs that the ROYZmanim app (royzmanimwebsite) uses to correct for that:
 | `/v1/area` | the official municipality or neighbourhood containing a point |
 | `/v1/light-pollution` | sky brightness from the World Atlas, brought forward to today, for when the stars become visible |
 | `/v1/haze-calibration` | a factor correcting the CAMS haze forecast at a place, from NASA's AERONET measurements |
+| `/v1/terrain-tiles/{z}/{x}/{y}.png` | the same terrain as web-map tiles, for the website's 3D horizon view |
 | `/v1/status` | the live forecast cycle and how much climatology each region holds |
 
 No API keys are needed: every source is free public data (NOAA, USGS, NRCan, IGN, FABDEM, OpenStreetMap,
@@ -26,7 +27,7 @@ VPS behind nginx.
 1. [Setting up](#1-setting-up): install, regions, the services
 2. [Running it](#2-running-it): what runs when, backfill, terrain data, upgrading, resources, troubleshooting
 3. [How it works](#3-how-it-works): weather along the path, ensembles, terrain horizons, elevation data,
-   official areas, light pollution, haze calibration
+   official areas, light pollution, haze calibration, terrain tiles for the 3D view
 4. [Validation](#4-validation-checking-against-observed-sunrises): checking against observed sunrises
 5. [Development](#5-development): tests, caveats, data credits
 
@@ -795,6 +796,18 @@ A run stops cleanly at `--max-sites` or any failure and the next run continues (
 `<data_dir>/haze-cal-cache/`); the log says how many stations are left. Rebuild once a year. AERONET's data
 policy asks that its use acknowledge the AERONET network and the station PIs.
 
+### Terrain tiles for the 3D view (`/v1/terrain-tiles`)
+
+`GET /v1/terrain-tiles/{z}/{x}/{y}.png` serves the heights the horizons are computed from (the fine near-range
+data, else the bare-earth layers, else the 1″ tiles) as web-Mercator tiles in the Terrarium encoding (height =
+R × 256 + G + B / 256 − 32768 m, the format of the open AWS Terrain Tiles), so the website's 3D horizon view
+shows the ground the horizon was found on. Zooms 8–14 only. A tile below zoom 11 spans several 1° tiles, so it
+is made only from data already on the server (computing a horizon nearby brings it) and is otherwise a 404;
+the website then shows the AWS tiles there. Each tile is made once and kept in
+`<data_dir>/terrain-tiles/<terrain signature>/` (a new signature, from changing `terrain.layers` or
+`terrain.fine`, starts a new folder; delete old ones). Tiles of a merged 1° tile rebuilt with `--force` are not
+renewed by themselves: delete the folder to remake them.
+
 ## 4. Validation: checking against observed sunrises
 
 Summary: on Rav Druk's 521 observed sunrises at Armon HaNatziv (1993–96), the computed visible sunrise
@@ -956,6 +969,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
+| `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights, the three versions, which sounding a date gets) |
 
 ### Caveats
