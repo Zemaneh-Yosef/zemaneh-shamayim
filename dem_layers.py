@@ -20,6 +20,9 @@ on. Usage:
     venv/bin/python dem_layers.py build --bbox 31 34 33 36.5            # south west north east
     venv/bin/python dem_layers.py info N40W074                          # which source filled what
 
+Without terrain.layers sources, `build` downloads the plain 1" tiles a horizon there needs instead (what the
+server uses then), so a place's first horizon doesn't wait for them either.
+
 Vertical datums differ slightly between sources (NAVD88, CGVD2013, EGM2008, EGM96); the differences
 are well under a metre in these regions and are not corrected.
 """
@@ -264,6 +267,7 @@ class Builder:
                 indent=1))
             log.info("built %s in %.1f s: %s", terrain.tile_name(lat_i, lon_i), time.time() - t0,
                      ", ".join(f"{k} {v:.0%}" for k, v in stats.items()))
+            terrain.report_timing("tile", time.time() - t0)
             return np.load(f, mmap_mode="r")
 
 
@@ -401,7 +405,23 @@ class FineTiles:
         os.replace(tmpf, f)
         log.info("built fine terrain %s in %.1f s: %s", self.chunk_name(k), time.time() - t0,
                  ", ".join(f"{n} {v:.0%}" for n, v in stats.items()))
+        terrain.report_timing("fine", time.time() - t0)
         return np.load(f, mmap_mode="r")
+
+    def missing(self, s: float, w: float, n: float, e: float) -> int:
+        """How many chunks in the box would be built on first use (none on disk, not known empty, not failed
+        within the hour): reads only file names, builds nothing."""
+        if self.builder is None:
+            return 0
+        f = lambda x: math.floor(x / FINE_CHUNK_DEG + 1e-9)   # noqa: E731
+        n_missing = 0
+        for i in range(f(s), f(n) + 1):
+            for j in range(f(w), f(e) + 1):
+                p = self.dir / f"{self.chunk_name((i, j))}.npy"
+                if not p.exists() and not p.with_suffix(".none").exists() \
+                        and time.time() - self.failed.get((i, j), 0) >= 3600:
+                    n_missing += 1
+        return n_missing
 
     def version(self, s: float, w: float, n: float, e: float) -> str | None:
         """What the fine data adds over this box: None where it has no data, its signature where it has, and
@@ -544,6 +564,14 @@ def tiles_in(s: float, w: float, n: float, e: float) -> list[tuple[int, int]]:
     return [(i, j) for i in range(math.floor(s), math.floor(n) + 1) for j in range(math.floor(w), math.floor(e) + 1)]
 
 
+def build_list(a, t: dict) -> list[tuple[int, int]]:
+    """The tiles `build` was asked for."""
+    if a.horizon and a.around:
+        ends = terrain.area_ends(a.around[0], a.around[1], a.radius_km)
+        return sorted(terrain.horizon_tiles(ends, a.km or float(t["max_km"]), moon=True))
+    return tiles_around(a.around[0], a.around[1], a.km or float(t["max_km"])) if a.around else tiles_in(*a.bbox)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config", default=None, help="config.json (default: next to this script)")
@@ -553,6 +581,10 @@ def main():
     g.add_argument("--around", nargs=2, type=float, metavar=("LAT", "LON"))
     g.add_argument("--bbox", nargs=4, type=float, metavar=("S", "W", "N", "E"))
     b.add_argument("--km", type=float, default=None, help="radius for --around (default terrain.max_km)")
+    b.add_argument("--horizon", action="store_true", help="with --around: only the tiles a horizon's rays cross "
+                   "(the year's sunrise / sunset and moonrise / moonset directions, out to terrain.max_km from the "
+                   "point or the edge of --radius-km), not the whole circle: ~9-12 tiles rather than ~15")
+    b.add_argument("--radius-km", type=float, default=0.0, help="with --horizon: the area's own radius around the point")
     b.add_argument("--force", action="store_true", help="rebuild tiles that exist (e.g. after adding source files; "
                    "restart the API afterwards: it keeps tiles in memory)")
     b.add_argument("--existing", action="store_true", help="only tiles already built (with --force: rebuild "
@@ -586,6 +618,16 @@ def main():
     if a.cmd == "build-fine":
         return build_fine(cfg, a.around, a.bbox, a.km, a.example)
     out = layers_dir(cfg)
+    if out is None and a.cmd == "build":
+        # no merged layers: horizons use the 1" tiles as they are, so those are what to have ahead
+        base = terrain.Tiles(Path(t["tiles_dir"] or Path(cfg["data_dir"]) / "tiles"), t["tiles_url"] or None,
+                             max_in_memory=2)
+        todo = build_list(a, t)
+        log.info("no terrain.layers sources: downloading the %d 1\" tiles instead (those not there yet) -> %s",
+                 len(todo), base.folder)
+        for lat_i, lon_i in todo:
+            base.tile(lat_i, lon_i)
+        return
     if out is None:
         raise SystemExit("terrain.layers.sources has no enabled source in the config: nothing to build")
     if a.cmd == "info":
@@ -594,7 +636,7 @@ def main():
         return
     base = terrain.Tiles(Path(t["tiles_dir"] or Path(cfg["data_dir"]) / "tiles"), t["tiles_url"] or None)
     builder = make_builder(cfg, base)
-    todo = tiles_around(a.around[0], a.around[1], a.km or float(t["max_km"])) if a.around else tiles_in(*a.bbox)
+    todo = build_list(a, t)
     if a.existing:
         todo = [k for k in todo if builder.path(*k).exists() or builder.path(*k).with_suffix(".sea").exists()]
     log.info("%d tiles -> %s", len(todo), out)

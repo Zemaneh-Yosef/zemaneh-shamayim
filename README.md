@@ -193,10 +193,13 @@ sudo chown -R zmanim-sky: /var/lib/zmanim-sky/fabdem && cd ~ && rm -rf ~/fabdem-
 ```
 
 **Merged 1″ tiles** are built when a request first needs them (a 150 km horizon touches ~9 tiles, so that
-first request can take minutes); build the cities you serve ahead:
+first request can take minutes); build the cities you serve ahead (`--horizon`: only the tiles its rays cross,
+in the year's sun and moon directions; `--radius-km` for a city's own extent; without terrain.layers sources
+`build` downloads the plain 1″ tiles instead):
 
 ```sh
 sudo -u zmanim-sky venv/bin/python dem_layers.py build --around 40.609283058016736 -73.96828881865329   # New York: tiles for a 150 km horizon
+sudo -u zmanim-sky venv/bin/python dem_layers.py build --around 34.09 -118.40 --horizon --radius-km 20   # Los Angeles: those its rays cross
 sudo -u zmanim-sky venv/bin/python dem_layers.py build --around 31.7683 35.2137    # Jerusalem
 sudo -u zmanim-sky venv/bin/python dem_layers.py info N40W074                      # which source filled what
 ```
@@ -230,14 +233,16 @@ sudo systemctl restart zmanim-sky-api
 and compares it with the 1″ data your server uses (a median difference over 3 m means a datum or units
 problem, or the wrong layer). Chunks are otherwise built when a horizon first needs them, one at a time: ~9
 for a point (the 10 km around it), more for a city's area, which can take minutes. Such a request is answered
-after `terrain.answer_within_s` (45 s) with 503 `{"computing": true, "retryAfterS": 15}` while the server carries
+after `terrain.answer_within_s` (45 s) with 503 `{"computing": true, "etaS", "retryAfterS"}` while the server carries
 on (the website asks again by itself, and the calendar shows its times without the horizon meanwhile); building
 ahead avoids the wait. `build-fine` skips chunks already
 built and lists failed ones (run it again). `--km` is the radius to cover: the area's own radius plus
 `terrain.fine.max_km` (10). `--example` uses the example config's sources before `config.json` has them;
 the chunks go where the server will look once it has the same ones. `deploy/prebuild-fine.sh` runs
 `build-fine` for a list of communities (New York, Monsey, Lakewood, Los Angeles, Baltimore, Chicago,
-Toronto, Paris, ...; `--only NAME` for one; edit its list for your own places). Visitors get the new
+Toronto, Paris, ...; `--only NAME` for one; edit its list for your own places). With `--tiles` it also prepares
+each place's 1″ tiles (`dem_layers.py build --horizon`; `--tiles-only` for those alone): about 330 for the
+whole list, many of them sea; up to ~15 GB as merged tiles, so check the disk first or use `--only`. Visitors get the new
 horizons at their app's next daily terrain check, only where fine data exists.
 
 ### Upgrading
@@ -439,7 +444,13 @@ runs in the background: a request waits for it up to `terrain.answer_within_s` (
 Cloudflare's 100 s) and is otherwise answered 503 with `"computing": true` and `"retryAfterS"` (also the
 `Retry-After` header); asking again joins the same computation instead of starting another, and once it is done
 the answer is the stored file. A computation that fails is reported to the next request, and the one after
-tries again. `make_horizon.py` does
+tries again.
+
+The 503 says how long it should still take: `etaS`, from what is left (`work`: the 1″ tiles its rays cross not
+yet on disk, the fine chunks not yet built, the spots to search) times how long each takes on this server.
+Those times are learned from the real ones (`<data_dir>/horizon-timing.json`; until measured: 15 s a download,
+the median of the merged tiles built so far or 60 s, 6 s a fine chunk, ~1 s + 0.04 s a spot), so the estimate
+gets closer as the server works. `retryAfterS` is `etaS` within 3–60 s. `make_horizon.py` does
 the same from the command line (same output as `/v1/horizon`; tiles downloaded into `./tiles` unless
 `--no-download`):
 
@@ -977,7 +988,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
-| `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time, computed once in the background however often it is asked for, then served; a failure reported once, then retried |
+| `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time with an estimate from the work left (the tiles its rays cross), computed once in the background however often it is asked for, then served; the timings learned and kept; a failure reported once, then retried |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights, the three versions, which sounding a date gets) |
 
 ### Caveats

@@ -50,6 +50,7 @@ import io
 import logging
 import math
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
@@ -71,6 +72,19 @@ REFF = R_EARTH / (1 - K_SELECT)
 # strong surface inversions (k = 1 is a ray as curved as the Earth)
 K_ALTERNATES = (-0.2, 0.0, 0.3, 0.6, 0.9)
 SKADI = "https://s3.amazonaws.com/elevation-tiles-prod/skadi/{ns}/{name}.hgt.gz"
+
+# Called as f(kind, seconds) after each piece of terrain is fetched or built: "skadi" (a 1" tile downloaded),
+# "tile" (a merged 1" tile built, dem_layers.Builder), "fine" (a fine chunk built, dem_layers.FineTiles). The
+# server (serve.HorizonTiming) learns from them how long a place's first horizon will take.
+TIMING_LISTENERS: list = []
+
+
+def report_timing(kind: str, seconds: float) -> None:
+    for f in TIMING_LISTENERS:
+        try:
+            f(kind, seconds)
+        except Exception as e:                             # bookkeeping never fails the terrain
+            log.debug("timing listener failed: %s", e)
 
 
 def tile_name(lat_i: int, lon_i: int) -> str:
@@ -131,6 +145,7 @@ class Tiles:
         if not self.url:
             raise FileNotFoundError(f"elevation tile {name} is not in {self.folder} (downloads disabled)")
         url = self.url.format(ns=name[:3], name=name)
+        t0 = time.monotonic()
         try:
             req = urllib.request.Request(url, headers={"User-Agent": self.ua})
             with urllib.request.urlopen(req, timeout=120) as r:
@@ -147,6 +162,7 @@ class Tiles:
             raise RuntimeError(f"could not download elevation tile {name} from {url}: {e.reason}") from e
         (self.folder / f"{name}.hgt.gz").write_bytes(data)
         log.info("downloaded elevation tile %s (%.1f MB)", name, len(data) / 1e6)
+        report_timing("skadi", time.monotonic() - t0)
         return self._load(name)
 
     def tile(self, lat_i: int, lon_i: int):
@@ -375,6 +391,33 @@ def horizon_for_point(tiles: Tiles, lat: float, lon: float, *, eye: float = 1.7,
 
 
 M_PER_DEG = 111194.9
+
+
+def horizon_tiles(ends: list[tuple[float, float]], max_km: float, moon: bool = False) -> set[tuple[int, int]]:
+    """The 1x1 degree tiles (lat_i, lon_i) a horizon's rays cross: from each of `ends` (the vantage points'
+    extremes, or the point itself), out to max_km over the year's sunrise and sunset directions (and the
+    Moon's, with moon) at the first end's latitude: ~9 tiles for a 150 km horizon rather than the ~15 of the
+    whole circle. Rays are sampled every 0.5 deg and 2 km."""
+    lat0 = ends[0][0]
+    ranges = list(azimuth_ranges(lat0).values()) + (list(moon_azimuth_ranges(lat0).values()) if moon else [])
+    az = np.concatenate([np.arange(lo, hi + 0.5, 0.5) for lo, hi in ranges])
+    d = np.arange(0.0, max_km * 1000 + 1, 2000.0)
+    out: set[tuple[int, int]] = set()
+    for la, lo in ends:
+        plat, plon = destinations(la, lo, az, d)
+        out |= set(zip(np.floor(plat).astype(int).ravel().tolist(),
+                       np.floor((plon + 180) % 360 - 180).astype(int).ravel().tolist()))
+    return out
+
+
+def area_ends(lat: float, lon: float, radius_km: float = 0.0, bbox=None) -> list[tuple[float, float]]:
+    """The points horizon_tiles() starts rays from for a point, a radius or a box: the centre and the extremes."""
+    if bbox is not None:
+        s, w, n, e = bbox
+        return [((s + n) / 2, (w + e) / 2), (s, w), (s, e), (n, w), (n, e)]
+    r = radius_km / M_PER_DEG * 1000
+    rx = r / max(0.05, math.cos(math.radians(lat)))
+    return [(lat, lon)] + ([(lat + r, lon), (lat - r, lon), (lat, lon + rx), (lat, lon - rx)] if r > 0 else [])
 
 
 def candidate_grid(lat: float, lon: float, *, radius_km: float = 0.0, bbox=None, grid_m: float = 100.0):

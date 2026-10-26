@@ -7,6 +7,16 @@
 #   sudo -u zmanim-sky nohup deploy/prebuild-fine.sh --example > prebuild-fine.log 2>&1 &   # before config.json has terrain.fine
 #   sudo -u zmanim-sky nohup deploy/prebuild-fine.sh > prebuild-fine.log 2>&1 &             # once it has
 #   sudo -u zmanim-sky deploy/prebuild-fine.sh --only "Monsey"                               # one place
+#   sudo -u zmanim-sky nohup deploy/prebuild-fine.sh --tiles > prebuild-fine.log 2>&1 &     # and the 1" tiles
+#   sudo -u zmanim-sky deploy/prebuild-fine.sh --tiles-only --only "Los Angeles"             # only the 1" tiles
+#
+# --tiles also prepares each place's 1" tiles (dem_layers.py build --horizon): the merged bare-earth tiles where
+# terrain.layers has sources, else the plain downloaded ones. Only those its horizons' rays cross (the year's
+# sunrise, sunset, moonrise and moonset directions, 150 km from the edge of the place): about 330 for the whole
+# list, many of them sea (a marker file, no data). Disk: ~52 MB a merged land tile, 5-12 MB a plain one, so up to
+# ~15 GB merged for the whole list: check `df -h /var/lib/zmanim-sky` first, or use --only for the places you
+# serve. Time: a few seconds a plain tile, about a minute a merged one. --tiles-only skips the fine terrain (e.g.
+# with no terrain.fine sources).
 #
 # Each line: name, latitude, longitude, km (the community's own radius + terrain.fine.max_km, 10). ~4.7 MB a
 # chunk on disk; the whole list is roughly 900 chunks (~4 GB): about 45 min for the US and Canada (USGS and
@@ -16,9 +26,13 @@ cd "$(dirname "$0")/.."
 
 EXTRA=()
 ONLY=""
+TILES=0
+FINE=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift 2 ;;
+    --tiles) TILES=1; shift ;;
+    --tiles-only) TILES=1; FINE=0; shift ;;
     *) EXTRA+=("$1"); shift ;;
   esac
 done
@@ -68,13 +82,18 @@ while IFS='|' read -r name lat lon km; do
   [ -z "$name" ] && continue
   [ -n "$ONLY" ] && [[ "$name" != *"$ONLY"* ]] && continue
   echo "=== $name ($lat, $lon, $km km)"
-  if ! venv/bin/python dem_layers.py build-fine --around "$lat" "$lon" --km "$km" "${EXTRA[@]}"; then
+  if [ "$FINE" = 1 ] && ! venv/bin/python dem_layers.py build-fine --around "$lat" "$lon" --km "$km" "${EXTRA[@]}"; then
     failed+=("$name")
+  fi
+  # the place's own radius is km less terrain.fine.max_km (10)
+  if [ "$TILES" = 1 ] && ! venv/bin/python dem_layers.py build --around "$lat" "$lon" --horizon \
+       --radius-km "$(awk -v k="$km" 'BEGIN { r = k - 10; print (r > 0 ? r : 0) }')"; then
+    failed+=("$name (1\" tiles)")
   fi
 done <<< "$PLACES"
 
 if [ ${#failed[@]} -gt 0 ]; then
-  echo "=== some chunks failed in: ${failed[*]} - run this again to retry them"
+  echo "=== some terrain failed in: ${failed[*]} - run this again to retry them"
   exit 1
 fi
 echo "=== all done"
