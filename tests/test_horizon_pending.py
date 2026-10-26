@@ -1,5 +1,5 @@
-"""A slow first horizon without network: answered 503 "computing" in time, computed once in the background,
-then served.
+"""A slow first horizon without network: answered 503 "computing" in time with an estimate of how long it will
+still take, computed once in the background, then served; the estimate learns from what it measured.
 
     python3 tests/test_horizon_pending.py
 
@@ -68,8 +68,18 @@ def run(tmp: Path):
     print("1. a slow first horizon")
     t0 = time.monotonic()
     st, body, hdr = get(base)
-    check(st == 503 and body.get("computing") is True and body.get("retryAfterS") == 15 and hdr.get("Retry-After") == "15",
-          f"answered 503 computing, retry in 15 s ({body})")
+    hz = serve.Handler.horizons
+    # the rays from 31.5 N 35.5 E, 150 km out over the year's sunrise and sunset directions, cross 9 tiles:
+    # N31E033-E037 and N30 / N32 x E034, E036 (not the corners, nor north / south of the observer, which the
+    # rays never reach); only N31E035 is on disk
+    reach = 9
+    w = body.get("work", {})
+    check(st == 503 and body.get("computing") is True and w.get("tiles") == reach - 1 and w.get("spots") == 1
+          and w.get("tileKind") == "skadi", f"answered 503 computing, with the work left: {w}")
+    eta0 = (reach - 1) * serve.HorizonTiming.DEFAULTS["skadi"] + serve.HorizonTiming.BASE_S + serve.HorizonTiming.SPOT_S
+    check(abs(body["etaS"] - eta0) <= 1 and body["retryAfterS"] == min(60, max(3, body["etaS"]))
+          and hdr.get("Retry-After") == str(body["retryAfterS"]),
+          f"estimate {body['etaS']} s from the default timings (expected {eta0:.0f}); ask again in {body['retryAfterS']} s")
     check(time.monotonic() - t0 < 1.0, "within answer_within_s, not after the computation")
     check(hdr.get("Cache-Control") == "no-store", "not cached by browsers")
     st2, _, _ = get(base)
@@ -80,7 +90,21 @@ def run(tmp: Path):
     st4, _, _ = get(base)
     check(st4 == 200 and calls["n"] == 1 and not serve.Handler.horizons.jobs, "and from the stored file after that")
 
-    print("2. a failed computation")
+    print("2. learning")
+    scale = hz.timing.v["compute"]
+    learned = 1.5 / (serve.HorizonTiming.BASE_S + serve.HorizonTiming.SPOT_S)
+    check(abs(scale - learned) < 0.1, f"the search's first 1.5 s replaced its default scale: {scale:.2f} (expected {learned:.2f})")
+    terrain.report_timing("skadi", 5.0)
+    check(hz.timing.v["skadi"] == 5.0, "the first measured download replaces the default 15 s")
+    terrain.report_timing("skadi", 1.0)
+    check(abs(hz.timing.v["skadi"] - (0.7 * 5 + 0.3 * 1)) < 1e-9, "later ones move it by a moving average")
+    saved = json.loads((tmp / "data" / "horizon-timing.json").read_text())
+    check(abs(saved["compute"] - round(scale, 3)) < 1e-9, "kept in horizon-timing.json")
+    again = serve.HorizonTiming(tmp / "data" / "horizon-timing.json", None)
+    check(abs(again.v["compute"] - scale) < 1e-3, "and read back after a restart")
+    terrain.TIMING_LISTENERS.remove(again.record)
+
+    print("3. a failed computation")
     calls["fail"] = True
     other = base.replace("lat=31.5", "lat=31.6")
     st, _, _ = get(other)

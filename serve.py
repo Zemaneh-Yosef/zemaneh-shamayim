@@ -81,7 +81,7 @@ import light_pollution
 import terrain
 import terrain_tiles
 from climatology import ClimGrid, build_profile, clim_dir
-from common import Cycle, destination, gfs_dir, load_config, solar_date, sun_event
+from common import Cycle, destination, gfs_dir, load_config, solar_date, sun_event, write_json_atomic
 
 log = logging.getLogger("serve")
 
@@ -404,12 +404,71 @@ def path_profiles(store: Store, lat: float, lon: float, start, days: int, ground
 
 
 class HorizonPending(Exception):
-    """A horizon still being computed (in the background) when the request's wait ran out."""
+    """A horizon still being computed (in the background) when the request's wait ran out: about eta_s more
+    seconds for `work` (what is left to fetch and build, and the spots to search)."""
 
-    def __init__(self, retry_s: int):
-        super().__init__(f"the horizon is still being computed (first request for this place); "
-                         f"ask again in {retry_s} s")
-        self.retry_s = retry_s
+    def __init__(self, eta_s: float, work: dict):
+        self.eta_s = max(1, round(eta_s))
+        # ask again around when it should be done, but not much later than a minute: an estimate can be long
+        self.retry_s = int(min(60, max(3, math.ceil(eta_s))))
+        self.work = work
+        super().__init__(f"the horizon is still being computed (first request for this place): about "
+                         f"{self.eta_s} s more; ask again in {self.retry_s} s")
+
+
+class HorizonTiming:
+    """How long each part of a first horizon takes on this server, learned from the real ones (a moving
+    average, kept in <data_dir>/horizon-timing.json across restarts): a 1" tile downloaded ("skadi"), a merged
+    1" tile built ("tile"), a fine chunk built ("fine"), and the search itself ("compute": a scale on
+    BASE_S + SPOT_S per spot, the measured costs of a point and of a vantage search on a modest VPS). The first
+    measurement of each replaces its default (networks and CPUs differ by far more than the average's step)."""
+
+    DEFAULTS = {"skadi": 15.0, "tile": 60.0, "fine": 6.0, "compute": 1.0}
+    BASE_S, SPOT_S = 1.0, 0.04
+    ALPHA = 0.3                                    # weight of the newest measurement
+
+    def __init__(self, path: Path, layers_out: Path | None):
+        self.path = path
+        self.lock = threading.Lock()
+        self.v = dict(self.DEFAULTS)
+        if layers_out is not None:                 # merged tiles already built say how long one takes here
+            secs = sorted(float(json.loads(f.read_text()).get("seconds", 0)) for f in layers_out.glob("*.json")
+                          if f.name[:1] in "NS")
+            secs = [x for x in secs if x > 0]
+            if secs:
+                self.v["tile"] = secs[len(secs) // 2]
+        self.measured: set[str] = set()
+        try:
+            stored = {k: float(x) for k, x in json.loads(path.read_text()).items() if k in self.DEFAULTS}
+            self.v.update(stored)
+            self.measured |= set(stored)
+        except (OSError, ValueError):
+            pass
+        self.local = threading.local()             # the job (if any) this thread is computing
+        terrain.TIMING_LISTENERS.append(self.record)
+
+    def record(self, kind: str, seconds: float) -> None:
+        with self.lock:
+            self.v[kind] = seconds if kind not in self.measured else (1 - self.ALPHA) * self.v[kind] + self.ALPHA * seconds
+            self.measured.add(kind)
+        job = getattr(self.local, "job", None)
+        if job is not None:
+            job["terrain_s"] += seconds
+
+    def compute_s(self, spots: int) -> float:
+        return self.v["compute"] * (self.BASE_S + self.SPOT_S * spots)
+
+    def learn_compute(self, spots: int, seconds: float) -> None:
+        with self.lock:
+            scale = max(0.05, seconds) / (self.BASE_S + self.SPOT_S * spots)
+            self.v["compute"] = scale if "compute" not in self.measured \
+                else (1 - self.ALPHA) * self.v["compute"] + self.ALPHA * scale
+            self.measured.add("compute")
+            snapshot = {k: self.v[k] for k in self.measured}
+        try:
+            write_json_atomic(self.path, {k: round(x, 3) for k, x in snapshot.items()})
+        except OSError as e:
+            log.warning("could not save %s: %s", self.path, e)
 
 
 class Horizons:
@@ -457,6 +516,8 @@ class Horizons:
             f"{self.dem or 'srtm'}-{self.fine['sig'] if self.fine else 'nofine'}")
         self.slots = threading.BoundedSemaphore(int(t["max_parallel"]))
         self.answer_within_s = float(t.get("answer_within_s", 45.0))
+        self.timing = HorizonTiming(data / "horizon-timing.json", layered_dir if self.dem else None)
+        self.tiles_folder = folder
         self.jobs: dict[str, dict] = {}          # key -> the computation under way (or just failed)
         self.jobs_lock = threading.Lock()
 
@@ -540,8 +601,50 @@ class Horizons:
         p = self.params(q, max_bbox_km)
         return {"fine": self.fine_version(p), "layers": self.layers_version(p), "algo": terrain.ALGO_VERSION}
 
-    def compute(self, q: dict, max_bbox_km: float | None = None) -> bytes:
-        p = self.params(q, max_bbox_km)
+    def _reach(self, p: dict, km: float) -> tuple[float, float, float, float]:
+        """south, west, north, east of the vantage points plus km around them"""
+        s, w, n, e = p["bbox"] or (p["lat"], p["lon"], p["lat"], p["lon"])
+        km = km + (0.0 if p["bbox"] else p["radius_km"])
+        dlat = km / 111.19
+        dlon = km / (111.19 * max(0.05, math.cos(math.radians((s + n) / 2))))
+        return s - dlat, w - dlon, n + dlat, e + dlon
+
+    def work(self, p: dict) -> dict:
+        """What a horizon with these params still needs before and while it is computed: 1" tiles to download
+        or build, fine chunks to build (file names only: nothing is fetched), and the spots to search. The tiles
+        are the ones its rays cross: the year's sunrise and sunset directions (and the Moon's, with moon=1) out to
+        max_km from the spots' extremes, not the whole box around them (~9 tiles rather than ~15)."""
+        builds = self.dem and self.tiles.layered_dir is not None and self.tiles.builder is not None
+        ends = terrain.area_ends(p["lat"], p["lon"], p["radius_km"], p["bbox"])
+        lat0, lon0 = ends[0]
+        crossed = terrain.horizon_tiles(ends, p["max_km"], moon=bool(p.get("moon")))
+        tiles = 0
+        for i, j in crossed:
+            name = terrain.tile_name(i, j)
+            if builds and any((self.layers_out / f"{name}{x}").exists() for x in (".npy", ".sea")):
+                continue
+            if not builds and any((self.tiles_folder / f"{name}{x}").exists() for x in (".hgt", ".hgt.gz", ".sea")):
+                continue
+            tiles += 1
+        fine = self.tiles.fine.missing(*self._reach(p, self.fine["km"])) if self.fine else 0
+        spots = 1 if not (p["bbox"] or p["radius_km"] > 0) else min(int(self.cfg["max_candidates"]), len(
+            terrain.candidate_grid(lat0, lon0, radius_km=p["radius_km"], bbox=p["bbox"], grid_m=p["grid_m"] or 100.0)))
+        return {"tileKind": "tile" if builds else "skadi", "tiles": tiles, "fineChunks": fine, "spots": spots}
+
+    def eta(self, p: dict, job: dict | None) -> tuple[float, dict]:
+        """Seconds a horizon with these params should still take, and the work behind the estimate."""
+        w = self.work(p)
+        v = self.timing.v
+        terrain_s = w["tiles"] * v[w["tileKind"]] + w["fineChunks"] * v["fine"]
+        compute = self.timing.compute_s(w["spots"])
+        if job is not None and job.get("search_from") is not None and not w["tiles"] and not w["fineChunks"]:
+            done = time.monotonic() - job["search_from"] - (job["terrain_s"] - job["search_terrain_s"])
+            # never "done" while it still runs: past the estimate, about a quarter of the time it has taken so far
+            compute = max(compute - done, 0.15 * compute, 0.25 * done)
+        return terrain_s + compute, w
+
+    def _prepare(self, p: dict):
+        """The stored answer's file and what it is made from. Builds the fine chunks it reads (fine_version)."""
         fine_v = self.fine_version(p)
         partial = bool(fine_v and fine_v.endswith("-partial"))
         # the terrain source list and the horizon algorithm's version are part of the key, so changing either
@@ -554,47 +657,69 @@ class Horizons:
         if terrain.ALGO_VERSION != 1:
             key_src["algo"] = terrain.ALGO_VERSION
         key = hashlib.sha1(json.dumps(key_src, sort_keys=True).encode()).hexdigest()[:20]
-        f = self.dir / f"{key}.json.gz"
-        if f.exists() and not partial:
-            return f.read_bytes()
+        return self.dir / f"{key}.json.gz", layers_v, fine_v, partial
+
+    def compute(self, q: dict, max_bbox_km: float | None = None) -> bytes:
+        p = self.params(q, max_bbox_km)
+        # a place seen before (its fine chunks on disk): the stored answer, at once
+        if not (self.fine and self.tiles.fine.missing(*self._reach(p, self.fine["km"]))):
+            f, _, _, partial = self._prepare(p)
+            if f.exists() and not partial:
+                return f.read_bytes()
+        jkey = hashlib.sha1(json.dumps(p, sort_keys=True).encode()).hexdigest()[:20]
         now = time.monotonic()
         with self.jobs_lock:
-            job = self.jobs.get(key)
+            job = self.jobs.get(jkey)
             if job is not None and job["done"].is_set() and now - job["finished"] > 300:
                 job = None                         # an old failure or partial answer: try again
             if job is None:
-                job = {"done": threading.Event(), "body": None, "error": None, "finished": 0.0}
-                self.jobs[key] = job
-                threading.Thread(target=self._run, args=(key, job, p, f, layers_v, fine_v, partial),
-                                 name=f"horizon-{key}", daemon=True).start()
+                job = {"done": threading.Event(), "body": None, "error": None, "finished": 0.0,
+                       "started": now, "terrain_s": 0.0, "search_from": None, "search_terrain_s": 0.0}
+                self.jobs[jkey] = job
+                threading.Thread(target=self._run, args=(jkey, job, p), name=f"horizon-{jkey}", daemon=True).start()
         if not job["done"].wait(self.answer_within_s):
-            raise HorizonPending(15)
+            raise HorizonPending(*self.eta(p, job))
         if job["error"] is not None:
             with self.jobs_lock:
-                if self.jobs.get(key) is job:
-                    del self.jobs[key]             # reported once; the next request tries again
+                if self.jobs.get(jkey) is job:
+                    del self.jobs[jkey]            # reported once; the next request tries again
             raise job["error"]
         return job["body"]
 
-    def _run(self, key: str, job: dict, p: dict, f: Path, layers_v, fine_v, partial: bool) -> None:
+    def _run(self, jkey: str, job: dict, p: dict) -> None:
         """One horizon computation, in its own thread (see the class doc); its result goes to `job`."""
+        self.timing.local.job = job
+        partial = False
         try:
-            job["body"] = self._build(p, f, layers_v, fine_v, partial)
+            spots = self.work(p)["spots"]
+            f, layers_v, fine_v, partial = self._prepare(p)
+            if f.exists() and not partial:
+                job["body"] = f.read_bytes()
+            else:
+                job["body"] = self._build(p, f, layers_v, fine_v, partial, job)
+                if job["search_from"] is not None:   # not when another request's job stored it meanwhile
+                    # the search's own time: from its start (after any wait for a slot), less the terrain
+                    # fetched and built during it
+                    self.timing.learn_compute(spots, time.monotonic() - job["search_from"]
+                                              - (job["terrain_s"] - job["search_terrain_s"]))
         except Exception as e:                     # handed to the request that waits for it
             if not isinstance(e, (KeyError, ValueError, LookupError, RuntimeError, FileNotFoundError)):
-                log.exception("horizon %s failed", key)
+                log.exception("horizon %s failed", jkey)
             job["error"] = e
+        finally:
+            self.timing.local.job = None
         job["finished"] = time.monotonic()
         job["done"].set()
         if job["error"] is None and not partial:
             with self.jobs_lock:                   # kept on disk: later requests read the file
-                if self.jobs.get(key) is job:
-                    del self.jobs[key]
+                if self.jobs.get(jkey) is job:
+                    del self.jobs[jkey]
 
-    def _build(self, p: dict, f: Path, layers_v, fine_v, partial: bool) -> bytes:
+    def _build(self, p: dict, f: Path, layers_v, fine_v, partial: bool, job: dict) -> bytes:
         with self.slots:
             if f.exists() and not partial:
                 return f.read_bytes()
+            job["search_from"], job["search_terrain_s"] = time.monotonic(), job["terrain_s"]
             res = terrain.horizon_set(self.tiles, p["lat"], p["lon"], radius_km=p["radius_km"], bbox=p["bbox"],
                                       grid_m=p["grid_m"] or 100.0, eye=p["eye"], height=p["height"],
                                       min_km=p["min_km"], max_km=p["max_km"],
@@ -841,7 +966,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, body, cache_s=86400 if only_clim else 1800)
         except HorizonPending as e:
             self.send_response(503)
-            body = json.dumps({"error": str(e), "computing": True, "retryAfterS": e.retry_s}).encode()
+            body = json.dumps({"error": str(e), "computing": True, "etaS": e.eta_s, "retryAfterS": e.retry_s,
+                               "work": e.work}).encode()
             self.send_header("Content-Type", "application/json")
             self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
             self.send_header("Cache-Control", "no-store")
