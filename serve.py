@@ -64,6 +64,7 @@ import logging
 import math
 import re
 import threading
+import time
 from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -402,8 +403,23 @@ def path_profiles(store: Store, lat: float, lon: float, start, days: int, ground
             "sources": {k: v for k, v in about.items() if k in used}, "events": events}
 
 
+class HorizonPending(Exception):
+    """A horizon still being computed (in the background) when the request's wait ran out."""
+
+    def __init__(self, retry_s: int):
+        super().__init__(f"the horizon is still being computed (first request for this place); "
+                         f"ask again in {retry_s} s")
+        self.retry_s = retry_s
+
+
 class Horizons:
-    """Terrain horizons, computed on demand and cached as gzip JSON files."""
+    """Terrain horizons, computed on demand and cached as gzip JSON files.
+
+    A place's first horizon can take minutes (its elevation tiles are downloaded and built, and a whole area is
+    searched): longer than a reverse proxy waits (nginx: 120 s). So each one is computed in the background,
+    the request waits terrain.answer_within_s for it, and past that is answered 503 with "computing": true and
+    a retryAfterS; asking again joins the same computation, and once it is done the answer is the stored file.
+    """
 
     def __init__(self, cfg: dict):
         t = cfg["terrain"]
@@ -440,6 +456,9 @@ class Horizons:
             self.tiles, local, data / "terrain-tiles",
             f"{self.dem or 'srtm'}-{self.fine['sig'] if self.fine else 'nofine'}")
         self.slots = threading.BoundedSemaphore(int(t["max_parallel"]))
+        self.answer_within_s = float(t.get("answer_within_s", 45.0))
+        self.jobs: dict[str, dict] = {}          # key -> the computation under way (or just failed)
+        self.jobs_lock = threading.Lock()
 
     def params(self, q: dict, max_bbox_km: float | None = None) -> dict:
         t = self.cfg
@@ -538,6 +557,41 @@ class Horizons:
         f = self.dir / f"{key}.json.gz"
         if f.exists() and not partial:
             return f.read_bytes()
+        now = time.monotonic()
+        with self.jobs_lock:
+            job = self.jobs.get(key)
+            if job is not None and job["done"].is_set() and now - job["finished"] > 300:
+                job = None                         # an old failure or partial answer: try again
+            if job is None:
+                job = {"done": threading.Event(), "body": None, "error": None, "finished": 0.0}
+                self.jobs[key] = job
+                threading.Thread(target=self._run, args=(key, job, p, f, layers_v, fine_v, partial),
+                                 name=f"horizon-{key}", daemon=True).start()
+        if not job["done"].wait(self.answer_within_s):
+            raise HorizonPending(15)
+        if job["error"] is not None:
+            with self.jobs_lock:
+                if self.jobs.get(key) is job:
+                    del self.jobs[key]             # reported once; the next request tries again
+            raise job["error"]
+        return job["body"]
+
+    def _run(self, key: str, job: dict, p: dict, f: Path, layers_v, fine_v, partial: bool) -> None:
+        """One horizon computation, in its own thread (see the class doc); its result goes to `job`."""
+        try:
+            job["body"] = self._build(p, f, layers_v, fine_v, partial)
+        except Exception as e:                     # handed to the request that waits for it
+            if not isinstance(e, (KeyError, ValueError, LookupError, RuntimeError, FileNotFoundError)):
+                log.exception("horizon %s failed", key)
+            job["error"] = e
+        job["finished"] = time.monotonic()
+        job["done"].set()
+        if job["error"] is None and not partial:
+            with self.jobs_lock:                   # kept on disk: later requests read the file
+                if self.jobs.get(key) is job:
+                    del self.jobs[key]
+
+    def _build(self, p: dict, f: Path, layers_v, fine_v, partial: bool) -> bytes:
         with self.slots:
             if f.exists() and not partial:
                 return f.read_bytes()
@@ -785,6 +839,17 @@ class Handler(BaseHTTPRequestHandler):
                                  ensemble=want_ens, ens=Handler.ensemble, typical=typical)
             only_clim = body["events"] and all(e["source"] != "forecast" for e in body["events"])
             return self.send_json(200, body, cache_s=86400 if only_clim else 1800)
+        except HorizonPending as e:
+            self.send_response(503)
+            body = json.dumps({"error": str(e), "computing": True, "retryAfterS": e.retry_s}).encode()
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Retry-After", str(e.retry_s))
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return None
         except (KeyError, ValueError) as e:
             return self.send_json(400, {"error": f"bad request: {e}"})
         except FileNotFoundError as e:
