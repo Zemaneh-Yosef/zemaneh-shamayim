@@ -165,8 +165,15 @@ def run(tmp: Path):
             write_aws(aws, zm, tx, ty, 456.0)
     body1, final1 = cesium.get(level, x, y)
     t1 = decode(gzip.decompress(body1))
-    check(not final1 and np.allclose(t1["h"], 456, atol=0.5) and not cesium.path(level, x, y).exists(),
-          "a detailed tile without the server's data: AWS's for now, not kept")
+    stand_in = cesium.path(level, x, y).with_name(f"{y}.aws.terrain")
+    check(not final1 and np.allclose(t1["h"], 456, atol=0.5) and not cesium.path(level, x, y).exists()
+          and stand_in.exists(), "a detailed tile without the server's data: AWS's for now, kept apart")
+    check(cesium.get(level, x, y) == (body1, False), "asked again: the one kept apart")
+    (tiles / "N31E036.hgt").write_bytes(np.full((n, n), 777, ">i2").tobytes())        # the server's data arrives
+    body1b, final1b = cesium.get(level, x, y)
+    check(final1b and np.allclose(decode(gzip.decompress(body1b))["h"], 777, atol=0.5) and not stand_in.exists(),
+          "once the server has the data: its heights, kept, and AWS's dropped")
+    (tiles / "N31E036.hgt").unlink()
     for bad in ((14, 0, 0), (3, 16, 0), (3, 0, 8)):
         try:
             cesium.get(*bad)
@@ -198,13 +205,20 @@ def run(tmp: Path):
     srv.shutdown()
 
     print("4. ahead of time (cesium_terrain.py build)")
-    tiles4 = ct.needed_tiles(31.5, 35.5, 0, 5)
+    tiles4 = ct.needed_tiles(31.5, 35.5, 0, 5, curve_km=0)        # kept small here: 5 km, nothing past it
     levels = {lv for lv, _, _ in tiles4}
     check(levels == set(range(14)), f"{len(tiles4)} tiles, one level 0 to 13 each at least")
-    far = [t for t in ct.needed_tiles(31.5, 35.5, 0, 150) if t[0] == 13]
-    check(all(ct.km_between(31.5, 35.5, (ct.tile_rect(*t)[1] + ct.tile_rect(*t)[3]) / 2,
-                            (ct.tile_rect(*t)[0] + ct.tile_rect(*t)[2]) / 2) < 15 + 2 for t in far)
-          and len(far) > len(ct.needed_tiles(31.5, 35.5, 0, 5)) / 2, "level 13 only within its reach (15 km)")
+    full = ct.needed_tiles(31.5, 35.5, 0, 150)
+    far = [t for t in full if t[0] == 13]
+    check(far and all(ct.km_between(31.5, 35.5, (ct.tile_rect(*t)[1] + ct.tile_rect(*t)[3]) / 2,
+                                    (ct.tile_rect(*t)[0] + ct.tile_rect(*t)[2]) / 2) < 15 + 2 for t in far),
+          "level 13 only within its reach (15 km)")
+    nine = [ct.km_between(31.5, 35.5, (ct.tile_rect(*t)[1] + ct.tile_rect(*t)[3]) / 2, (ct.tile_rect(*t)[0] + ct.tile_rect(*t)[2]) / 2)
+            for t in full if t[0] == 9]
+    check(250 < max(nine) < ct.CURVE_KM + 40, f"level 9 out past the horizons' 150 km, to the earth's curve ({max(nine):.0f} km)")
+    have = set(full)
+    check({(0, 0, 0), (0, 1, 0)} <= have and all((lv - 1, x // 2, y // 2) in have for lv, x, y in full if lv),
+          "both level-0 tiles, and every tile's parent")
     def inside(t):                                   # wholly on N31E035, the server's only data
         w_, s_, e_, n_ = ct.tile_rect(*t)
         return t[0] >= ct.OWN_DATA_LEVEL and 35 <= w_ and e_ <= 36 and 31 <= s_ and n_ <= 32
@@ -216,16 +230,18 @@ def run(tmp: Path):
                 for ty in range(max(0, my_of(n4, nm) - 1), min(nm - 1, my_of(s4, nm) + 1) + 1):
                     if not (aws / str(zm) / str(tx) / f"{ty}.png").exists():
                         write_aws(aws, zm, tx, ty, 123.0)
-    not_final = ct.build(cesium, 31.5, 35.5, 0, 5)
+    not_final = ct.build(cesium, 31.5, 35.5, 0, 5, curve_km=0)
     partly_off = [t for t in tiles4 if t[0] >= ct.OWN_DATA_LEVEL and not inside(t)]
-    check(not_final == len(partly_off) and all(cesium.path(*t).exists() for t in tiles4 if inside(t) or t[0] < 8),
-          f"made; kept but for the {len(partly_off)} detailed ones partly off the server's data (AWS's for now)")
+    check(not_final == len(partly_off) and all(cesium.path(*t).exists() for t in tiles4 if inside(t) or t[0] < 8)
+          and all(cesium.path(*t).with_name(f"{t[2]}.aws.terrain").exists() for t in partly_off),
+          f"made and kept; the {len(partly_off)} detailed ones partly off the server's data kept apart (AWS's for now)")
     t13 = next(t for t in tiles4 if t[0] == 13 and inside(t))
     t4 = decode(gzip.decompress(cesium.path(*t13).read_bytes()))
     w4, s4, e4, n4 = ct.tile_rect(*t13)
     err4 = np.abs(t4["h"] - truth(s4 + t4["v"] / 32767 * (n4 - s4), w4 + t4["u"] / 32767 * (e4 - w4))).max()
     check(err4 < 1.0, f"a level-13 one has the server's heights (max error {err4:.2f} m)")
-    check(ct.build(cesium, 31.5, 35.5, 0, 5) == len(partly_off), "run again: only those left to make")
+    cesium.aws.url = "http://127.0.0.1:9/{z}/{x}/{y}.png"       # (unchanged: AWS is never asked again)
+    check(ct.build(cesium, 31.5, 35.5, 0, 5, curve_km=0) == len(partly_off), "run again: those served as kept, nothing remade")
     print("OK")
 
 

@@ -836,8 +836,9 @@ normal, so Cesium lights the ground itself and the browser decodes nothing (`ces
 horizons' own (fine data where it is on disk, else the bare-earth layers, else the 1″ tiles), sampled straight onto
 Cesium's grid. Levels below 8 (a level-7 tile spans 1.4°), places outside 60°S–60°N and tiles whose data the server
 lacks come from the AWS Terrain Tiles, downloaded once into `<data_dir>/aws-terrarium` (their sea bed set to sea
-level); a detailed tile made that way starts the download of the server's own 1″ tile in the background and is not
-kept, so it is the server's on the next request. Tiles are kept gzipped in
+level); a detailed tile made that way starts the download of the server's own 1″ tile in the background (from level
+10) and is kept apart (`<y>.aws.terrain`) only until the server has that data: each request tries the server's
+heights first. Tiles are kept gzipped in
 `<data_dir>/cesium-terrain/<terrain signature>/` (a new signature, from changing `terrain.layers` or `terrain.fine`,
 starts a new folder and new tile URLs; delete old ones).
 
@@ -850,10 +851,12 @@ sudo -u zmanim-sky venv/bin/python cesium_terrain.py build --around 34.09 -118.4
 sudo -u zmanim-sky venv/bin/python cesium_terrain.py build --around 34.09 -118.40 --radius-km 20
 ```
 
-It makes the tiles a view from anywhere within `--radius-km` asks for, out to `terrain.max_km` past it: each level
-as near as Cesium asks for it (level 13 within 15 km, level 10 within 120 km; worked out for the page's lens on a
-screen 1,600 px high), ~2,000 tiles for Los Angeles at about 0.3–2 s each (what the server log showed), so roughly 10–60 min, ~10–40 KB each. The 1″ tiles under the levels from 10
-are fetched first, as a visit would. The server may be running meanwhile.
+It makes the tiles a view from anywhere within `--radius-km` asks for: each level as near as Cesium asks for it
+(level 13 within 15 km, level 10 within 120 km; worked out for the page's lens on a screen 1,600 px high), the
+detailed levels out to ~300 km (what rises above the earth's curve: a Los Angeles view asks for tiles 284 km out),
+the coarse ones further, and every tile's parents: ~2,600 tiles for Los Angeles (all 174 a sunrise view there asked
+for), at about 0.3–2 s each (what the server log showed), so roughly 15–80 min, ~10–40 KB each. The 1″ tiles under
+the levels from 10 are fetched first, as a visit would. The server may be running meanwhile.
 
 ## 4. Validation: checking against observed sunrises
 
@@ -1016,7 +1019,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
-| `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (not kept), the disk cache, `build` ahead of time (each level within its reach) |
+| `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (kept apart until the server has the data), the disk cache, `build` ahead of time (each level within its reach, out to the earth's curve, with parents) |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
 | `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time with an estimate from the work left (the tiles its rays cross), computed once in the background however often it is asked for, then served; the timings learned and kept; a failure reported once, then retried |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights, the three versions, which sounding a date gets) |

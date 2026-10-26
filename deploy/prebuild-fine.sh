@@ -22,7 +22,7 @@
 #
 # --3d also makes the website's 3D horizon view's terrain tiles (cesium_terrain.py build), last, from the terrain
 # built before it, so a first visit doesn't wait for them (~10 s or more): those a view from anywhere in the place
-# asks for, ~2,000 for Los Angeles at 0.3-2 s each, roughly 10-60 min (the 1" tiles under the nearer ones are
+# asks for, ~2,600 for Los Angeles at 0.3-2 s each, roughly 15-80 min (the 1" tiles under the nearer ones are
 # fetched first, as a visit would), ~10-40 KB each. Run it again after changing terrain sources (the tiles are kept
 # per terrain signature).
 #

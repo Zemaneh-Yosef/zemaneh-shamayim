@@ -10,7 +10,8 @@ bare-earth layers, else the 1" tiles), so what the 3D view shows is the ground t
 server has no data for a tile (open sea it knows as such aside), and for the coarse levels (a level-7 tile spans
 1.4 deg), heights come from the AWS Terrain Tiles (Terrarium PNGs, web Mercator), downloaded once and kept; their sea
 bed is set to sea level. A detailed tile drawn from AWS's data starts the download of the server's own 1" tile
-under it in the background and is not kept, so the next request gets the server's heights.
+under it in the background (from DOWNLOAD_LEVEL) and is kept apart (<y>.aws.terrain) only until the server has the
+data: each request first tries the server's heights, so the next one after they arrive gets those.
 
 Tiles are kept gzipped in <data_dir>/cesium-terrain/<terrain signature>/; layer.json says which levels exist.
 
@@ -344,20 +345,25 @@ class CesiumTerrain:
         lat = np.linspace(north, south, N)[:, None] * np.ones((1, N))
         lon = np.linspace(west, east, N)[None, :] * np.ones((N, 1))
         h, final = None, True
+        stand_in = p.with_name(f"{y}.aws.terrain")
         if level >= OWN_DATA_LEVEL and abs(north) <= 61 and abs(south) <= 61:
             h = self._own_heights(lat, lon)
             if h is None:
                 final = False
                 if level >= DOWNLOAD_LEVEL:
                     self._fetch_later(lat, lon)
+                if stand_in.exists():           # made from AWS's data before: kept until the server's data is here
+                    return stand_in.read_bytes(), False
         if h is None:
             h = self.aws.heights(lat, lon, level)
         body = gzip.compress(encode(west, south, east, north, h), 6)
+        out = p if final else stand_in
+        out.parent.mkdir(parents=True, exist_ok=True)
+        part = out.with_name(f"{out.name}.{os.getpid()}-{threading.get_ident()}.part")   # the server and a build may race
+        part.write_bytes(body)
+        part.replace(out)
         if final:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            part = p.with_name(f"{p.name}.{os.getpid()}-{threading.get_ident()}.part")   # the server and a build may race
-            part.write_bytes(body)
-            part.replace(p)
+            stand_in.unlink(missing_ok=True)
         return body, final
 
 
@@ -367,15 +373,22 @@ class CesiumTerrain:
 # page's lens (53 deg) on a screen 1600 px high, a level-L tile is split within 77 km * 800 / 2^L of the camera. So
 # level-L tiles are wanted within twice that of the previous level: 123,000 km / 2^L (level 13: 15 km; 10: 120 km).
 LEVEL_REACH_KM = 77_067 * 800 / 1000 * 2
+# Past the horizons' own reach Cesium still asks for what rises above the earth's curve: ~3.57 km * (sqrt(eye m) +
+# sqrt(peak m)), ~300 km for 4,000 m peaks seen from 100 m (a Los Angeles view asked for level-8 tiles 284 km out).
+CURVE_KM = 300.0
 
 
-def needed_tiles(lat: float, lon: float, radius_km: float, max_km: float) -> list[tuple[int, int, int]]:
-    """(level, x, y) of the tiles a view from anywhere within radius_km of the point asks for, as far as max_km past
-    that (what the horizons read): those within each level's reach (LEVEL_REACH_KM) of the area. A narrower lens
-    or a bigger screen asks for finer tiles a little further out; those are made when first asked for."""
-    out = []
+def needed_tiles(lat: float, lon: float, radius_km: float, max_km: float,
+                 curve_km: float = CURVE_KM) -> list[tuple[int, int, int]]:
+    """(level, x, y) of the tiles a view from anywhere within radius_km of the point asks for: those within each
+    level's reach (LEVEL_REACH_KM) of the area, the detailed ones (from OWN_DATA_LEVEL) no further than max_km (what
+    the horizons read) or CURVE_KM, the coarse ones no further than 3,000 km, and every one's parents. A narrower lens or a bigger screen asks for finer tiles a
+    little further out; those are made when first asked for."""
+    out = {(0, 0, 0), (0, 1, 0)}                    # both level-0 tiles: Cesium always loads them
     for level in range(MAX_LEVEL + 1):
-        r_km = radius_km + min(LEVEL_REACH_KM / 2 ** level, max_km)
+        reach = LEVEL_REACH_KM / 2 ** level
+        r_km = radius_km + (min(reach, max(max_km, curve_km)) if level >= OWN_DATA_LEVEL
+                             else min(reach, max(max_km, 3000.0 if curve_km else 0.0)))
         size = 180 / 2 ** level
         dlat = r_km / 111.32
         dlon = r_km / (111.32 * max(math.cos(math.radians(min(abs(lat) + dlat, 89.9))), 1e-3))
@@ -390,8 +403,12 @@ def needed_tiles(lat: float, lon: float, radius_km: float, max_km: float) -> lis
                 w_, e_ = west + 360 * round((lon - west - size / 2) / 360), east + 360 * round((lon - west - size / 2) / 360)
                 near_lon = min(max(lon, w_), e_)
                 if km_between(lat, lon, near_lat, near_lon) <= r_km:
-                    out.append((level, x, y))
-    return out
+                    out.add((level, x, y))
+    for level, x, y in list(out):                   # Cesium loads a tile's parents first
+        while level > 0:
+            level, x, y = level - 1, x // 2, y // 2
+            out.add((level, x, y))
+    return sorted(out)
 
 
 def km_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -400,10 +417,11 @@ def km_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     return 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a)))
 
 
-def build(cesium: CesiumTerrain, lat: float, lon: float, radius_km: float, max_km: float) -> int:
+def build(cesium: CesiumTerrain, lat: float, lon: float, radius_km: float, max_km: float,
+          curve_km: float = CURVE_KM) -> int:
     """Makes the tiles needed_tiles lists (those not made yet), first fetching the 1" tiles under the detailed ones
     (from DOWNLOAD_LEVEL, as a visit would). Returns how many are not final (the server lacks their data)."""
-    todo = [t for t in needed_tiles(lat, lon, radius_km, max_km) if not cesium.path(*t).exists()]
+    todo = [t for t in needed_tiles(lat, lon, radius_km, max_km, curve_km) if not cesium.path(*t).exists()]
     log.info("%d tiles to make around %.4f, %.4f (radius %g km) -> %s", len(todo), lat, lon, radius_km, cesium.dir)
 
     def one_degree(t):
@@ -425,7 +443,7 @@ def build(cesium: CesiumTerrain, lat: float, lon: float, radius_km: float, max_k
         if i % 200 == 0 or i == len(todo):
             log.info("%d / %d", i, len(todo))
     if not_final:
-        log.warning("%d tiles made from AWS's data for now (no data of the server's there): not kept", not_final)
+        log.warning("%d tiles made from AWS's data for now (no data of the server's there yet)", not_final)
     return not_final
 
 
