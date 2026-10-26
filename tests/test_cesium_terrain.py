@@ -196,7 +196,46 @@ def run(tmp: Path):
     except urllib.error.HTTPError as e:
         check(e.code == 404, "no such level: 404")
     srv.shutdown()
+
+    print("4. ahead of time (cesium_terrain.py build)")
+    tiles4 = ct.needed_tiles(31.5, 35.5, 0, 5)
+    levels = {lv for lv, _, _ in tiles4}
+    check(levels == set(range(14)), f"{len(tiles4)} tiles, one level 0 to 13 each at least")
+    far = [t for t in ct.needed_tiles(31.5, 35.5, 0, 150) if t[0] == 13]
+    check(all(ct.km_between(31.5, 35.5, (ct.tile_rect(*t)[1] + ct.tile_rect(*t)[3]) / 2,
+                            (ct.tile_rect(*t)[0] + ct.tile_rect(*t)[2]) / 2) < 15 + 2 for t in far)
+          and len(far) > len(ct.needed_tiles(31.5, 35.5, 0, 5)) / 2, "level 13 only within its reach (15 km)")
+    def inside(t):                                   # wholly on N31E035, the server's only data
+        w_, s_, e_, n_ = ct.tile_rect(*t)
+        return t[0] >= ct.OWN_DATA_LEVEL and 35 <= w_ and e_ <= 36 and 31 <= s_ and n_ <= 32
+    for lv, x, y in tiles4:                          # AWS's tiles for the rest, as section 2's
+        if not inside((lv, x, y)):
+            w4, s4, e4, n4 = ct.tile_rect(lv, x, y)
+            zm, nm = lv + 1, 2 ** (lv + 1)
+            for tx in range(max(0, mx_of(w4, nm) - 1), min(nm - 1, mx_of(e4, nm) + 1) + 1):
+                for ty in range(max(0, my_of(n4, nm) - 1), min(nm - 1, my_of(s4, nm) + 1) + 1):
+                    if not (aws / str(zm) / str(tx) / f"{ty}.png").exists():
+                        write_aws(aws, zm, tx, ty, 123.0)
+    not_final = ct.build(cesium, 31.5, 35.5, 0, 5)
+    partly_off = [t for t in tiles4 if t[0] >= ct.OWN_DATA_LEVEL and not inside(t)]
+    check(not_final == len(partly_off) and all(cesium.path(*t).exists() for t in tiles4 if inside(t) or t[0] < 8),
+          f"made; kept but for the {len(partly_off)} detailed ones partly off the server's data (AWS's for now)")
+    t13 = next(t for t in tiles4 if t[0] == 13 and inside(t))
+    t4 = decode(gzip.decompress(cesium.path(*t13).read_bytes()))
+    w4, s4, e4, n4 = ct.tile_rect(*t13)
+    err4 = np.abs(t4["h"] - truth(s4 + t4["v"] / 32767 * (n4 - s4), w4 + t4["u"] / 32767 * (e4 - w4))).max()
+    check(err4 < 1.0, f"a level-13 one has the server's heights (max error {err4:.2f} m)")
+    check(ct.build(cesium, 31.5, 35.5, 0, 5) == len(partly_off), "run again: only those left to make")
     print("OK")
+
+
+def mx_of(lon, n):
+    return int((lon + 180) / 360 * n)
+
+
+def my_of(lat, n):
+    lat = max(-85.05, min(85.05, lat))
+    return int((1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * n)
 
 
 if __name__ == "__main__":

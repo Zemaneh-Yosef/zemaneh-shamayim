@@ -13,12 +13,21 @@ bed is set to sea level. A detailed tile drawn from AWS's data starts the downlo
 under it in the background and is not kept, so the next request gets the server's heights.
 
 Tiles are kept gzipped in <data_dir>/cesium-terrain/<terrain signature>/; layer.json says which levels exist.
+
+Made when first asked for (a first visit to a place waits ~10 s or more for its tiles), or ahead of time for a place:
+
+    venv/bin/python cesium_terrain.py build --around 34.09 -118.40 --radius-km 20
+
+builds the tiles a view from anywhere within --radius-km of the point asks for (see needed_tiles), fetching the 1"
+tiles under the detailed ones as a visit would. Run it as the server's user; the server may be running.
 """
 from __future__ import annotations
 
+import argparse
 import gzip
 import logging
 import math
+import os
 import struct
 import threading
 import urllib.error
@@ -346,6 +355,102 @@ class CesiumTerrain:
         body = gzip.compress(encode(west, south, east, north, h), 6)
         if final:
             p.parent.mkdir(parents=True, exist_ok=True)
-            p.with_suffix(".part").write_bytes(body)
-            p.with_suffix(".part").replace(p)
+            part = p.with_name(f"{p.name}.{os.getpid()}-{threading.get_ident()}.part")   # the server and a build may race
+            part.write_bytes(body)
+            part.replace(p)
         return body, final
+
+
+# How far from the camera Cesium asks for each level. It splits a tile into its four children while the tile's
+# geometric error, seen from the camera, exceeds maximumScreenSpaceError (2 px, as the page sets it): the error of a
+# level-0 65 x 65 heightmap tile is ~77 km (Cesium's estimate for this tiling), halving each level, and at the
+# page's lens (53 deg) on a screen 1600 px high, a level-L tile is split within 77 km * 800 / 2^L of the camera. So
+# level-L tiles are wanted within twice that of the previous level: 123,000 km / 2^L (level 13: 15 km; 10: 120 km).
+LEVEL_REACH_KM = 77_067 * 800 / 1000 * 2
+
+
+def needed_tiles(lat: float, lon: float, radius_km: float, max_km: float) -> list[tuple[int, int, int]]:
+    """(level, x, y) of the tiles a view from anywhere within radius_km of the point asks for, as far as max_km past
+    that (what the horizons read): those within each level's reach (LEVEL_REACH_KM) of the area. A narrower lens
+    or a bigger screen asks for finer tiles a little further out; those are made when first asked for."""
+    out = []
+    for level in range(MAX_LEVEL + 1):
+        r_km = radius_km + min(LEVEL_REACH_KM / 2 ** level, max_km)
+        size = 180 / 2 ** level
+        dlat = r_km / 111.32
+        dlon = r_km / (111.32 * max(math.cos(math.radians(min(abs(lat) + dlat, 89.9))), 1e-3))
+        x0, x1 = int((lon - dlon + 180) // size), int((lon + dlon + 180) // size)
+        y0, y1 = max(0, int((lat - dlat + 90) // size)), min(2 ** level - 1, int((lat + dlat + 90) // size))
+        for y in range(y0, y1 + 1):
+            for xx in range(x0, x1 + 1):
+                x = xx % 2 ** (level + 1)
+                west, south, east, north = tile_rect(level, x, y)
+                # the tile's nearest point to the place (longitudes taken around the place)
+                near_lat = min(max(lat, south), north)
+                w_, e_ = west + 360 * round((lon - west - size / 2) / 360), east + 360 * round((lon - west - size / 2) / 360)
+                near_lon = min(max(lon, w_), e_)
+                if km_between(lat, lon, near_lat, near_lon) <= r_km:
+                    out.append((level, x, y))
+    return out
+
+
+def km_between(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    p1, p2, dl = math.radians(lat1), math.radians(lat2), math.radians(lon2 - lon1)
+    a = math.sin((p2 - p1) / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
+    return 2 * 6371.0088 * math.asin(min(1.0, math.sqrt(a)))
+
+
+def build(cesium: CesiumTerrain, lat: float, lon: float, radius_km: float, max_km: float) -> int:
+    """Makes the tiles needed_tiles lists (those not made yet), first fetching the 1" tiles under the detailed ones
+    (from DOWNLOAD_LEVEL, as a visit would). Returns how many are not final (the server lacks their data)."""
+    todo = [t for t in needed_tiles(lat, lon, radius_km, max_km) if not cesium.path(*t).exists()]
+    log.info("%d tiles to make around %.4f, %.4f (radius %g km) -> %s", len(todo), lat, lon, radius_km, cesium.dir)
+
+    def one_degree(t):
+        w, s_, e, n = tile_rect(*t)
+        return int(math.floor((s_ + n) / 2)), int(math.floor((w + e) / 2))
+    todo.sort(key=lambda t: (one_degree(t), t))   # tile by tile of the 1" data (the server keeps a few in memory)
+    fetched, not_final = set(), 0
+    for i, (level, x, y) in enumerate(todo, 1):
+        w, s_, e, n = tile_rect(level, x, y)
+        if level >= DOWNLOAD_LEVEL and abs(s_) <= 61 and abs(n) <= 61:
+            for k in {(int(math.floor(a)), int(math.floor(o))) for a in (s_, n - 1e-9) for o in (w, e - 1e-9)} - fetched:
+                fetched.add(k)
+                try:
+                    cesium.tiles.tile(*k)
+                except Exception as err:            # noqa: BLE001 (the tile is made from AWS's data meanwhile)
+                    log.warning("1\" tile %s: %s", terrain.tile_name(*k), err)
+        if not cesium.get(level, x, y)[1]:
+            not_final += 1
+        if i % 200 == 0 or i == len(todo):
+            log.info("%d / %d", i, len(todo))
+    if not_final:
+        log.warning("%d tiles made from AWS's data for now (no data of the server's there): not kept", not_final)
+    return not_final
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--config", default=None, help="config.json (default: next to this script)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    b = sub.add_parser("build", help="make the 3D view's tiles around a place ahead of time")
+    b.add_argument("--around", nargs=2, type=float, metavar=("LAT", "LON"), required=True)
+    b.add_argument("--radius-km", type=float, default=0.0, help="the area's own radius around the point")
+    b.add_argument("--km", type=float, default=None, help="how far past the area (default terrain.max_km)")
+    b.add_argument("--count", action="store_true", help="only say how many tiles that is")
+    a = ap.parse_args()
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.getLogger("rasterio").setLevel(logging.WARNING)
+    import serve                                    # noqa: PLC0415 (it imports this module)
+    from common import load_config                  # noqa: PLC0415
+    cfg = load_config(a.config)
+    max_km = a.km if a.km is not None else float(cfg["terrain"]["max_km"])
+    if a.count:
+        tiles = needed_tiles(*a.around, a.radius_km, max_km)
+        print(len(tiles), "tiles:", ", ".join(f"level {lv}: {sum(t[0] == lv for t in tiles)}" for lv in range(MAX_LEVEL + 1)))
+        return
+    build(serve.Horizons(cfg).cesium, *a.around, a.radius_km, max_km)
+
+
+if __name__ == "__main__":
+    main()
