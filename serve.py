@@ -9,6 +9,7 @@
     GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &bbox=S,W,N,E][&percentile=90][&year=2026]
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
     GET /v1/terrain-tiles/{z}/{x}/{y}.png   (Terrarium-encoded heights for the website's 3D horizon view)
+    GET /v1/cesium-terrain/layer.json, /v1/cesium-terrain/{z}/{x}/{y}.terrain   (the same in Cesium's quantized-mesh)
     GET /v1/status
 
 With api.follow_terrain on (off by default: it made the fit to Rabbi Druk's sunrises worse), each column's
@@ -80,6 +81,7 @@ import haze_calibration
 import light_pollution
 import terrain
 import terrain_tiles
+import cesium_terrain
 from climatology import ClimGrid, build_profile, clim_dir
 from common import Cycle, destination, gfs_dir, load_config, solar_date, sun_event, write_json_atomic
 
@@ -514,6 +516,11 @@ class Horizons:
         self.map_tiles = terrain_tiles.TerrainTiles(
             self.tiles, local, data / "terrain-tiles",
             f"{self.dem or 'srtm'}-{self.fine['sig'] if self.fine else 'nofine'}")
+        # and in Cesium's own format (quantized-mesh) for the 3D view; its fine data only where it is on disk
+        own = terrain.Tiles(folder, None, max_in_memory=4, user_agent=ua, layered_dir=layered_dir)
+        self.cesium = cesium_terrain.CesiumTerrain(
+            self.tiles, own, data / "cesium-terrain", data / "aws-terrarium",
+            f"{self.dem or 'srtm'}-{self.fine['sig'] if self.fine else 'nofine'}", ua)
         self.slots = threading.BoundedSemaphore(int(t["max_parallel"]))
         self.answer_within_s = float(t.get("answer_within_s", 45.0))
         self.timing = HorizonTiming(data / "horizon-timing.json", layered_dir if self.dem else None)
@@ -863,6 +870,30 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def send_cesium_terrain(self, path: str) -> None:
+        """/v1/cesium-terrain/layer.json and /v1/cesium-terrain/{level}/{x}/{y}.terrain (cesium_terrain.py)."""
+        ct = self.horizons.cesium
+        if path == "/v1/cesium-terrain/layer.json":
+            # the tiles' URL carries the terrain's signature: new terrain, new URLs (browsers keep tiles 30 days)
+            return self.send_json(200, cesium_terrain.layer_json("{z}/{x}/{y}.terrain", f"v={ct.signature}"),
+                                  cache_s=3600)
+        m = re.fullmatch(r"/v1/cesium-terrain/(\d+)/(\d+)/(\d+)\.terrain", path)
+        if not m:
+            return self.send_json(404, {"error": "not found"})
+        try:
+            body, final = ct.get(*map(int, m.groups()))
+        except ValueError as e:
+            return self.send_json(404, {"error": str(e)})
+        self.send_response(200)
+        self.send_header("Content-Type", "application/vnd.quantized-mesh")
+        self.send_header("Content-Encoding", "gzip")
+        self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
+        # a tile made from AWS's data while the server's own is on its way: not for long
+        self.send_header("Cache-Control", f"public, max-age={2592000 if final else 3600}")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     _cal: tuple = (None, None)          # (mtime, data) of haze-calibration.json
 
     def haze_calibration(self) -> dict:
@@ -904,6 +935,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, body, cache_s=600 if partial else 86400)
             if url.path.startswith("/v1/terrain-tiles/"):
                 return self.send_terrain_tile(url.path)
+            if url.path.startswith("/v1/cesium-terrain/"):
+                return self.send_cesium_terrain(url.path)
             if url.path == "/v1/light-pollution":
                 body, cache_s = light_pollution_query(self.lightpol, self.area_index(), q)
                 return self.send_json(200, body, cache_s=cache_s)

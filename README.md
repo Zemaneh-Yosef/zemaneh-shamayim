@@ -15,7 +15,8 @@ inputs that the ROYZmanim app (royzmanimwebsite) uses to correct for that:
 | `/v1/area` | the official municipality or neighbourhood containing a point |
 | `/v1/light-pollution` | sky brightness from the World Atlas, brought forward to today, for when the stars become visible |
 | `/v1/haze-calibration` | a factor correcting the CAMS haze forecast at a place, from NASA's AERONET measurements |
-| `/v1/terrain-tiles/{z}/{x}/{y}.png` | the same terrain as web-map tiles, for the website's 3D horizon view |
+| `/v1/terrain-tiles/{z}/{x}/{y}.png` | the same terrain as web-map tiles |
+| `/v1/cesium-terrain/layer.json`, `/{z}/{x}/{y}.terrain` | the same terrain in Cesium's format (quantized-mesh, with surface normals), for the website's 3D horizon view |
 | `/v1/status` | the live forecast cycle and how much climatology each region holds |
 
 No API keys are needed: every source is free public data (NOAA, USGS, NRCan, IGN, FABDEM, OpenStreetMap,
@@ -826,6 +827,20 @@ the website then shows the AWS tiles there. Each tile is made once and kept in
 `terrain.fine`, starts a new folder; delete old ones). Tiles of a merged 1° tile rebuilt with `--force` are not
 renewed by themselves: delete the folder to remake them.
 
+### Terrain for the 3D view in Cesium's format (`/v1/cesium-terrain`)
+
+The website's 3D horizon view (CesiumJS) reads `/v1/cesium-terrain/layer.json` and then the tiles it lists:
+quantized-mesh tiles (https://github.com/CesiumGS/quantized-mesh) on Cesium's geographic tiling (level 0: two
+tiles of 180°; levels 0–13, the last ~38 m between heights), each a regular 65 × 65 grid with every vertex's surface
+normal, so Cesium lights the ground itself and the browser decodes nothing (`cesium_terrain.py`). The heights are the
+horizons' own (fine data where it is on disk, else the bare-earth layers, else the 1″ tiles), sampled straight onto
+Cesium's grid. Levels below 8 (a level-7 tile spans 1.4°), places outside 60°S–60°N and tiles whose data the server
+lacks come from the AWS Terrain Tiles, downloaded once into `<data_dir>/aws-terrarium` (their sea bed set to sea
+level); a detailed tile made that way starts the download of the server's own 1″ tile in the background and is not
+kept, so it is the server's on the next request. Tiles are kept gzipped in
+`<data_dir>/cesium-terrain/<terrain signature>/` (a new signature, from changing `terrain.layers` or `terrain.fine`,
+starts a new folder and new tile URLs; delete old ones).
+
 ## 4. Validation: checking against observed sunrises
 
 Summary: on Rav Druk's 521 observed sunrises at Armon HaNatziv (1993–96), the computed visible sunrise
@@ -987,6 +1002,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
+| `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (not kept), the disk cache |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
 | `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time with an estimate from the work left (the tiles its rays cross), computed once in the background however often it is asked for, then served; the timings learned and kept; a failure reported once, then retried |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights, the three versions, which sounding a date gets) |
