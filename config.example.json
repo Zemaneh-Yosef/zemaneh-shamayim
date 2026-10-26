@@ -65,6 +65,7 @@
     "max_area_radius_km": 30.0,
     "min_grid_m": 50.0,
     "max_parallel": 2,
+    "answer_within_s": 45.0,
     "max_candidates": 1200,
     "moon_percentile": 90.0,
     "layers": {

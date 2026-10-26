@@ -86,6 +86,8 @@ DEFAULT_CONFIG = {
         "moon_percentile": 90.0,  # &moon=1 in an area: spots at this percentile of horizon height (high
                                   # horizon = late moonrise / early moonset; 100 = the single worst spot)
         "max_parallel": 2,        # horizon computations at once (each takes ~1-10 s of CPU)
+        "answer_within_s": 45.0,  # a horizon not ready by then (a place's first: tiles to build) is answered
+                                  # 503 {"computing": true, "retryAfterS"} and carries on in the background
         # Bare-earth elevation merged from several sources (dem_layers.py). Off while "sources" is empty:
         # then only the tiles above are used. Each source: {"name", "paths": [GDAL-readable paths, globs
         # or /vsicurl/ URLs], "enabled": true}; earlier sources win wherever they have data.

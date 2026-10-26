@@ -229,8 +229,10 @@ sudo systemctl restart zmanim-sky-api
 `test-fine` builds that 0.1° chunk in a temporary folder, says which source filled it and how long it took,
 and compares it with the 1″ data your server uses (a median difference over 3 m means a datum or units
 problem, or the wrong layer). Chunks are otherwise built when a horizon first needs them, one at a time: ~9
-for a point (the 10 km around it), more for a city's area, which can outlast nginx's 120 s (the server
-carries on, and the next request is quick); building ahead avoids it. `build-fine` skips chunks already
+for a point (the 10 km around it), more for a city's area, which can take minutes. Such a request is answered
+after `terrain.answer_within_s` (45 s) with 503 `{"computing": true, "retryAfterS": 15}` while the server carries
+on (the website asks again by itself, and the calendar shows its times without the horizon meanwhile); building
+ahead avoids the wait. `build-fine` skips chunks already
 built and lists failed ones (run it again). `--km` is the radius to cover: the area's own radius plus
 `terrain.fine.max_km` (10). `--example` uses the example config's sources before `config.json` has them;
 the chunks go where the server will look once it has the same ones. `deploy/prebuild-fine.sh` runs
@@ -432,7 +434,12 @@ from its own position and height, and takes the earliest sunrise (latest sunset)
 0.8 km vantage set (100 m grid) agrees with a brute-force search over a 49-spot grid to within ±5 s.
 
 Each answer is cached in `<data_dir>/horizons`, so a place costs its computation once (point: ~1 s;
-0.8 km vantage search: ~5–10 s; more the first time its terrain data is built). `make_horizon.py` does
+0.8 km vantage search: ~5–10 s; minutes the first time its terrain data is downloaded and built). A computation
+runs in the background: a request waits for it up to `terrain.answer_within_s` (45 s, under nginx's 120 s and
+Cloudflare's 100 s) and is otherwise answered 503 with `"computing": true` and `"retryAfterS"` (also the
+`Retry-After` header); asking again joins the same computation instead of starting another, and once it is done
+the answer is the stored file. A computation that fails is reported to the next request, and the one after
+tries again. `make_horizon.py` does
 the same from the command line (same output as `/v1/horizon`; tiles downloaded into `./tiles` unless
 `--no-download`):
 
@@ -970,6 +977,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
+| `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time, computed once in the background however often it is asked for, then served; a failure reported once, then retried |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights, the three versions, which sounding a date gets) |
 
 ### Caveats
