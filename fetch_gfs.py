@@ -29,6 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
+import weather_guard
 from common import Cycle, cycle_field_names, forecast_hours, gfs_dir, load_config, single_run, write_json_atomic
 
 log = logging.getLogger("fetch_gfs")
@@ -133,6 +134,8 @@ def decode(path: Path, names: list[str]):
     missing = [n for n in names if np.isnan(out[index[n]]).all()]
     if missing:
         raise ValueError(f"{path}: missing fields {missing}")
+    # values no air or ground can have: the file is damaged (weather_guard.py)
+    weather_guard.check(names, out, str(path))
     return out, lats.astype(np.float64), lons.astype(np.float64)
 
 
@@ -253,6 +256,12 @@ def fetch_cycle(cfg: dict, cycle: Cycle, source_dir: Path | None = None) -> bool
                         "levels_mb": cfg["pressure_levels_mb"], "region": region,
                     })
                 log.info("%s %s f%03d stored", cycle.id, region["name"], hour)
+    jumps = jump_from_serving(cfg, cycle, work, hours)
+    if jumps:
+        # not new weather but a damaged or misread run: held back, fetched afresh next time; the serving run stays
+        shutil.rmtree(work, ignore_errors=True)
+        raise RuntimeError(f"cycle {cycle.id} differs from the serving run more than any update does, not published: "
+                           + "; ".join(jumps[:6]))
     (work / "complete").write_text("")
     write_json_atomic(work / "cycle.json", {"cycle": cycle.id, "hours": hours,
                                             "regions": [r["name"] for r in cfg["regions"]]})
@@ -262,6 +271,38 @@ def fetch_cycle(cfg: dict, cycle: Cycle, source_dir: Path | None = None) -> bool
     write_json_atomic(root / "current.json", {"cycle": cycle.id, "published": time.time()})
     prune(cfg)
     return True
+
+
+def jump_from_serving(cfg: dict, cycle: Cycle, work: Path, hours: list[int]) -> list[str]:
+    """Where the new run (in `work`) differs from the serving run, at the valid times both forecast within
+    weather_guard.JUMP_WITHIN_H hours of the new run, more than consecutive runs ever do (weather_guard.run_jump).
+    [] when there is nothing to compare (no serving run, more than a day older, another grid or other fields)."""
+    root = gfs_dir(cfg)
+    try:
+        serving = Cycle.parse(json.loads((root / "current.json").read_text())["cycle"])
+    except (OSError, ValueError, KeyError):
+        return []
+    lag = (cycle.time - serving.time).total_seconds() / 3600
+    if not 0 < lag <= 24 or lag != int(lag):
+        return []
+    names = cycle_field_names(cfg)
+    out = []
+    for region in cfg["regions"]:
+        new_dir, old_dir = work / region["name"], root / serving.id / region["name"]
+        try:
+            m_new = json.loads((new_dir / "meta.json").read_text())
+            m_old = json.loads((old_dir / "meta.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if m_new["fields"] != m_old["fields"] or m_new["lats"] != m_old["lats"] or m_new["lons"] != m_old["lons"]:
+            continue
+        for h in hours:
+            if h > weather_guard.JUMP_WITHIN_H:
+                break
+            a, b = new_dir / f"f{h:03d}.npy", old_dir / f"f{h + int(lag):03d}.npy"
+            if a.exists() and b.exists():
+                out += [f"{region['name']} f{h:03d}: {p}" for p in weather_guard.run_jump(names, np.load(a), np.load(b))]
+    return out
 
 
 def prune(cfg: dict) -> None:
