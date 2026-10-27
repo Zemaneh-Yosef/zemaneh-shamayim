@@ -35,6 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
+import weather_guard
 from climatology import clim_dir
 from common import load_config, write_json_atomic
 
@@ -383,6 +384,8 @@ def build_region(cfg: dict, region: dict, means, lats, lons, static, label: str,
         if not (np.array_equal(la, lats) and np.array_equal(lo, lons)):
             raise ValueError(f"{STATIC_FILES[role]}: grid differs from the time-varying files")
         values[:, :, OUT_FIELDS.index(role)] = a[np.ix_(rows, cols)]
+    # values no air or ground can have: the download is damaged, and the climatology in use stays (weather_guard.py)
+    weather_guard.check(OUT_FIELDS, values, f"reanalysis climatology for {region['name']}", axis=2)
     out = clim_dir(cfg, "ncep", region["name"])
     tmp = out.with_name(out.name + ".tmp")
     shutil.rmtree(tmp, ignore_errors=True)

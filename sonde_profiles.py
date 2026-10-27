@@ -69,9 +69,10 @@ def read_igra(path: Path, years: set[int]) -> list[dict]:
             if cur is None:
                 continue
             p, z, temp = int(line[9:15]), int(line[16:21]), int(line[22:27])
-            if p < 0 or temp == -9999:
+            # IGRA: -9999 missing, -8888 removed by its quality control
+            if p < 0 or temp in (-9999, -8888):
                 continue
-            cur["levels"].append({"p": p / 100, "z": None if z == -9999 else float(z), "t": temp / 10,
+            cur["levels"].append({"p": p / 100, "z": None if z in (-9999, -8888) else float(z), "t": temp / 10,
                                   "surface": line[1] == "1"})
     if cur and cur["levels"]:
         out.append(cur)

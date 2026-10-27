@@ -378,6 +378,26 @@ how many days of your own climatology each month holds (`days_per_month`, `month
   Rav Druk's observations it made the fit worse ([Validation](#4-validation-checking-against-observed-sunrises)),
   so it is off; `"follow_terrain": {"enabled": true}` turns it on.
 
+### Guardrails on the weather data (`weather_guard.py`)
+
+Every GFS and GEFS file is checked as it is decoded, and the NOAA reanalysis climatology before it is saved, for
+values no air or ground can have: the limits are the Earth's recorded extremes with a margin (2 m air 178–334 K,
+from the −89.2 °C Vostok and 56.7 °C Death Valley records; surface pressure 300–1100 mb; ground −500 to 9,000 m;
+air on pressure levels 160–350 K, room left for GFS's extrapolation below high ground; level heights rising as the
+pressure falls). A file that fails is treated as damaged: the forecast run is not published and the previous one
+keeps serving (the next fetch tries again), the backfill skips that hour so nothing of it reaches the climatology,
+and the climatology in use is not replaced. Before a new GFS run is published, its first day is also compared with
+the serving run's forecast for the same hours: consecutive runs differ there by well under 1 K and 1 mb over most
+of the grid, so a median difference over a region of more than 3 K (2 m air), 3 mb (surface pressure) or 40 m
+(500 mb height) means a damaged or misread run, and it is held back and fetched afresh next time. The log says
+which fields and by how much. Real weather is never refused: a cold wave, a heat wave or a deep storm moves only
+part of a region, and the limits are beyond any record.
+
+The website checks what it receives again (`atmosphere-guard.js` in the website's KosherZmanim library): the
+same physical limits per value, a path profile's levels against the hypsometric equation, temperature gradients
+no air sustains, haze outside 0–10, and a forecast more than 45 °C from the place's normal; what fails goes to
+the next source, and with none left the standard refraction model applies.
+
 ### Ensembles (`&ensemble=1`): typical outcomes and error bars
 
 `GET /v1/path-profiles?...&ensemble=1` adds to each event an `"ensemble": {"kind", "members": [{"member",
@@ -1022,7 +1042,8 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (kept apart until the server has the data), the disk cache, `build` ahead of time (each level within its reach, out to the earth's curve, with parents) |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
 | `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time with an estimate from the work left (the tiles its rays cross), computed once in the background however often it is asked for, then served; the timings learned and kept; a failure reported once, then retried |
-| `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights, the three versions, which sounding a date gets) |
+| `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights and values IGRA's quality control removed, the three versions, which sounding a date gets) |
+| `test_weather_guard.py` | the guardrails: record extremes kept, impossible values (units mixed up, a land fraction of 7, levels out of order) refused, a refused run leaving the previous one serving, a run that jumps away from the serving one held back and an ordinary update published |
 
 ### Caveats
 

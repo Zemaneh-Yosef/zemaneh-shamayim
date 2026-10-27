@@ -47,6 +47,8 @@ def main():
                   level("1", "0", 100000, -9999, 109),         # 1000 mb, height to be filled in
                   level("2", "0", 99700, -9999, 112),          # inversion top
                   level("1", "0", 92500, 811, 75), level("1", "0", 85000, 1497, 33),
+                  level("1", "0", 82000, 1790, -8888),         # temperature removed by IGRA's quality control
+                  level("1", "0", 80000, -8888, 0),            # height removed: filled in like a missing one
                   level("1", "0", 70000, 3034, -60)]
         lines = sounding(1993, 1, 3, 5, "0500", winter) + sounding(1993, 1, 3, 11, "1100", winter)
         lines += sounding(1993, 1, 4, 23, "2300", winter[:2])   # too few levels: left out
@@ -59,6 +61,9 @@ def main():
         check(lv[0]["surface"] and lv[0]["z"] == 30.0 and abs(lv[1]["z"] - 170) < 5,
               f"missing heights filled hydrostatically: 1000 mb at {lv[1]['z']:.0f} m")
         check([l["z"] for l in lv] == sorted(l["z"] for l in lv), "bottom up")
+        check(all(l["t"] > -100 for l in lv) and 820 not in [l["p"] for l in lv]
+              and abs(next(l["z"] for l in lv if l["p"] == 800) - 1955) < 30,
+              "values IGRA's quality control removed (-8888): not read as -888.8 C or -8888 m")
 
         print("2. the three versions of a column")
         raw = sp.column(s[0], 708.0, "raw", 0, 31.7, 35.2)["levels"]
