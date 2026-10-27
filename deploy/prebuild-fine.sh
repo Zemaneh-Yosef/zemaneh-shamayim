@@ -9,6 +9,8 @@
 #   sudo -u zmanim-sky deploy/prebuild-fine.sh --only "Monsey"                               # one place
 #   sudo -u zmanim-sky nohup deploy/prebuild-fine.sh --tiles > prebuild-fine.log 2>&1 &     # and the 1" tiles
 #   sudo -u zmanim-sky deploy/prebuild-fine.sh --tiles-only --only "Los Angeles"             # only the 1" tiles
+#   sudo -u zmanim-sky nohup deploy/prebuild-fine.sh --tiles --3d > prebuild-fine.log 2>&1 &  # and the 3D view's
+#   sudo -u zmanim-sky deploy/prebuild-fine.sh --3d-only --only "Los Angeles"                 # only the 3D view's
 #
 # --tiles also prepares each place's 1" tiles (dem_layers.py build --horizon): the merged bare-earth tiles where
 # terrain.layers has sources, else the plain downloaded ones. Only those its horizons' rays cross (the year's
@@ -17,6 +19,12 @@
 # ~15 GB merged for the whole list: check `df -h /var/lib/zmanim-sky` first, or use --only for the places you
 # serve. Time: a few seconds a plain tile, about a minute a merged one. --tiles-only skips the fine terrain (e.g.
 # with no terrain.fine sources).
+#
+# --3d also makes the website's 3D horizon view's terrain tiles (cesium_terrain.py build), last, from the terrain
+# built before it, so a first visit doesn't wait for them (~10 s or more): those a view from anywhere in the place
+# asks for, ~2,600 for Los Angeles at 0.3-2 s each, roughly 15-80 min (the 1" tiles under the nearer ones are
+# fetched first, as a visit would), ~10-40 KB each. Run it again after changing terrain sources (the tiles are kept
+# per terrain signature).
 #
 # Each line: name, latitude, longitude, km (the community's own radius + terrain.fine.max_km, 10). ~4.7 MB a
 # chunk on disk; the whole list is roughly 900 chunks (~4 GB): about 45 min for the US and Canada (USGS and
@@ -28,11 +36,14 @@ EXTRA=()
 ONLY=""
 TILES=0
 FINE=1
+CESIUM=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift 2 ;;
     --tiles) TILES=1; shift ;;
     --tiles-only) TILES=1; FINE=0; shift ;;
+    --3d) CESIUM=1; shift ;;
+    --3d-only) CESIUM=1; FINE=0; TILES=0; shift ;;
     *) EXTRA+=("$1"); shift ;;
   esac
 done
@@ -89,6 +100,10 @@ while IFS='|' read -r name lat lon km; do
   if [ "$TILES" = 1 ] && ! venv/bin/python dem_layers.py build --around "$lat" "$lon" --horizon \
        --radius-km "$(awk -v k="$km" 'BEGIN { r = k - 10; print (r > 0 ? r : 0) }')"; then
     failed+=("$name (1\" tiles)")
+  fi
+  if [ "$CESIUM" = 1 ] && ! venv/bin/python cesium_terrain.py build --around "$lat" "$lon" \
+       --radius-km "$(awk -v k="$km" 'BEGIN { r = k - 10; print (r > 0 ? r : 0) }')"; then
+    failed+=("$name (3D view)")
   fi
 done <<< "$PLACES"
 
