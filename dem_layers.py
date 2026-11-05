@@ -228,7 +228,8 @@ class Builder:
             return None
         if f.exists() and not force:
             return np.load(f, mmap_mode="r")
-        with self.lock:
+        # one build of a tile at a time, in this process (lock) and across the horizon worker processes
+        with self.lock, terrain.file_lock(self.out / ".locks" / terrain.tile_name(lat_i, lon_i)):
             if not force and sea.exists():
                 return None
             if f.exists() and not force:
@@ -256,7 +257,7 @@ class Builder:
                 self._bump_rev(lat_i, lon_i, old is not None and not (isinstance(old, str)))
                 log.info("%s is open sea", terrain.tile_name(lat_i, lon_i))
                 return None
-            tmpf = f.with_name(f.stem + ".tmp.npy")
+            tmpf = f.with_name(f"{f.stem}.{os.getpid()}.tmp.npy")
             np.save(tmpf, dst)
             os.replace(tmpf, f)
             sea.unlink(missing_ok=True)
@@ -361,7 +362,7 @@ class FineTiles:
                 self.cache.move_to_end(k)
                 return self.cache[k]
         a = self._load_or_build(k)
-        if a is None and k in self.failed:
+        if a is None and time.time() - self.failed_at(k) < 3600:
             return None                                  # not kept: retried once the hour is up
         with self.lock:
             self.cache[k] = a
@@ -375,13 +376,22 @@ class FineTiles:
             return np.load(f, mmap_mode="r")
         if f.with_suffix(".none").exists() or self.builder is None:
             return None
-        with self.build_lock:
+        with self.build_lock, terrain.file_lock(self.dir / ".locks" / self.chunk_name(k)):
             if f.exists() or f.with_suffix(".none").exists():
                 return self._load_or_build(k)
             return self._build(k, f)
 
+    def failed_at(self, k: tuple[int, int]) -> float:
+        """When a build of this chunk last failed (0: never): here, or in another process (a .failed marker:
+        horizons are built in worker processes, and the API process estimates what is left to build)."""
+        try:
+            on_disk = (self.dir / f"{self.chunk_name(k)}.failed").stat().st_mtime
+        except OSError:
+            on_disk = 0.0
+        return max(self.failed.get(k, 0.0), on_disk)
+
     def _build(self, k: tuple[int, int], f: Path) -> "np.ndarray | None":
-        if time.time() - self.failed.get(k, 0) < 3600:
+        if time.time() - self.failed_at(k) < 3600:
             return None
         from rasterio.transform import Affine
         lat0, lon0 = k[0] * FINE_CHUNK_DEG, k[1] * FINE_CHUNK_DEG
@@ -395,14 +405,19 @@ class FineTiles:
                                             tiles_in(lat0 - st, lon0 - st, top + st, lon0 + FINE_CHUNK_DEG + st))
         except SourceError as e:
             self.failed[k] = time.time()
+            try:
+                f.with_suffix(".failed").write_text("")
+            except OSError:
+                pass
             log.warning("fine terrain %s not built (%s); using the 1\" tiles there", self.chunk_name(k), e)
             return None
         if not stats:
             f.with_suffix(".none").write_text("")
             return None
-        tmpf = f.with_name(f.stem + ".tmp.npy")
+        tmpf = f.with_name(f"{f.stem}.{os.getpid()}.tmp.npy")
         np.save(tmpf, dst)
         os.replace(tmpf, f)
+        f.with_suffix(".failed").unlink(missing_ok=True)
         log.info("built fine terrain %s in %.1f s: %s", self.chunk_name(k), time.time() - t0,
                  ", ".join(f"{n} {v:.0%}" for n, v in stats.items()))
         terrain.report_timing("fine", time.time() - t0)
@@ -419,7 +434,7 @@ class FineTiles:
             for j in range(f(w), f(e) + 1):
                 p = self.dir / f"{self.chunk_name((i, j))}.npy"
                 if not p.exists() and not p.with_suffix(".none").exists() \
-                        and time.time() - self.failed.get((i, j), 0) >= 3600:
+                        and time.time() - self.failed_at((i, j)) >= 3600:
                     n_missing += 1
         return n_missing
 
@@ -430,7 +445,7 @@ class FineTiles:
         f = lambda x: math.floor(x / FINE_CHUNK_DEG + 1e-9)   # noqa: E731
         keys = [(i, j) for i in range(f(s), f(n) + 1) for j in range(f(w), f(e) + 1)]
         data = [self.chunk(k) is not None for k in keys]
-        if any(time.time() - self.failed.get(k, 0) < 3600 for k in keys):
+        if any(time.time() - self.failed_at(k) < 3600 for k in keys):
             return f"{self.sig}-partial"
         return self.sig if any(data) else None
 

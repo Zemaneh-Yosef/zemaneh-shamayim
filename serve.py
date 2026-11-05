@@ -58,11 +58,14 @@ Run behind nginx (or any reverse proxy) for TLS. Standard library only, plus num
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import gzip
 import hashlib
 import json
 import logging
 import math
+import multiprocessing
+import os
 import re
 import threading
 import time
@@ -481,9 +484,17 @@ class Horizons:
     searched): longer than a reverse proxy waits (nginx: 120 s). So each one is computed in the background,
     the request waits terrain.answer_within_s for it, and past that is answered 503 with "computing": true and
     a retryAfterS; asking again joins the same computation, and once it is done the answer is the stored file.
+
+    The computation itself (tiles downloaded or built, fine chunks built, the search) runs in a pool of
+    terrain.max_parallel worker processes (BuildPool), not in the API process: it is CPU-bound Python and numpy,
+    and here it would hold the GIL from the threads answering other requests, slowing every reply (cached ones
+    too) while a few places are computed at once, as right after a launch. Here a thread per computation only
+    waits for its result. terrain.worker_processes = false computes in that thread instead (for tests that
+    replace terrain.horizon_set). `worker`: the copy of this class inside a worker process (the terrain and
+    the stored answers' names only).
     """
 
-    def __init__(self, cfg: dict):
+    def __init__(self, cfg: dict, worker: bool = False):
         t = cfg["terrain"]
         self.cfg = t
         data = Path(cfg["data_dir"])
@@ -511,6 +522,10 @@ class Horizons:
                      ", ".join(self.tiles.fine.names))
         self.dir = data / "horizons"
         self.dir.mkdir(parents=True, exist_ok=True)
+        self.tiles_folder = folder
+        self.slots = threading.BoundedSemaphore(int(t["max_parallel"]))
+        if worker:
+            return
         # the same terrain as web-map tiles; low zooms only from data already here (no downloads / builds)
         local = terrain.Tiles(folder, None, max_in_memory=4, user_agent=ua, layered_dir=layered_dir)
         local.fine = self.tiles.fine
@@ -522,12 +537,12 @@ class Horizons:
         self.cesium = cesium_terrain.CesiumTerrain(
             self.tiles, own, data / "cesium-terrain", data / "aws-terrarium",
             f"{self.dem or 'srtm'}-{self.fine['sig'] if self.fine else 'nofine'}", ua)
-        self.slots = threading.BoundedSemaphore(int(t["max_parallel"]))
         self.answer_within_s = float(t.get("answer_within_s", 45.0))
         self.timing = HorizonTiming(data / "horizon-timing.json", layered_dir if self.dem else None)
-        self.tiles_folder = folder
         self.jobs: dict[str, dict] = {}          # key -> the computation under way (or just failed)
         self.jobs_lock = threading.Lock()
+        self.pool = BuildPool(cfg, int(t["max_parallel"]), self._event) if t.get("worker_processes", True) else None
+        self.live: dict[int, dict] = {}          # BuildPool task -> its job, for the workers' progress events
 
     def params(self, q: dict, max_bbox_km: float | None = None) -> dict:
         t = self.cfg
@@ -704,27 +719,29 @@ class Horizons:
 
     def _run(self, jkey: str, job: dict, p: dict) -> None:
         """One horizon computation, in its own thread (see the class doc); its result goes to `job`."""
-        self.timing.local.job = job
         partial = False
         try:
             spots = self.work(p)["spots"]
-            f, layers_v, fine_v, partial = self._prepare(p)
-            if f.exists() and not partial:
-                job["body"] = f.read_bytes()
+            if self.pool is not None:
+                task = self.pool.next_task()
+                self.live[task] = job
+                try:
+                    body, partial, compute_s = self.pool.run(task, p)
+                finally:
+                    self.live.pop(task, None)
             else:
-                job["body"] = self._build(p, f, layers_v, fine_v, partial, job)
-                job["partial"] = partial
-                if job["search_from"] is not None:   # not when another request's job stored it meanwhile
-                    # the search's own time: from its start (after any wait for a slot), less the terrain
-                    # fetched and built during it
-                    self.timing.learn_compute(spots, time.monotonic() - job["search_from"]
-                                              - (job["terrain_s"] - job["search_terrain_s"]))
+                self.timing.local.job = job
+                try:
+                    body, partial, compute_s = self._produce(p, job)
+                finally:
+                    self.timing.local.job = None
+            job["body"], job["partial"] = body, partial
+            if compute_s is not None:            # not when another request's job stored it meanwhile
+                self.timing.learn_compute(spots, compute_s)
         except Exception as e:                     # handed to the request that waits for it
             if not isinstance(e, (KeyError, ValueError, LookupError, RuntimeError, FileNotFoundError)):
                 log.exception("horizon %s failed", jkey)
             job["error"] = e
-        finally:
-            self.timing.local.job = None
         job["finished"] = time.monotonic()
         job["done"].set()
         if job["error"] is None and not partial:
@@ -732,11 +749,39 @@ class Horizons:
                 if self.jobs.get(jkey) is job:
                     del self.jobs[jkey]
 
+    def _event(self, task: int, kind: str, seconds: float = 0.0) -> None:
+        """A worker's progress (BuildPool), in the API process: each timing it measured, and the start of the
+        search proper (for etaS)."""
+        job = self.live.get(task)
+        if kind == "search":
+            if job is not None:
+                job["search_from"], job["search_terrain_s"] = time.monotonic(), job["terrain_s"]
+            return
+        self.timing.record(kind, seconds)
+        if job is not None:
+            job["terrain_s"] += seconds
+
+    def _produce(self, p: dict, job: dict) -> tuple[bytes, bool, float | None]:
+        """(the answer, partial, the search's own seconds: None when it read a stored answer), in the thread
+        or worker process that computes it. `job` counts the terrain time spent meanwhile (terrain_s) and gets
+        search_from when the search starts (calling job["on_search"], if any, then)."""
+        f, layers_v, fine_v, partial = self._prepare(p)
+        if f.exists() and not partial:
+            return f.read_bytes(), False, None
+        body = self._build(p, f, layers_v, fine_v, partial, job)
+        if job["search_from"] is None:
+            return body, partial, None
+        # the search's own time: from its start (after any wait for a slot), less the terrain fetched and
+        # built during it
+        return body, partial, time.monotonic() - job["search_from"] - (job["terrain_s"] - job["search_terrain_s"])
+
     def _build(self, p: dict, f: Path, layers_v, fine_v, partial: bool, job: dict) -> bytes:
         with self.slots:
             if f.exists() and not partial:
                 return f.read_bytes()
             job["search_from"], job["search_terrain_s"] = time.monotonic(), job["terrain_s"]
+            if job.get("on_search"):
+                job["on_search"]()
             res = terrain.horizon_set(self.tiles, p["lat"], p["lon"], radius_km=p["radius_km"], bbox=p["bbox"],
                                       grid_m=p["grid_m"] or 100.0, eye=p["eye"], height=p["height"],
                                       min_km=p["min_km"], max_km=p["max_km"],
@@ -752,10 +797,107 @@ class Horizons:
             body = gzip.compress(json.dumps(res, separators=(",", ":")).encode())
             if partial:
                 return body                  # a chunk failed to build: not kept, so the next request retries
-            tmp = f.with_suffix(".tmp")
+            tmp = f.with_name(f"{f.stem}.{os.getpid()}.tmp")   # one per process: workers may race
             tmp.write_bytes(body)
             tmp.replace(f)
             return body
+
+
+class BuildPool:
+    """terrain.max_parallel worker processes that compute horizons (Horizons._produce) for the API process.
+
+    Started on first use (a server answering only from stored horizons starts none), with "forkserver" (a
+    fresh process, not a fork of this threaded one) where there is one, else "spawn". Each worker has its own
+    Horizons(cfg, worker=True): its own tiles in memory, the same files on disk (a tile or fine chunk is
+    downloaded or built by one process at a time: terrain.file_lock). Workers report progress on a queue that a
+    thread here hands to on_event(task, kind, seconds): each timing measured (for HorizonTiming), and "search"
+    when the search proper starts. A worker that dies (killed, out of memory) fails the computations under way
+    with a RuntimeError (503; the next request tries again) and the pool is started anew."""
+
+    def __init__(self, cfg: dict, size: int, on_event):
+        self.cfg, self.size, self.on_event = cfg, max(1, size), on_event
+        methods = multiprocessing.get_all_start_methods()
+        self.ctx = multiprocessing.get_context("forkserver" if "forkserver" in methods else "spawn")
+        self.lock = threading.Lock()
+        self.executor: concurrent.futures.ProcessPoolExecutor | None = None
+        self.events = None
+        self.tasks = 0
+
+    def next_task(self) -> int:
+        with self.lock:
+            self.tasks += 1
+            return self.tasks
+
+    def _start(self) -> concurrent.futures.ProcessPoolExecutor:
+        with self.lock:
+            if self.executor is None:
+                if self.events is None:
+                    self.events = self.ctx.SimpleQueue()
+                    threading.Thread(target=self._relay, name="horizon-events", daemon=True).start()
+                self.executor = concurrent.futures.ProcessPoolExecutor(
+                    self.size, mp_context=self.ctx, initializer=_worker_init,
+                    initargs=(self.cfg, self.events, logging.getLogger().getEffectiveLevel()))
+                log.info("horizon worker pool: %d processes (%s)", self.size, self.ctx.get_start_method())
+            return self.executor
+
+    def _relay(self) -> None:
+        while True:
+            try:
+                self.on_event(*self.events.get())
+            except Exception:                      # never stop relaying
+                log.exception("horizon worker event")
+
+    def run(self, task: int, p: dict) -> tuple[bytes, bool, float | None]:
+        """Horizons._produce(p) in a worker: (body, partial, compute_s), once it is done."""
+        ex = self._start()
+        try:
+            return ex.submit(_worker_build, task, p).result()
+        except concurrent.futures.process.BrokenProcessPool as e:
+            with self.lock:
+                if self.executor is ex:            # the first to notice starts a new pool
+                    self.executor = None
+                    log.error("a horizon worker process died (%s); starting new ones", e)
+            ex.shutdown(wait=False, cancel_futures=True)
+            raise RuntimeError("the horizon computation stopped (its worker process died); "
+                               "ask again to start it anew") from e
+
+    def processes(self) -> list:
+        """The worker processes now running (for tests and logs)."""
+        ex = self.executor
+        return list((getattr(ex, "_processes", None) or {}).values()) if ex is not None else []
+
+    def shutdown(self) -> None:
+        with self.lock:
+            ex, self.executor = self.executor, None
+        if ex is not None:
+            ex.shutdown(wait=True, cancel_futures=True)
+
+
+_WORKER: dict = {}                                 # in a worker process: its Horizons, queue, current task
+
+
+def _worker_init(cfg: dict, events, level: int) -> None:
+    logging.basicConfig(level=level, format="%(asctime)s %(levelname)s [horizon worker %(process)d] %(message)s")
+    _WORKER.update(horizons=Horizons(cfg, worker=True), events=events, job=None, task=None)
+    terrain.TIMING_LISTENERS.append(_worker_timing)
+
+
+def _worker_timing(kind: str, seconds: float) -> None:
+    job = _WORKER.get("job")
+    if job is not None:
+        job["terrain_s"] += seconds
+    _WORKER["events"].put((_WORKER.get("task"), kind, seconds))
+
+
+def _worker_build(task: int, p: dict) -> tuple[bytes, bool, float | None]:
+    events = _WORKER["events"]
+    job = {"terrain_s": 0.0, "search_from": None, "search_terrain_s": 0.0,
+           "on_search": lambda: events.put((task, "search", 0.0))}
+    _WORKER.update(job=job, task=task)
+    try:
+        return _WORKER["horizons"]._produce(p, job)
+    finally:
+        _WORKER.update(job=None, task=None)
 
 
 def areas_path(cfg: dict) -> Path:
@@ -1053,6 +1195,32 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(500, {"error": "internal error"})
 
 
+class APIServer(ThreadingHTTPServer):
+    """ThreadingHTTPServer with at most api.max_threads requests handled at once: past that, new connections
+    wait in the listen backlog (and nginx's queue) rather than each starting one more thread that slows the
+    others. A request waiting for a horizon holds its thread up to terrain.answer_within_s."""
+
+    request_queue_size = 128
+
+    def __init__(self, address, handler, max_threads: int = 64):
+        self.free = threading.BoundedSemaphore(max(1, int(max_threads)))
+        super().__init__(address, handler)
+
+    def process_request(self, request, client_address):
+        self.free.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.free.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.free.release()
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--config")
@@ -1067,7 +1235,7 @@ def main(argv=None):
     Handler.lightpol = light_pollution.LightPollution(cfg)
     Handler.areas = areas.AreaIndex(areas_path(cfg))
     log.info("%d official areas from %s", len(Handler.areas), Handler.areas.path)
-    srv = ThreadingHTTPServer((cfg["api"]["host"], int(cfg["api"]["port"])), Handler)
+    srv = APIServer((cfg["api"]["host"], int(cfg["api"]["port"])), Handler, cfg["api"].get("max_threads", 64))
     log.info("listening on %s:%s", cfg["api"]["host"], cfg["api"]["port"])
     # once listening (a purged CDN asks again at once): terrain or areas changed since the last run -> purge them
     cdn.watch(cfg, Handler.horizons, lambda: Handler.areas)

@@ -4,7 +4,8 @@ still take, computed once in the background, then served; the estimate learns fr
     python3 tests/test_horizon_pending.py
 
 terrain.horizon_set is replaced by one that takes 1.5 s (a place whose tiles are being built) and counts its calls;
-terrain.answer_within_s is 0.3 s.
+terrain.answer_within_s is 0.3 s. The computation runs in a thread here (terrain.worker_processes = false), so the
+replacement is the one called; test_horizon_workers.py runs real ones in worker processes.
 """
 from __future__ import annotations
 
@@ -40,7 +41,8 @@ def run(tmp: Path):
     (tiles / "N31E035.hgt").write_bytes(np.full((3601, 3601), 100, dtype=">i2").tobytes())
     cfgp = tmp / "config.json"
     cfgp.write_text(json.dumps({"data_dir": str(tmp / "data"),
-                                "terrain": {"tiles_dir": str(tiles), "tiles_url": "", "answer_within_s": 0.3}}))
+                                "terrain": {"tiles_dir": str(tiles), "tiles_url": "", "answer_within_s": 0.3,
+                                            "worker_processes": False}}))
     cfg = load_config(str(cfgp))
     calls = {"n": 0, "fail": False}
 

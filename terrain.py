@@ -48,7 +48,9 @@ from __future__ import annotations
 import gzip
 import io
 import logging
+import contextlib
 import math
+import os
 import threading
 import time
 import urllib.error
@@ -85,6 +87,32 @@ def report_timing(kind: str, seconds: float) -> None:
             f(kind, seconds)
         except Exception as e:                             # bookkeeping never fails the terrain
             log.debug("timing listener failed: %s", e)
+
+
+@contextlib.contextmanager
+def file_lock(path: Path):
+    """Held by one process at a time (an flock on `path`; a no-op where there is no fcntl, i.e. Windows):
+    horizons are built in worker processes (serve.Horizons), and two of them must not download or build the
+    same tile at once. The lock file stays (empty) in a .locks folder beside the data."""
+    try:
+        import fcntl
+    except ImportError:                                    # pragma: no cover - Windows (development only)
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "a") as fh:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def write_atomic(path: Path, data: bytes) -> None:
+    """Written whole or not at all, so another process never reads half a file."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
 
 
 def tile_name(lat_i: int, lon_i: int) -> str:
@@ -144,6 +172,12 @@ class Tiles:
             return None
         if not self.url:
             raise FileNotFoundError(f"elevation tile {name} is not in {self.folder} (downloads disabled)")
+        with file_lock(self.folder / ".locks" / name):
+            if any((self.folder / f"{name}{x}").exists() for x in (".hgt", ".hgt.gz", ".sea")):
+                return self._load(name)           # another process fetched it while this one waited
+            return self._download(name)
+
+    def _download(self, name: str):
         url = self.url.format(ns=name[:3], name=name)
         t0 = time.monotonic()
         try:
@@ -160,7 +194,7 @@ class Tiles:
             raise RuntimeError(f"could not download elevation tile {name} from {url}: HTTP {e.code}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"could not download elevation tile {name} from {url}: {e.reason}") from e
-        (self.folder / f"{name}.hgt.gz").write_bytes(data)
+        write_atomic(self.folder / f"{name}.hgt.gz", data)
         log.info("downloaded elevation tile %s (%.1f MB)", name, len(data) / 1e6)
         report_timing("skadi", time.monotonic() - t0)
         return self._load(name)

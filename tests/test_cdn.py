@@ -58,7 +58,9 @@ def api_part(tmp: Path):
     tiles.mkdir()
     (tiles / "N31E035.hgt").write_bytes(np.full((3601, 3601), 100, dtype=">i2").tobytes())
     cfgp = tmp / "config.json"
-    cfgp.write_text(json.dumps({"data_dir": str(tmp / "data"), "terrain": {"tiles_dir": str(tiles), "tiles_url": ""}}))
+    # computed in this process (not a worker), so the horizon_set and _prepare replaced below are the ones used
+    cfgp.write_text(json.dumps({"data_dir": str(tmp / "data"),
+                                "terrain": {"tiles_dir": str(tiles), "tiles_url": "", "worker_processes": False}}))
     cfg = load_config(str(cfgp))
     terrain.horizon_set = lambda *a, **k: {"mode": "point", "points": [{"lat": a[1], "lon": a[2], "sunrise": []}]}
     serve.Handler.store = serve.Store(cfg)

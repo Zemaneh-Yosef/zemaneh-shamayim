@@ -334,7 +334,8 @@ Default config (continental US + Israel, 2 cycles kept):
 * Terrain: default tiles 2–8 MB each; merged 1″ tiles ~52 MB per land tile; fine terrain ~4.7 MB per 0.1°
   chunk (`prebuild-fine.sh`'s list: ~3.5 GB).
 * GEFS (optional): ~1250 requests per region per run, ~0.7 GB stored for the US box.
-* CPU / RAM: negligible; arrays are memory-mapped.
+* CPU / RAM: negligible; arrays are memory-mapped. While first horizons are computed, up to
+  `terrain.max_parallel` worker processes use a core and ~0.3–0.5 GB each (their own tiles in memory).
 
 ### Troubleshooting
 
@@ -509,6 +510,25 @@ Cloudflare's 100 s) and is otherwise answered 503 with `"computing": true` and `
 `Retry-After` header); asking again joins the same computation instead of starting another, and once it is done
 the answer is the stored file. A computation that fails is reported to the next request, and the one after
 tries again.
+
+The computations run in `terrain.max_parallel` (2) worker processes, not in the API process. A first horizon
+is CPU-bound Python and numpy for seconds to minutes, and the API process answers every request in threads
+that share one GIL. A few first horizons at once, as right after a launch, would slow every other reply there,
+cached ones too. Now the API process's thread for a computation only waits for a worker's result. The 503,
+`etaS`, joining a computation under way, partial answers not being stored, and the cache in
+`<data_dir>/horizons` are unchanged. The workers report each download and build they time, and when the
+search proper starts, so `etaS` and `horizon-timing.json` learn as before. The pool starts with the first
+computation, with the `forkserver` start method (fresh processes, not forks of the threaded server). Each
+worker keeps its own tiles in memory (up to ~12 × 26 MB) and shares the files on disk. Two processes never
+download or build the same tile or fine chunk at once: an `flock` on a file in a `.locks` folder beside the
+data, with files written under a temporary name and then renamed. A fine chunk that failed to build leaves a
+`.failed` marker, so every process waits the same hour before trying again. If a worker dies (killed, out of
+memory), the computations under way are answered 503 with an error once, the next request starts them again,
+and the pool is started anew. `terrain.worker_processes: false` computes in the API process's threads
+instead, as before (the tests that replace `terrain.horizon_set` use it). The API also handles at most
+`api.max_threads` (64) requests at once. More wait in the listen backlog for a free thread instead of each
+starting one more thread that slows the rest. A request waiting for a horizon holds its thread for up to
+`terrain.answer_within_s`.
 
 The 503 says how long it should still take: `etaS`, from what is left (`work`: the 1″ tiles its rays cross not
 yet on disk, the fine chunks not yet built, the spots to search) times how long each takes on this server.
@@ -1104,6 +1124,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
 | `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (kept apart until the server has the data), the disk cache, `build` ahead of time (each level within its reach, out to the earth's curve, with parents) |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
+| `test_horizon_workers.py` | horizons computed in worker processes: real searches on a synthetic tile outside the API process, one computation per place when 8 ask at once (more than `api.max_threads`), cached answers quick while two vantage searches run, a killed worker reported once and the pool started anew, errors carried back, the search time learned from the worker |
 | `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time with an estimate from the work left (the tiles its rays cross), computed once in the background however often it is asked for, then served; the timings learned and kept; a failure reported once, then retried |
 | `test_cdn.py` | the caching headers (browsers a day, the CDN the full lifetime, stale-if-error, tags; a partial horizon 10 minutes), purge requests as Cloudflare's API takes them, and purging only what changed (a tile revision, a new areas.json), a refused purge retried |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights and values IGRA's quality control removed, the three versions, which sounding a date gets) |
