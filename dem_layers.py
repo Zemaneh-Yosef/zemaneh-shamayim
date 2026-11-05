@@ -586,7 +586,8 @@ def main():
                    "point or the edge of --radius-km), not the whole circle: ~9-12 tiles rather than ~15")
     b.add_argument("--radius-km", type=float, default=0.0, help="with --horizon: the area's own radius around the point")
     b.add_argument("--force", action="store_true", help="rebuild tiles that exist (e.g. after adding source files; "
-                   "restart the API afterwards: it keeps tiles in memory)")
+                   "restart the API afterwards: it keeps tiles in memory, and purges the CDN's horizons when it "
+                   "finds a tile's new revision: cdn.py)")
     b.add_argument("--existing", action="store_true", help="only tiles already built (with --force: rebuild "
                    "those; the others are built from the new files when first needed)")
     bf = sub.add_parser("build-fine", help="build the fine-terrain chunks around a place ahead of time, so the first "

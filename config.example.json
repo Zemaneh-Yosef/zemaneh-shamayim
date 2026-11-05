@@ -227,6 +227,14 @@
     "file": "",
     "tiger_year": 2024
   },
+  "cdn": {
+    "browser_max_age_s": 86400,
+    "stale_if_error_s": 86400,
+    "tag_prefix": "zsky",
+    "check_every_s": 600,
+    "cloudflare_zone_id": "",
+    "cloudflare_api_token": ""
+  },
   "api": {
     "host": "127.0.0.1",
     "port": 8787,

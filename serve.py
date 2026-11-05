@@ -75,6 +75,7 @@ from urllib.parse import parse_qs, urlparse
 import numpy as np
 
 import areas
+import cdn
 import climatology
 import dem_layers
 import haze_calibration
@@ -567,11 +568,16 @@ class Horizons:
 
     def get(self, q: dict, extra: dict | None = None, max_bbox_km: float | None = None) -> bytes:
         """gzip-compressed JSON; extra (e.g. the area) is added to the result, not to the cache key"""
-        body = self.compute(q, max_bbox_km)
+        return self.get_ex(q, extra, max_bbox_km)[0]
+
+    def get_ex(self, q: dict, extra: dict | None = None, max_bbox_km: float | None = None) -> tuple[bytes, bool]:
+        """(get()'s answer, partial): partial when a fine-terrain chunk it needed could not be built, so the
+        answer is not kept and the next request (after a while) builds it again: not for caches to keep long."""
+        body, partial = self.compute_ex(q, max_bbox_km)
         if extra:
             res = json.loads(gzip.decompress(body))
             body = gzip.compress(json.dumps({**res, **extra}, separators=(",", ":")).encode())
-        return body
+        return body, partial
 
     def fine_version(self, p: dict) -> str | None:
         """The fine terrain's part in a horizon with these params (FineTiles.version over the vantage points
@@ -667,12 +673,15 @@ class Horizons:
         return self.dir / f"{key}.json.gz", layers_v, fine_v, partial
 
     def compute(self, q: dict, max_bbox_km: float | None = None) -> bytes:
+        return self.compute_ex(q, max_bbox_km)[0]
+
+    def compute_ex(self, q: dict, max_bbox_km: float | None = None) -> tuple[bytes, bool]:
         p = self.params(q, max_bbox_km)
         # a place seen before (its fine chunks on disk): the stored answer, at once
         if not (self.fine and self.tiles.fine.missing(*self._reach(p, self.fine["km"]))):
             f, _, _, partial = self._prepare(p)
             if f.exists() and not partial:
-                return f.read_bytes()
+                return f.read_bytes(), False
         jkey = hashlib.sha1(json.dumps(p, sort_keys=True).encode()).hexdigest()[:20]
         now = time.monotonic()
         with self.jobs_lock:
@@ -680,7 +689,7 @@ class Horizons:
             if job is not None and job["done"].is_set() and now - job["finished"] > 300:
                 job = None                         # an old failure or partial answer: try again
             if job is None:
-                job = {"done": threading.Event(), "body": None, "error": None, "finished": 0.0,
+                job = {"done": threading.Event(), "body": None, "partial": False, "error": None, "finished": 0.0,
                        "started": now, "terrain_s": 0.0, "search_from": None, "search_terrain_s": 0.0}
                 self.jobs[jkey] = job
                 threading.Thread(target=self._run, args=(jkey, job, p), name=f"horizon-{jkey}", daemon=True).start()
@@ -691,7 +700,7 @@ class Horizons:
                 if self.jobs.get(jkey) is job:
                     del self.jobs[jkey]            # reported once; the next request tries again
             raise job["error"]
-        return job["body"]
+        return job["body"], job["partial"]
 
     def _run(self, jkey: str, job: dict, p: dict) -> None:
         """One horizon computation, in its own thread (see the class doc); its result goes to `job`."""
@@ -704,6 +713,7 @@ class Horizons:
                 job["body"] = f.read_bytes()
             else:
                 job["body"] = self._build(p, f, layers_v, fine_v, partial, job)
+                job["partial"] = partial
                 if job["search_from"] is not None:   # not when another request's job stored it meanwhile
                     # the search's own time: from its start (after any wait for a slot), less the terrain
                     # fetched and built during it
@@ -828,7 +838,13 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         log.info("%s %s", self.address_string(), fmt % args)
 
-    def send_json(self, status: int, obj, cache_s: int = 0) -> None:
+    def send_cache(self, cache_s: int, tags: tuple[str, ...] = ()) -> None:
+        """Cache-Control for browsers (at most cdn.browser_max_age_s), CDN-Cache-Control for the CDN (the full
+        cache_s), stale-if-error and the Cache-Tag to purge by (cdn.py); no-store when cache_s is 0."""
+        for k, v in cdn.cache_headers(self.store.cfg, cache_s, tags):
+            self.send_header(k, v)
+
+    def send_json(self, status: int, obj, cache_s: int = 0, tags: tuple[str, ...] = ()) -> None:
         body = json.dumps(obj, separators=(",", ":")).encode()
         gz = "gzip" in (self.headers.get("Accept-Encoding") or "")
         if gz:
@@ -836,14 +852,14 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
-        self.send_header("Cache-Control", f"public, max-age={cache_s}" if cache_s else "no-store")
+        self.send_cache(cache_s, tags)
         if gz:
             self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def send_gzip_json(self, gz_body: bytes, cache_s: int) -> None:
+    def send_gzip_json(self, gz_body: bytes, cache_s: int, tags: tuple[str, ...] = ()) -> None:
         if "gzip" in (self.headers.get("Accept-Encoding") or ""):
             body, enc = gz_body, True
         else:
@@ -851,7 +867,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
-        self.send_header("Cache-Control", f"public, max-age={cache_s}")
+        self.send_cache(cache_s, tags)
         if enc:
             self.send_header("Content-Encoding", "gzip")
         self.send_header("Content-Length", str(len(body)))
@@ -866,11 +882,11 @@ class Handler(BaseHTTPRequestHandler):
             body = self.horizons.map_tiles.get(*map(int, m.groups()))
         except (ValueError, LookupError) as e:
             # short cache: a missing tile appears once horizons nearby bring its data
-            return self.send_json(404, {"error": str(e)}, cache_s=3600)
+            return self.send_json(404, {"error": str(e)}, cache_s=3600, tags=("terrain",))
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
-        self.send_header("Cache-Control", "public, max-age=2592000")
+        self.send_cache(2592000, ("terrain",))
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -881,7 +897,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/v1/cesium-terrain/layer.json":
             # the tiles' URL carries the terrain's signature: new terrain, new URLs (browsers keep tiles 30 days)
             return self.send_json(200, cesium_terrain.layer_json("{z}/{x}/{y}.terrain", f"v={ct.signature}"),
-                                  cache_s=3600)
+                                  cache_s=3600, tags=("terrain",))
         m = re.fullmatch(r"/v1/cesium-terrain/(\d+)/(\d+)/(\d+)\.terrain", path)
         if not m:
             return self.send_json(404, {"error": "not found"})
@@ -894,7 +910,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Encoding", "gzip")
         self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
         # a tile made from AWS's data while the server's own is on its way: not for long
-        self.send_header("Cache-Control", f"public, max-age={2592000 if final else 3600}")
+        self.send_cache(2592000 if final else 3600, ("terrain",))
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
@@ -927,10 +943,15 @@ class Handler(BaseHTTPRequestHandler):
         q = parse_qs(url.query)
         try:
             if url.path == "/v1/horizon":
+                # a partial answer (a fine-terrain chunk failed; built again after a while): 10 minutes, like
+                # /v1/terrain-version's for the same place
                 if q.get("area", [""])[0] in ("auto", "1", "true"):
                     run, extra, cap = resolve_area(self.area_index(), self.store.cfg, q)
-                    return self.send_gzip_json(self.horizons.get(run, extra, cap), cache_s=7 * 86400)
-                return self.send_gzip_json(self.horizons.get(q), cache_s=30 * 86400)
+                    body, partial = self.horizons.get_ex(run, extra, cap)
+                    return self.send_gzip_json(body, cache_s=600 if partial else 7 * 86400,
+                                               tags=("terrain", "areas"))
+                body, partial = self.horizons.get_ex(q)
+                return self.send_gzip_json(body, cache_s=600 if partial else 30 * 86400, tags=("terrain",))
             if url.path == "/v1/terrain-version":
                 run, cap = q, None
                 if q.get("area", [""])[0] in ("auto", "1", "true"):
@@ -941,26 +962,26 @@ class Handler(BaseHTTPRequestHandler):
                 if extra:
                     body = {**body, **extra}
                 partial = (body["fine"] or "").endswith("-partial")
-                return self.send_json(200, body, cache_s=600 if partial else 86400)
+                return self.send_json(200, body, cache_s=600 if partial else 86400, tags=("terrain", "areas"))
             if url.path.startswith("/v1/terrain-tiles/"):
                 return self.send_terrain_tile(url.path)
             if url.path.startswith("/v1/cesium-terrain/"):
                 return self.send_cesium_terrain(url.path)
             if url.path == "/v1/light-pollution":
                 body, cache_s = light_pollution_query(self.lightpol, self.area_index(), q)
-                return self.send_json(200, body, cache_s=cache_s)
+                return self.send_json(200, body, cache_s=cache_s, tags=("lightpol", "areas"))
             if url.path == "/v1/haze-calibration":
                 lat, lon = float(q["lat"][0]), float(q["lon"][0])
                 if not (-90 <= lat <= 90 and -180 <= lon <= 180):
                     raise ValueError("lat/lon out of range")
                 body = haze_calibration.calibration_at(self.haze_calibration(), lat, lon)
-                return self.send_json(200, body, cache_s=7 * 86400)
+                return self.send_json(200, body, cache_s=7 * 86400, tags=("haze",))
             if url.path == "/v1/area":
                 lat, lon = float(q["lat"][0]), float(q["lon"][0])
                 a = self.area_index().find(lat, lon)
                 if a is None:
                     return self.send_json(404, {"area": None, "error": "no official area contains this point"})
-                return self.send_json(200, {"area": areas.public(a, want_outline(q))}, cache_s=86400)
+                return self.send_json(200, {"area": areas.public(a, want_outline(q))}, cache_s=86400, tags=("areas",))
             self.store.refresh()
             if url.path == "/v1/status":
                 clim = {}
@@ -1005,7 +1026,7 @@ class Handler(BaseHTTPRequestHandler):
             body = path_profiles(self.store, round(lat, 4), round(lon, 4), start, days, ground,
                                  ensemble=want_ens, ens=Handler.ensemble, typical=typical)
             only_clim = body["events"] and all(e["source"] != "forecast" for e in body["events"])
-            return self.send_json(200, body, cache_s=86400 if only_clim else 1800)
+            return self.send_json(200, body, cache_s=86400 if only_clim else 1800, tags=("weather",))
         except HorizonPending as e:
             self.send_response(503)
             body = json.dumps({"error": str(e), "computing": True, "etaS": e.eta_s, "retryAfterS": e.retry_s,
@@ -1048,6 +1069,8 @@ def main(argv=None):
     log.info("%d official areas from %s", len(Handler.areas), Handler.areas.path)
     srv = ThreadingHTTPServer((cfg["api"]["host"], int(cfg["api"]["port"])), Handler)
     log.info("listening on %s:%s", cfg["api"]["host"], cfg["api"]["port"])
+    # once listening (a purged CDN asks again at once): terrain or areas changed since the last run -> purge them
+    cdn.watch(cfg, Handler.horizons, lambda: Handler.areas)
     srv.serve_forever()
 
 

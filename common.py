@@ -153,6 +153,18 @@ DEFAULT_CONFIG = {
         "file": "",               # default: <data_dir>/areas.json (written by build_areas.py)
         "tiger_year": 2024,       # US Census TIGER/Line vintage build_areas.py downloads
     },
+    # Caching in front of the API (cdn.py): a CDN (Cloudflare) keeps each answer for its full lifetime and can be
+    # purged; browsers, which can't, keep it at most browser_max_age_s. stale_if_error_s: how long the CDN may
+    # keep serving an expired answer while the server is down. Purging (on terrain / areas changes, checked at
+    # start and every check_every_s) needs the zone id and a token with Cache Purge (or CLOUDFLARE_API_TOKEN).
+    "cdn": {
+        "browser_max_age_s": 86400,
+        "stale_if_error_s": 86400,
+        "tag_prefix": "zsky",
+        "check_every_s": 600,
+        "cloudflare_zone_id": "",
+        "cloudflare_api_token": "",
+    },
     "api": {
         "host": "127.0.0.1",
         "port": 8787,

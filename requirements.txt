@@ -8,3 +8,4 @@ cdsapi>=0.7   # era5_profiles.py only: past air from the Copernicus CDS (free ke
 h5py>=3.8      # era5_profiles.py --source ncar only (with fsspec, requests, aiohttp)
 fsspec>=2023.1
 xlrd>=2.0      # observations.py only: Keller's .XLS spreadsheet of Druk's observations
+pyproj>=3.4    # tests/test_dem_layers.py only: writes its synthetic source on the Israeli grid

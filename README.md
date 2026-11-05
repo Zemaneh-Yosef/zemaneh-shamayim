@@ -111,7 +111,9 @@ curl http://127.0.0.1:8787/v1/status
 ```
 
 Expose it through your web server for HTTPS (`deploy/nginx-location.conf`; it allows 120 s per request).
-The API sets `Access-Control-Allow-Origin` from `api.allow_origin` in the config (default `*`).
+The API sets `Access-Control-Allow-Origin` from `api.allow_origin` in the config (default `*`). Behind
+Cloudflare, add the Cache Rule in [Cloudflare in front](#cloudflare-in-front): without it nothing but the
+terrain files is cached.
 
 Then, as you need them:
 
@@ -273,6 +275,46 @@ the next fetcher run sees that the stored cycle lacks them and downloads it agai
 serves the old cycle. Fields added to the climatology have their own list of runs: run the backfill again
 to fill them for past runs. Opt-in features (`terrain.fine`, the GEFS ensemble, `follow_terrain`) stay as
 your `config.json` has them.
+
+### Cloudflare in front
+
+Each answer says how long it stays good, twice (`cdn.py`): `CDN-Cache-Control` with its full lifetime (a
+horizon 30 days, a forecast 30 minutes) for Cloudflare, which can be purged, and `Cache-Control` with at
+most `cdn.browser_max_age_s` (a day) for browsers, which can't. Both carry `stale-if-error`
+(`cdn.stale_if_error_s`, a day): while the server is down, Cloudflare keeps serving the last good answer.
+Answers not to keep (`/v1/status`, a horizon still computing) are `no-store`; a horizon built while a
+fine-terrain chunk could not be (it is built again on a later request) is kept 10 minutes.
+
+Cloudflare caches by file extension unless told otherwise, so `/v1/horizon?…` and the rest pass through
+uncached. One Cache Rule (Caching → Cache Rules) fixes that:
+
+* **When**: hostname equals your API's host and URI path starts with the API's path (e.g. `/selfhost/v1/`)
+* **Then**: Eligible for cache; Edge TTL "Use cache-control header if present, bypass cache if not";
+  Browser TTL "Respect origin"; the default cache key (with the query string)
+
+Also turn on Tiered Cache (Caching → Tiered Cache): a miss at one Cloudflare location is then filled from
+another before it reaches the server. Check with `curl -sI '<url>' | grep -i cf-cache-status`: `HIT` on the
+second request, not `DYNAMIC`.
+
+**Purging.** Answers carry a `Cache-Tag` (Cloudflare strips it): `zsky-terrain` (horizons, terrain versions,
+terrain tiles, Cesium terrain), `zsky-areas` (`/v1/area` and `area=auto` answers), `zsky-weather`,
+`zsky-lightpol`, `zsky-haze`, and `zsky` on all of them. The API purges by itself: at start and every
+`cdn.check_every_s` (10 minutes) it compares what the terrain and areas are made from with
+`<data_dir>/cdn-state.json`, and purges `zsky-terrain` when the `terrain.layers` or `terrain.fine` sources, the
+horizon algorithm (an upgrade) or a merged tile's revision (`dem_layers.py build --force`) changed, and
+`zsky-areas` when `areas.json` was rebuilt. A refused purge is tried again at the next check. For that, set
+`cdn.cloudflare_zone_id` (the zone's Overview page) and a token with the Zone → Cache Purge permission, in
+`cdn.cloudflare_api_token` or `Environment=CLOUDFLARE_API_TOKEN=…` in a `systemctl edit zmanim-sky-api`
+override. Without them a change is only logged ("CDN purge needed"); purge in the dashboard then. By hand:
+
+```sh
+sudo -u zmanim-sky venv/bin/python cdn.py purge terrain        # or areas, weather, lightpol, haze; all
+sudo -u zmanim-sky venv/bin/python cdn.py purge --everything   # the whole zone, website included
+sudo -u zmanim-sky venv/bin/python cdn.py status
+```
+
+Browsers keep what they have for up to a day after a purge. The apps' stored horizons don't depend on
+either: they ask `/v1/terrain-version`.
 
 ### Resources
 
@@ -1054,7 +1096,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_climatology.py` | the NOAA climatology build on synthetic NetCDF files laid out like NOAA's (the 1991–2020 means and the rolling window of yearly files, including an unfinished year, a leap year and the stored yearly summaries), your own archive, and date ranges across all three sources |
 | `test_follow_terrain.py` | columns moved onto the real ground (heights, pressures, depressions and offshore depths, the fade) |
 | `test_ensemble.py` | the representative variations (weights, mean, the modes' spread), the `gfs-moments` store, and GEFS members from `fetch_gefs.py` on synthetic files |
-| `test_dem_layers.py` (rasterio) | merged bare-earth tiles (priority per pixel, reprojection from the Israeli grid, open sea, aborting on unreadable sources) and tile revisions on rebuilds |
+| `test_dem_layers.py` (rasterio, pyproj) | merged bare-earth tiles (priority per pixel, reprojection from the Israeli grid, open sea, aborting on unreadable sources) and tile revisions on rebuilds |
 | `test_fine_terrain.py` (rasterio) | near-range fine terrain on a synthetic 1/3″ source (a narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers), per-place versions and cache keys |
 | `test_areas.py` | build_areas.py, the lookup and `area=auto` (with and without `outline=1`) |
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
@@ -1063,6 +1105,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (kept apart until the server has the data), the disk cache, `build` ahead of time (each level within its reach, out to the earth's curve, with parents) |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
 | `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time with an estimate from the work left (the tiles its rays cross), computed once in the background however often it is asked for, then served; the timings learned and kept; a failure reported once, then retried |
+| `test_cdn.py` | the caching headers (browsers a day, the CDN the full lifetime, stale-if-error, tags; a partial horizon 10 minutes), purge requests as Cloudflare's API takes them, and purging only what changed (a tile revision, a new areas.json), a refused purge retried |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights and values IGRA's quality control removed, the three versions, which sounding a date gets) |
 | `test_weather_guard.py` | the guardrails: record extremes kept, impossible values (units mixed up, a land fraction of 7, levels out of order) refused, a refused run leaving the previous one serving, a run that jumps away from the serving one held back and an ordinary update published |
 

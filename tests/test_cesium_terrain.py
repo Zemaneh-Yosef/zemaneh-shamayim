@@ -196,7 +196,8 @@ def run(tmp: Path):
     x, y = int((35.5 + 180) // size), int((31.5 + 90) // size)
     with urllib.request.urlopen(f"{base}/{level}/{x}/{y}.terrain") as resp:
         check(resp.headers["Content-Type"] == "application/vnd.quantized-mesh" and resp.headers["Content-Encoding"] == "gzip"
-              and "max-age=2592000" in resp.headers["Cache-Control"] and resp.read() == body, "a tile, gzipped, kept 30 days")
+              and "max-age=2592000" in resp.headers["CDN-Cache-Control"] and "max-age=86400" in resp.headers["Cache-Control"]
+              and resp.read() == body, "a tile, gzipped, kept 30 days at the CDN and a day in browsers")
     try:
         urllib.request.urlopen(f"{base}/20/0/0.terrain")
         check(False, "should be 404")

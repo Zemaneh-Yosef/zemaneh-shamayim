@@ -29,9 +29,11 @@ COAST = -74.0          # land west of here, water east (so sunrise from NYC look
 
 def run(tmp: Path, json_out: Path | None):
     cfg_path = tmp / "config.json"
+    # ncep_prior off: otherwise each fetch goes on to download NOAA's reanalysis (~6 GB) for the climatology
     cfg = {"data_dir": str(tmp / "data"), "regions": [REGION],
            "forecast_hours": {"hourly_until": 48, "step_after": 3, "max": 48},
-           "request_delay_s": 0, "api": {"host": "127.0.0.1", "port": 0}}
+           "request_delay_s": 0, "api": {"host": "127.0.0.1", "port": 0},
+           "climatology": {"ncep_prior": False}}
     cfg_path.write_text(json.dumps(cfg))
     now = datetime.now(timezone.utc)
     c = now.replace(minute=0, second=0, microsecond=0)
