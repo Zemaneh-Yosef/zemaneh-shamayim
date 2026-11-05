@@ -61,8 +61,11 @@ def area_contains(area: dict, lat: float, lon: float) -> bool:
     return any(polygon_contains(lon, lat, p) for p in area["polygons"])
 
 
-def public(area: dict) -> dict:
-    """The area without its polygons, as the API returns it."""
+def public(area: dict, outline: bool = False) -> dict:
+    """The area as the API returns it: without its polygons, or (outline) with them as stored, so a client can
+    tell which points share this area's answers by the same even-odd test (area_contains)."""
+    if outline:
+        return dict(area)
     return {k: v for k, v in area.items() if k != "polygons"}
 
 

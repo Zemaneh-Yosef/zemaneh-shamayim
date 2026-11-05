@@ -435,6 +435,7 @@ works for any place between 60°S and 60°N, inside your regions or not.
 | parameter | default | meaning |
 |---|---|---|
 | `area` | – | `auto`: search the whole official area the point is in ([Official areas](#official-areas-areaauto)); the response's `area` names it |
+| `outline` | – | `1`: with `area=auto`, the response's `area` also carries its boundary (`polygons`), so a client can tell which later fixes share the answer ([Official areas](#official-areas-areaauto)) |
 | `radius_km` | 0 | 0: the exact coordinates. > 0: search a grid of spots within this radius (capped by `terrain.max_radius_km`, default 3) and return the few that see lowest in some direction |
 | `bbox` | – | `south,west,north,east`: search every spot inside this box instead of a circle (e.g. a neighbourhood). `lat`/`lon` may be left out (box centre). Centre-to-corner distance is capped by `terrain.max_radius_km` (3 km); boxes with more than `terrain.max_candidates` (1200) spots get a coarser grid |
 | `grid_m` | 100 | vantage grid spacing (minimum `terrain.min_grid_m`, 50) |
@@ -628,7 +629,23 @@ curl 'http://127.0.0.1:8787/v1/horizon?lat=40.609283058016736&lon=-73.9682888186
 
 A point in no known area, or in one bigger than `terrain.max_area_radius_km` (30 km from centre to
 corner, separate from the 3 km cap on boxes clients send), gets the request as given (here the 0.8 km
-radius) with `"area": null` and an `areaNote` saying why. Big areas get a coarser grid
+radius) with `"area": null` and an `areaNote` saying why.
+
+The `area` in an answer is `{"id", "name", "level", "bbox", "radiusKm", ...}` without the boundary, and
+neighbouring areas' boxes overlap. A client that stores the answer and wants to reuse it for later fixes
+adds `outline=1` (to `/v1/horizon`, `/v1/terrain-version` or `/v1/area`): `area` then also carries
+`polygons`, exactly as `areas.json` stores them (a list of polygons, each a list of rings, outer ring first
+then holes, each ring a flat `[lon, lat, lon, lat, ...]` list; already simplified to ~25 m by
+`build_areas.py` and sent as is). A point shares the stored answer when an even-odd test over all the rings
+of any polygon (`areas.area_contains`) puts it inside. The horizon is computed and cached the same either
+way, and without `outline=1` every answer is byte for byte what it was. `/v1/terrain-version` adds `area`
+(or `"area": null` and `areaNote`) only with `outline=1`.
+
+```sh
+curl 'http://127.0.0.1:8787/v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto&outline=1'
+# ..., "area": {"id": "nyc-nta:BK1503", "name": "...", "level": 30, "bbox": [s, w, n, e], "radiusKm": ...,
+#               "polygons": [[[lon, lat, lon, lat, ...], [hole ...]], ...]}
+``` Big areas get a coarser grid
 (`terrain.max_candidates` spots in all), so a 25 km city is searched on a ~1 km grid.
 
 The areas come from `areas.json`, built by `build_areas.py` from the Chai Tables place list
@@ -703,7 +720,11 @@ With `area=auto` or `bbox` the top-level values are the area's percentile, and t
 (or `bbox`), `stats` (`pixels`, `min`, `p10`, `median`, `p90`, `max`, `mean`, `percentile`, corrected
 like the value) and `point` (the point's own answer, as above). A point in no known area, an area over the
 cap, or one smaller than a pixel gets the point's value with `area: null` and an `areaNote`. Outside the
-atlas (north of 85.05° N, south of 60.00° S) the answer is 0 with `"coverage": false`.
+atlas (north of 85.05° N, south of 60.00° S) the answer is 0 with `"coverage": false` and `"pixel": null`.
+
+`pixel` is the atlas pixel the point's value was read from (`row`, `col` on the 30″ grid and its centre's
+`lat`, `lon`). The atlas is the same everywhere on a pixel, so a client may reuse a point answer for any fix
+on the same pixel, by comparing `pixel` rather than copying the atlas's grid constants.
 
 ```sh
 venv/bin/python light_pollution.py 31.7767 35.2345
@@ -1035,7 +1056,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_ensemble.py` | the representative variations (weights, mean, the modes' spread), the `gfs-moments` store, and GEFS members from `fetch_gefs.py` on synthetic files |
 | `test_dem_layers.py` (rasterio) | merged bare-earth tiles (priority per pixel, reprojection from the Israeli grid, open sea, aborting on unreadable sources) and tile revisions on rebuilds |
 | `test_fine_terrain.py` (rasterio) | near-range fine terrain on a synthetic 1/3″ source (a narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers), per-place versions and cache keys |
-| `test_areas.py` | build_areas.py, the lookup and `area=auto` |
+| `test_areas.py` | build_areas.py, the lookup and `area=auto` (with and without `outline=1`) |
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |

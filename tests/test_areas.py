@@ -453,6 +453,24 @@ def check_server(tmp: Path, path: Path):
     assert h1["area"]["id"] == h2["area"]["id"] == "nyc-nta:QN0801"
     assert len(calls) == 1, calls
     assert calls[0][2] == [40.7, -73.9, 40.74, -73.8], calls
+    # outline=1: the same area (and the same cached computation) with its polygons as stored, so a client can
+    # test later fixes against the real boundary; without it the answer is as before, polygons and all absent
+    stored = next(x for x in json.loads(path.read_text())["areas"] if x["id"] == "nyc-nta:QN0801")
+    h1o = get("/v1/horizon?lat=40.72&lon=-73.85&area=auto&outline=1")
+    assert len(calls) == 1, calls
+    assert h1o["area"] == stored and h1o["area"]["polygons"] == stored["polygons"], h1o["area"]
+    assert {k: v for k, v in h1o["area"].items() if k != "polygons"} == h1["area"] == areas.public(stored)
+    assert {k: v for k, v in h1o.items() if k != "area"} == {k: v for k, v in h1.items() if k != "area"}
+    assert areas.area_contains(h1o["area"], 40.72, -73.85) and not areas.area_contains(h1o["area"], 40.72, -73.95)
+    raw = lambda u: urllib.request.urlopen(base + u).read()
+    assert raw("/v1/horizon?lat=40.72&lon=-73.85&area=auto") == raw("/v1/horizon?lat=40.73&lon=-73.82&area=auto")
+    assert b"polygons" not in raw("/v1/horizon?lat=40.72&lon=-73.85&area=auto")
+    assert get("/v1/horizon?lat=31.60&lon=35.10&area=auto&outline=1")["area"] is None    # no area: nothing to outline
+    assert get("/v1/area?lat=40.72&lon=-73.85&outline=1")["area"] == stored
+    tv = get("/v1/terrain-version?lat=40.72&lon=-73.85&area=auto")
+    assert "area" not in tv, tv
+    tvo = get("/v1/terrain-version?lat=40.72&lon=-73.85&area=auto&outline=1")
+    assert tvo["area"] == stored and {k: v for k, v in tvo.items() if k != "area"} == tv, tvo
     # sub-quarter 12 (9 km from centre to corner) is over the user-bbox cap (3 km) but within the area cap
     h3 = get("/v1/horizon?lat=31.80&lon=35.15&area=auto")
     assert h3["area"]["id"] == "cbs-subq:3000-12" and calls[-1][2] == [31.775, 35.1, 31.85, 35.25], calls[-1]

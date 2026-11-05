@@ -3,9 +3,9 @@
 
     GET /v1/path-profiles?lat=40.71&lon=-74.01[&from=2026-10-05][&days=8][&ensemble=1][&typical=1]
     GET /v1/horizon?lat=31.7486&lon=35.2374[&radius_km=0.8 | &bbox=S,W,N,E][&grid_m=100][&eye=1.7][&height=..][&min_km=1][&moon=1]
-    GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..]   (the official area containing the point)
+    GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..][&outline=1]   (the official area containing the point; outline=1 adds its polygons)
     GET /v1/terrain-version?<the same query as /v1/horizon>   ({"fine": ..., "layers": ..., "algo": ...}: is a stored horizon current?)
-    GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329
+    GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329[&outline=1]
     GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &bbox=S,W,N,E][&percentile=90][&year=2026]
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
     GET /v1/terrain-tiles/{z}/{x}/{y}.png   (Terrarium-encoded heights for the website's 3D horizon view)
@@ -753,7 +753,8 @@ def areas_path(cfg: dict) -> Path:
 
 
 def resolve_area(index: areas.AreaIndex, cfg: dict, q: dict):
-    """For area=auto: (query to run, extra fields for the response, bbox cap)."""
+    """For area=auto: (query to run, extra fields for the response, bbox cap). With outline=1 the area keeps
+    its polygons; the query run (and so the horizon's cache key) is the same either way."""
     lat, lon = float(q["lat"][0]), float(q["lon"][0])
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("lat/lon out of range")
@@ -768,7 +769,11 @@ def resolve_area(index: areas.AreaIndex, cfg: dict, q: dict):
                                                 f"as given"}, None
     run = {k: v for k, v in q.items() if k in ("grid_m", "eye", "min_km", "moon")}
     run["bbox"] = [",".join(f"{v:.5f}" for v in a["bbox"])]
-    return run, {"area": areas.public(a)}, cap
+    return run, {"area": areas.public(a, want_outline(q))}, cap
+
+
+def want_outline(q: dict) -> bool:
+    return q.get("outline", [""])[0] in ("1", "true")
 
 
 def light_pollution_query(lp: light_pollution.LightPollution, index: areas.AreaIndex, q: dict) -> tuple[dict, int]:
@@ -929,8 +934,12 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/v1/terrain-version":
                 run, cap = q, None
                 if q.get("area", [""])[0] in ("auto", "1", "true"):
-                    run, _, cap = resolve_area(self.area_index(), self.store.cfg, q)
+                    run, extra, cap = resolve_area(self.area_index(), self.store.cfg, q)
+                    if not want_outline(q):
+                        extra = None           # the area only when asked for its outline: same answer as before
                 body = self.horizons.terrain_version(run, cap)
+                if extra:
+                    body = {**body, **extra}
                 partial = (body["fine"] or "").endswith("-partial")
                 return self.send_json(200, body, cache_s=600 if partial else 86400)
             if url.path.startswith("/v1/terrain-tiles/"):
@@ -951,7 +960,7 @@ class Handler(BaseHTTPRequestHandler):
                 a = self.area_index().find(lat, lon)
                 if a is None:
                     return self.send_json(404, {"area": None, "error": "no official area contains this point"})
-                return self.send_json(200, {"area": areas.public(a)}, cache_s=86400)
+                return self.send_json(200, {"area": areas.public(a, want_outline(q))}, cache_s=86400)
             self.store.refresh()
             if url.path == "/v1/status":
                 clim = {}

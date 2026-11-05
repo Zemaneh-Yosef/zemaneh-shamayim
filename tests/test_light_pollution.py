@@ -301,6 +301,14 @@ def check_server(tmp: Path):
     p = get("/v1/light-pollution?lat=31.7767&lon=35.2345")
     rc = lpm.pixel_of(31.7767, 35.2345)
     assert p["pixel"]["row"] == rc[0] and "point" not in p and "stats" not in p, p
+    # the pixel read, as LightPollution.point() gives it: clients reuse the answer anywhere on the same pixel
+    plat, plon = lpm.pixel_centre(*rc)
+    assert p["pixel"] == {"row": rc[0], "col": rc[1], "lat": round(plat, 5), "lon": round(plon, 5)}, p["pixel"]
+    assert abs(p["pixel"]["lat"] - 31.7767) <= lpm.PX / 2 and abs(p["pixel"]["lon"] - 35.2345) <= lpm.PX / 2
+    q = get(f"/v1/light-pollution?lat={plat + lpm.PX * 0.4:.6f}&lon={plon - lpm.PX * 0.4:.6f}")
+    assert q["pixel"] == p["pixel"] and q["blpCdM2"] == p["blpCdM2"], (q, p)
+    o = get("/v1/light-pollution?lat=87&lon=35")                        # outside the atlas: no pixel
+    assert o["coverage"] is False and o["pixel"] is None and o["blpCdM2"] == 0, o
     assert decode(p["atlasMcdM2"]) == (rc[0] - 4096, rc[1] - 24576)
     # Blp = the sky's average = 2.25 x the zenith (not pi); the atlas carried to this year by the trend
     assert math.isclose(p["blpCdM2"], 2.25 * p["artificialCdM2"]) and p["skyAverageFactor"] == 2.25
