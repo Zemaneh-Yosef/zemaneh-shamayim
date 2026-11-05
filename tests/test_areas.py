@@ -419,7 +419,8 @@ def check_lookup(path: Path):
 def check_server(tmp: Path, path: Path):
     cfg_path = tmp / "srv.json"
     cfg_path.write_text(json.dumps({"data_dir": str(tmp / "data"), "areas": {"file": str(path)},
-                                    "terrain": {"tiles_dir": str(tmp / "tiles"), "max_area_radius_km": 30}}))
+                                    "terrain": {"tiles_dir": str(tmp / "tiles"), "max_area_radius_km": 30,
+                                                "worker_processes": False}}))
     cfg = load_config(str(cfg_path))
     calls = []
 

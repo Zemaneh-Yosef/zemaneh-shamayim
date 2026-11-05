@@ -85,7 +85,9 @@ DEFAULT_CONFIG = {
         "max_candidates": 1200,   # larger areas get a coarser grid (~25 ms per candidate spot)
         "moon_percentile": 90.0,  # &moon=1 in an area: spots at this percentile of horizon height (high
                                   # horizon = late moonrise / early moonset; 100 = the single worst spot)
-        "max_parallel": 2,        # horizon computations at once (each takes ~1-10 s of CPU)
+        "max_parallel": 2,        # horizon computations at once (each takes ~1-10 s of CPU): the number of
+                                  # worker processes that compute them (each keeps its own tiles in memory)
+        "worker_processes": True, # False: compute in the API process's threads (tests); they then share its GIL
         "answer_within_s": 45.0,  # a horizon not ready by then (a place's first: tiles to build) is answered
                                   # 503 {"computing": true, "retryAfterS"} and carries on in the background
         # Bare-earth elevation merged from several sources (dem_layers.py). Off while "sources" is empty:
@@ -177,6 +179,7 @@ DEFAULT_CONFIG = {
         "follow_terrain": {"enabled": False, "max_km": 150.0, "full_m": 500.0, "fade_m": 2000.0,
                            "ground_radius_m": 1000.0},
         "max_days": 400,          # longest date range one request may ask for
+        "max_threads": 64,        # requests handled at once; more wait for a free thread
         "allow_origin": "*",
     },
 }
