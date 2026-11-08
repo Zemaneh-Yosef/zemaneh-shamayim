@@ -94,9 +94,24 @@
         },
         {
           "name": "fabdem-v1-2",
+          "if_unavailable": "skip",
           "paths": [
-            "/var/lib/zmanim-sky/fabdem/{name}_FABDEM_V1-2.tif"
+            "/vsizip//vsicurl/https://data.bris.ac.uk/datasets/s5hqmjcdj8yo2ibzi9b4ew3sn/{name10}-{name10_end}_FABDEM_V1-2.zip/{name}_FABDEM_V1-2.tif"
           ]
+        },
+        {
+          "name": "alos-aw3d30-outside-forest",
+          "if_unavailable": "skip",
+          "min_valid": -1000,
+          "paths": [
+            "/vsicurl/https://opentopography.s3.sdsc.edu/raster/AW3D30/AW3D30_global/ALPSMLC30_{NS_sw}{lat_sw:03d}{EW}{lon_left:03d}_DSM.tif"
+          ],
+          "mask": {
+            "paths": [
+              "/vsicurl/https://esa-worldcover.s3.eu-central-1.amazonaws.com/v200/2021/map/ESA_WorldCover_10m_2021_v200_{name3}_Map.tif"
+            ],
+            "exclude": [10]
+          }
         }
       ]
     },

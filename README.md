@@ -19,7 +19,7 @@ inputs that the ROYZmanim app (royzmanimwebsite) uses to correct for that:
 | `/v1/cesium-terrain/layer.json`, `/{z}/{x}/{y}.terrain` | the same terrain in Cesium's format (quantized-mesh, with surface normals), for the website's 3D horizon view |
 | `/v1/status` | the live forecast cycle and how much climatology each region holds |
 
-No API keys are needed: every source is free public data (NOAA, USGS, NRCan, IGN, FABDEM, OpenStreetMap,
+No API keys are needed: every source is free public data (NOAA, USGS, NRCan, IGN, FABDEM, JAXA, ESA, OpenStreetMap,
 the US Census, the World Atlas, AERONET). It's Python with a small set of dependencies and runs on a modest
 VPS behind nginx.
 
@@ -180,12 +180,16 @@ finer data near the observer, see [Elevation data](#elevation-data) for what eac
 sudo -u zmanim-sky venv/bin/pip install rasterio      # GDAL included; needed to BUILD merged tiles and for /v1/light-pollution
 ```
 
-**FABDEM** (bare earth worldwide, 1″): download the 10×10° zips you need from
-https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn (Israel / Jordan: N30E030-N40E040; France:
-N40W010-N50E000, N40E000-N50E010, N50E000-N60E010; the UK: N50W010-N60E000; the US and Canada are covered by
-3DEP and MRDEM) and unzip the 1×1° `.tif` files into `<data_dir>/fabdem/`. The config expects
-`<name>_FABDEM_V1-2.tif` with the south-west-corner name (e.g. `N31E035_FABDEM_V1-2.tif`); adjust the
-template if your files differ. Straight on the server:
+**FABDEM** (bare earth worldwide, 1″) needs no download: the example config reads each 1×1° tile straight
+out of Bristol's 10×10° zips over HTTP (`/vsizip//vsicurl/…`, only that tile's ~26 MB, when its merged tile is
+built), so nothing but the merged tiles you use is kept. Where FABDEM has no data (north of 80°N) or Bristol's
+server can't be reached, the tile is built from ALOS AW3D30 outside forest (ESA WorldCover trees) and the default
+tiles (SRTM) in forest instead; a tile built during an outage is marked provisional and rebuilt on first use an
+hour later, until FABDEM answers ([Bare-earth layers](#bare-earth-layers-terrainlayers-dem_layerspy)).
+
+To read FABDEM from local files instead (no dependency on Bristol's server), download the zips
+from https://data.bris.ac.uk/data/dataset/s5hqmjcdj8yo2ibzi9b4ew3sn and unzip the `.tif` files into a folder,
+then set the source's path to e.g. `/var/lib/zmanim-sky/fabdem/{name}_FABDEM_V1-2.tif`:
 
 ```sh
 mkdir -p ~/fabdem-dl && cd ~/fabdem-dl
@@ -346,6 +350,9 @@ Default config (continental US + Israel, 2 cycles kept):
   again within the hour.
 * **`dem_layers.py info` shows `skadi (fallback)` where you have FABDEM files**: the tile was built before
   the files arrived; rebuild it (`build --force --existing`, above) and restart the API.
+* **"leaving out fabdem-v1-2 for now"** and `"provisional_without"` in `dem_layers.py info`: Bristol's server
+  (or OpenTopography's, for ALOS) didn't answer while the tile was built. The tile uses the next sources
+  meanwhile and is rebuilt on its first use after an hour (`build --bbox … --force` retries now).
 * **GDAL's "HTTP response code: 404" while building terrain**: a per-tile source (USGS) has no file for that
   place; expected outside its country.
 * **A first horizon request times out**: its fine chunks or merged tiles were being built; the server
@@ -605,8 +612,18 @@ in this list that has data there:
 | 1 | USGS 3DEP 1 arc-second | US | bare earth, NAVD88; read per 1x1 degree file straight from USGS's bucket |
 | 2 | NRCan MRDEM-30 DTM | Canada | bare earth, 30 m, CGVD2013; read from NRCan's VRT (Open Government Licence - Canada) |
 | 3 | an Israeli DTM | Israel | a file you supply (any projection, e.g. EPSG:2039); `enabled: false` until then. The Survey of Israel and the Geological Survey of Israel (25 m DTM) have one, but neither is openly published: it has to be licensed or requested |
-| 4 | FABDEM V1-2 | world (the 10° zips you download) | Copernicus 30 m with forests and buildings removed; CC BY-NC-SA 4.0, non-commercial only |
-| 5 | the default tiles | world | the fallback for any pixel none of the above covers, mainly open sea |
+| 4 | FABDEM V1-2 | world, 60°S–80°N | Copernicus 30 m with forests and buildings removed; each 1×1° tile read from inside Bristol's 10×10° zip over HTTP when its merged tile is built (nothing stored); CC BY-NC-SA 4.0, non-commercial only |
+| 5 | ALOS AW3D30, outside forest | world, 82°S–82°N | JAXA's surface model (2006–11), from OpenTopography's bucket; pixels ESA WorldCover 2021 calls trees are left to the next source. Only where FABDEM has nothing (north of 80°N) or can't be reached |
+| 6 | the default tiles | world | SRTM (2000) outside the US: in forest where 4 has nothing; and open sea |
+
+Why 5 and 6 in that order: against lidar (USGS 3DEP 1″ on nine 1×1° tiles from Phoenix and Los Angeles to
+New York and the Smokies), FABDEM was the closest on every tile and land-cover class (median error −1.3 to
++1.0 m, RMSE 2.9–6.8 m). The two surface models read high: ALOS beat SRTM in open, dry and Mediterranean
+terrain (RMSE 3.8–4.3 m against 4.9–5.7 m in Phoenix and Los Angeles) but was worse in forest (Smokies: 16.5 m
+against 14.0 m, 10–12 m high under trees), so each is used where it does better; together they were within
+about 1′ of the better of the two on horizons at every site. On Rabbi Druk's sunrises at Armon HaNatziv the
+far horizon (Moab, 45–60 km) is the same in all three within 0.3′; a hillside 0.5 km away is where they
+differ (summer sunrises over it: SRTM 68 s rms, ALOS 46 s, FABDEM 14 s).
 
 The line of sight crosses borders (Jerusalem's sunrise is over Jordan), so each source only fills the
 pixels it covers and the next one fills the rest. Differences between vertical datums (NAVD88,
@@ -616,7 +633,22 @@ With `auto_build: true` (and rasterio installed) missing tiles are built during 
 needs them. Without rasterio, only prebuilt tiles are used and everything else falls back to the default
 tiles. Safety: a source that doesn't cover a tile (no file there) is skipped quietly, but any other failure
 (network, corrupt file, a configured file missing) aborts that tile's build - nothing is saved, the
-default tiles are used, and it is retried next time. A tile is never kept half-built from a worse source.
+default tiles are used, and it is retried next time. A remote file counts as missing only when its server
+says so (404, or S3's 403 `<Error>`; for a file inside a remote zip, when the zip's table of contents has no
+such file): no answer, a 5xx or a refusing proxy is a failure.
+
+A source with `"if_unavailable": "skip"` (FABDEM and ALOS in the example) is the exception: when it can't be
+read, the tile is built from the sources after it and kept, marked provisional (`<tile>.provisional`,
+`"provisional_without"` in `dem_layers.py info`), as that is still better than the default tiles alone. On its
+first use an hour later it is rebuilt; if the source answers, the provisional mark goes, and the tile's
+revision rises if its heights changed. A source's `"mask"` (`paths` to a land-cover raster, read by
+majority onto the grid, and the classes to `exclude`) gives up those pixels to the next source; it is part
+of the signature.
+
+Template fields for per-tile paths: `{name}` (N31E035), `{ns}{lat_top:02d}{ew}{lon_left:03d}` (USGS's
+north-west-corner naming, n32e035), `{NS_sw}{lat_sw:03d}{EW}{lon_left:03d}` (ALOS: N031E035), `{name3}`
+(the 3×3° block, WorldCover: N30E033) and `{name10}-{name10_end}` (the 10×10° block, FABDEM's zips:
+N30E030-N40E040).
 
 Merged tiles go to `<data_dir>/dem-layers/<signature>/` (float32, ~52 MB per land tile, memory-mapped;
 sea-only tiles are a marker file). The signature is a hash of the enabled sources: changing the source
@@ -1117,6 +1149,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_follow_terrain.py` | columns moved onto the real ground (heights, pressures, depressions and offshore depths, the fade) |
 | `test_ensemble.py` | the representative variations (weights, mean, the modes' spread), the `gfs-moments` store, and GEFS members from `fetch_gefs.py` on synthetic files |
 | `test_dem_layers.py` (rasterio, pyproj) | merged bare-earth tiles (priority per pixel, reprojection from the Israeli grid, open sea, aborting on unreadable sources) and tile revisions on rebuilds |
+| `test_dem_fallback.py` (rasterio) | FABDEM read from a remote zip (a local HTTP server stands in for Bristol's), a missing file told apart from an outage, provisional tiles kept and retried after the hour, ALOS masked by land cover (forest falls through to the plain tiles) |
 | `test_fine_terrain.py` (rasterio) | near-range fine terrain on a synthetic 1/3″ source (a narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers), per-place versions and cache keys |
 | `test_areas.py` | build_areas.py, the lookup and `area=auto` (with and without `outline=1`) |
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
@@ -1149,7 +1182,9 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 GFS and GEFS: NOAA/NCEP. Elevation: NASA SRTM and USGS 3DEP (via the AWS Terrain Tiles open dataset); with
 `terrain.layers`: USGS 3DEP, Natural Resources Canada MRDEM (Open Government Licence - Canada), and
 FABDEM V1-2 (Hawker et al. 2022, University of Bristol; CC BY-NC-SA 4.0, contains modified Copernicus
-Service information). With `terrain.fine`: Natural Resources Canada HRDEM (Open Government Licence -
+Service information), ALOS World 3D-30m (AW3D30, © JAXA; via OpenTopography) and ESA WorldCover 2021 (© ESA
+WorldCover project 2021 / Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover
+consortium; CC BY 4.0). With `terrain.fine`: Natural Resources Canada HRDEM (Open Government Licence -
 Canada), USGS 3DEP 1/3″, and IGN RGE ALTI (Licence Ouverte Etalab 2.0; "IGN - RGE ALTI"). Reanalysis
 climatology: NCEP/NCAR Reanalysis 1, data provided by the NOAA PSL, Boulder, Colorado, USA, from their
 website at https://psl.noaa.gov. Light pollution: Falchi, F. et al. (2016), Supplement to: The New World
