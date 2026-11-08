@@ -649,7 +649,7 @@ class Horizons:
         tiles = 0
         for i, j in crossed:
             name = terrain.tile_name(i, j)
-            if builds and any((self.layers_out / f"{name}{x}").exists() for x in (".npy", ".sea")):
+            if builds and any((self.layers_out / f"{name}{x}").exists() for x in (".npy", ".sea", ".plain")):
                 continue
             if not builds and any((self.tiles_folder / f"{name}{x}").exists() for x in (".hgt", ".hgt.gz", ".sea")):
                 continue

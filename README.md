@@ -209,6 +209,7 @@ sudo -u zmanim-sky venv/bin/python dem_layers.py build --around 40.6092830580167
 sudo -u zmanim-sky venv/bin/python dem_layers.py build --around 34.09 -118.40 --horizon --radius-km 20   # Los Angeles: those its rays cross
 sudo -u zmanim-sky venv/bin/python dem_layers.py build --around 31.7683 35.2137    # Jerusalem
 sudo -u zmanim-sky venv/bin/python dem_layers.py info N40W074                      # which source filled what
+sudo -u zmanim-sky venv/bin/python dem_layers.py slim      # tiles built before .plain markers: copies of the plain tile -> markers
 ```
 
 Adding a source's files later (FABDEM for a new country, where the tiles were built from the default tiles
@@ -650,8 +651,11 @@ north-west-corner naming, n32e035), `{NS_sw}{lat_sw:03d}{EW}{lon_left:03d}` (ALO
 (the 3×3° block, WorldCover: N30E033) and `{name10}-{name10_end}` (the 10×10° block, FABDEM's zips:
 N30E030-N40E040).
 
-Merged tiles go to `<data_dir>/dem-layers/<signature>/` (float32, ~52 MB per land tile, memory-mapped;
-sea-only tiles are a marker file). The signature is a hash of the enabled sources: changing the source
+Merged tiles go to `<data_dir>/dem-layers/<signature>/` (float32, ~52 MB per land tile, memory-mapped).
+A tile no source has data for is only a marker: `.sea` where there is no plain tile either, `.plain` where the
+plain tile is all there is (open sea, where it holds depths: the line of sight meets the water at 0 m
+whatever the source, so the plain tile is read instead of a 52 MB copy of it). `dem_layers.py slim` swaps
+such copies built before this for markers. The signature is a hash of the enabled sources: changing the source
 list starts a new tile set and recomputes horizons. A rebuild (`build --force`) that changes a tile's
 heights raises its revision (`<tile>.rev`); both are part of the terrain version of every horizon within
 `max_km` of the tile ([Terrain versions](#terrain-versions-v1terrain-version)).
@@ -1149,7 +1153,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_follow_terrain.py` | columns moved onto the real ground (heights, pressures, depressions and offshore depths, the fade) |
 | `test_ensemble.py` | the representative variations (weights, mean, the modes' spread), the `gfs-moments` store, and GEFS members from `fetch_gefs.py` on synthetic files |
 | `test_dem_layers.py` (rasterio, pyproj) | merged bare-earth tiles (priority per pixel, reprojection from the Israeli grid, open sea, aborting on unreadable sources) and tile revisions on rebuilds |
-| `test_dem_fallback.py` (rasterio) | FABDEM read from a remote zip (a local HTTP server stands in for Bristol's), a missing file told apart from an outage, provisional tiles kept and retried after the hour, ALOS masked by land cover (forest falls through to the plain tiles) |
+| `test_dem_fallback.py` (rasterio) | FABDEM read from a remote zip (a local HTTP server stands in for Bristol's), a missing file told apart from an outage, provisional tiles kept and retried after the hour (also when read through terrain.Tiles, as the server does), ALOS masked by land cover (forest falls through to the plain tiles), `.plain` markers where no source has data, and `slim` |
 | `test_fine_terrain.py` (rasterio) | near-range fine terrain on a synthetic 1/3″ source (a narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers), per-place versions and cache keys |
 | `test_areas.py` | build_areas.py, the lookup and `area=auto` (with and without `outline=1`) |
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |

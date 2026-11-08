@@ -217,13 +217,36 @@ def main():
               "retried after the hour while still down: kept, retried again an hour later")
         check(dem_layers.tile_rev(out, 31, 36) == 0, "  ... heights unchanged, revision 0")
 
-        # 6. server back: rebuilt with FABDEM, no longer provisional, revision raised
+        # 6. server back: rebuilt with FABDEM on first use - through terrain.Tiles, as the server reads tiles -
+        # no longer provisional, revision raised
         srv.mode = "up"
         os.utime(prov, (old, old))
+        tl = terrain.Tiles(tiles_dir, None, layered_dir=out, builder=builder)
+        check(abs(tl.height(31.5, 36.3) - fabdem_h(31.5, 36.3)) < 0.05, "Tiles retried the provisional tile")
         h = heights(31, 36, [(31.5, 36.3)])
         check(abs(h[0] - fabdem_h(31.5, 36.3)) < 0.05, f"server back: rebuilt with FABDEM ({h[0]:.2f} m)")
         check(not prov.exists() and "provisional_without" not in info(31, 36), "  ... no longer provisional")
         check(dem_layers.tile_rev(out, 31, 36) == 1, "  ... revision 1 (horizons reaching it are recomputed)")
+
+        # 6b. a tile no source has data for, where the plain tile has sea depths: a marker, not a 52 MB copy
+        depths = np.full((3601, 3601), -1500, dtype=">i2")
+        (tiles_dir / "N33E035.hgt.gz").write_bytes(gzip.compress(depths.tobytes()))
+        check(builder.build(33, 35) is None and builder.path(33, 35).with_suffix(".plain").exists()
+              and not builder.path(33, 35).exists(), "no source has data: .plain marker, nothing stored")
+        tl = terrain.Tiles(tiles_dir, None, layered_dir=out, builder=builder)
+        check(tl.height(33.5, 35.5) == -1500 and tl.layered_used == 0, "  ... the plain tile is read there")
+        check(builder.build(33, 35, force=True) is None and dem_layers.tile_rev(out, 33, 35) == 0,
+              "  ... rebuilt the same: revision 0")
+        # and tiles built that way before (a 52 MB copy): `slim` swaps them for markers, same heights
+        copy = np.full((3601, 3601), -1500, dtype=np.float32)
+        np.save(builder.path(33, 35), copy)
+        builder.path(33, 35).with_suffix(".plain").unlink()
+        builder.path(33, 35).with_suffix(".json").write_text(json.dumps({"fraction_by_source": {"skadi (fallback)": 1.0}}))
+        n, freed = dem_layers.slim(out)
+        check(n == 1 and freed > 50e6 and builder.path(33, 35).with_suffix(".plain").exists()
+              and not builder.path(33, 35).exists(), f"slim: {n} copy replaced, {freed / 1e6:.0f} MB freed")
+        check(not builder.path(31, 35).with_suffix(".plain").exists() and builder.path(31, 35).exists(),
+              "  ... tiles with source data kept")
 
         # 7. telling missing from unreachable
         cm = dem_layers._confirm_missing
