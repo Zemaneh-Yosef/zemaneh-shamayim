@@ -149,9 +149,15 @@ class Tiles:
         if self.layered_dir is None:
             return None
         f = self.layered_dir / f"{tile_name(lat_i, lon_i)}.npy"
+        built = f.exists() or f.with_suffix(".sea").exists() or f.with_suffix(".plain").exists()
+        if built and self.builder is not None and f.with_suffix(".provisional").exists():
+            try:                                           # built without an unreachable source: the builder
+                return self.builder.build(lat_i, lon_i)    # retries it once its hour is up
+            except Exception as e:
+                log.warning("could not rebuild provisional tile %s (%s)", tile_name(lat_i, lon_i), e)
         if f.exists():
             return np.load(f, mmap_mode="r")
-        if f.with_suffix(".sea").exists():                 # built, and nothing but sea
+        if built:                                          # all sea, or no source has data: the skadi tile
             return None
         if self.builder is not None:
             try:

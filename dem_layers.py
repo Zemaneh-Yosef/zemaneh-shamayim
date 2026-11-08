@@ -349,8 +349,11 @@ class Builder:
         sea = f.with_suffix(".sea")
         prov = f.with_suffix(".provisional")
 
-        def stored():
-            return None if sea.exists() else np.load(f, mmap_mode="r")
+        def built() -> bool:
+            return f.exists() or sea.exists() or f.with_suffix(".plain").exists()
+
+        def stored():                                      # None: use the plain (skadi) tile, or open sea
+            return np.load(f, mmap_mode="r") if f.exists() else None
 
         def due() -> bool:                                 # a provisional tile whose hour is up
             try:
@@ -358,11 +361,11 @@ class Builder:
             except OSError:
                 return False
 
-        if not force and (sea.exists() or f.exists()) and not due():
+        if not force and built() and not due():
             return stored()
         # one build of a tile at a time, in this process (lock) and across the horizon worker processes
         with self.lock, terrain.file_lock(self.out / ".locks" / terrain.tile_name(lat_i, lon_i)):
-            retry = not force and (sea.exists() or f.exists())
+            retry = not force and built()
             if retry and not due():                        # another process just retried it
                 return stored()
             if retry:
@@ -379,7 +382,9 @@ class Builder:
         name = terrain.tile_name(lat_i, lon_i)
         # a rebuild that changes the heights raises the tile's revision (tile_rev), which is part of the
         # terrain version of every horizon reaching it (serve.Horizons.layers_version)
-        old = np.array(np.load(f, mmap_mode="r")) if f.exists() else ("sea" if sea.exists() else None)
+        plain = f.with_suffix(".plain")
+        old = (np.array(np.load(f, mmap_mode="r")) if f.exists() else "sea" if sea.exists()
+               else "plain" if plain.exists() else None)
         t0 = time.time()
         # sample centres on the 1" grid lines, edges included (like .hgt)
         transform = Affine(STEP, 0, lon_i - STEP / 2, 0, -STEP, lat_i + 1 + STEP / 2)
@@ -387,6 +392,7 @@ class Builder:
         dst, stats = self.merge(transform, N, (lon_i - STEP, lat_i - STEP, lon_i + 1 + STEP, lat_i + 1 + STEP),
                                 name, [(lat_i, lon_i)], skipped=skipped)
         rest = np.isnan(dst)
+        base = None
         if rest.any():
             base = self.base.tile(lat_i, lon_i) if self.base is not None else None
             if base is not None and base.shape == dst.shape:
@@ -403,14 +409,24 @@ class Builder:
             prov.unlink(missing_ok=True)
         if stats.get("sea (no data)") == 1.0:              # all sea: a marker, not 52 MB of zeros
             sea.write_text("")
-            f.unlink(missing_ok=True)
-            self._bump_rev(lat_i, lon_i, old is not None and not (isinstance(old, str)))
+            for x in (f, plain, f.with_suffix(".json")):
+                x.unlink(missing_ok=True)
+            self._bump_rev(lat_i, lon_i, old is not None and old != "sea")
             log.info("%s is open sea", name)
+            return None
+        if set(stats) == {"skadi (fallback)"}:            # no source has data here (e.g. open sea where the
+            plain.write_text("")                           # plain tile has depths): a marker, not a 52 MB copy
+            for x in (f, sea, f.with_suffix(".json")):     # of the plain tile, which is then read instead
+                x.unlink(missing_ok=True)
+            self._bump_rev(lat_i, lon_i, old is not None and old != "plain"
+                           and (isinstance(old, str) or not np.array_equal(old, dst)))
+            log.info("%s: no source has data, the plain tile is used", name)
             return None
         tmpf = f.with_name(f"{f.stem}.{os.getpid()}.tmp.npy")
         np.save(tmpf, dst)
         os.replace(tmpf, f)
         sea.unlink(missing_ok=True)
+        plain.unlink(missing_ok=True)
         self._bump_rev(lat_i, lon_i, old is not None and (isinstance(old, str) or not np.array_equal(old, dst)))
         info = {"tile": name, "built": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
                 "seconds": round(time.time() - t0, 1), "fraction_by_source": {k: round(v, 4) for k, v in stats.items()}}
@@ -421,6 +437,27 @@ class Builder:
                  f" (provisional, without {', '.join(skipped)})" if skipped else "")
         terrain.report_timing("tile", time.time() - t0)
         return np.load(f, mmap_mode="r")
+
+
+def slim(out: Path) -> tuple[int, int]:
+    """Replace built tiles that no source contributed to (all "skadi (fallback)", e.g. open sea where the plain
+    tile has depths) by .plain markers, as builds now do: the same heights, read from the plain tile. Their
+    revision is unchanged. Returns (tiles replaced, bytes freed)."""
+    n = freed = 0
+    for j in sorted(Path(out).glob("*.json")):
+        f = j.with_suffix(".npy")
+        try:
+            frac = json.loads(j.read_text()).get("fraction_by_source", {})
+        except (OSError, ValueError):
+            continue
+        if set(frac) != {"skadi (fallback)"} or not f.exists() or j.with_suffix(".provisional").exists():
+            continue
+        freed += f.stat().st_size
+        j.with_suffix(".plain").write_text("")
+        f.unlink()
+        j.unlink()
+        n += 1
+    return n, freed
 
 
 def tile_rev(out: Path, lat_i: int, lon_i: int) -> int:
@@ -783,6 +820,8 @@ def main():
                     "(before copying them into config.json)")
     i = sub.add_parser("info", help="show which sources a built tile came from")
     i.add_argument("tile", help="e.g. N40W074")
+    sub.add_parser("slim", help="replace built tiles no source contributed to (copies of the plain tile, e.g. "
+                   "open sea) by markers, freeing ~52 MB each")
     a = ap.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     if a.cmd != "test-fine":   # GDAL's own notes, e.g. a per-tile source's (USGS 3DEP) 404 outside its coverage
@@ -809,13 +848,28 @@ def main():
         raise SystemExit("terrain.layers.sources has no enabled source in the config: nothing to build")
     if a.cmd == "info":
         f = out / f"{a.tile}.json"
-        print(f.read_text() if f.exists() else f"{a.tile} is not built yet (in {out})")
+        if f.exists():
+            print(f.read_text())
+        elif (out / f"{a.tile}.sea").exists():
+            print(f"{a.tile}: open sea (no source and no plain tile has data)")
+        elif (out / f"{a.tile}.plain").exists():
+            print(f"{a.tile}: no source has data; the plain tile is used")
+        else:
+            print(f"{a.tile} is not built yet (in {out})")
+        p = out / f"{a.tile}.provisional"
+        if p.exists():
+            print(f"provisional (built without {', '.join(json.loads(p.read_text() or '{}').get('skipped', []))}); "
+                  f"rebuilt on its first use after {RETRY_S // 60} min")
+        return
+    if a.cmd == "slim":
+        n, freed = slim(out)
+        print(f"{n} tiles that were only a copy of the plain tile replaced by markers: {freed / 1e9:.2f} GB freed")
         return
     base = terrain.Tiles(Path(t["tiles_dir"] or Path(cfg["data_dir"]) / "tiles"), t["tiles_url"] or None)
     builder = make_builder(cfg, base)
     todo = build_list(a, t)
     if a.existing:
-        todo = [k for k in todo if builder.path(*k).exists() or builder.path(*k).with_suffix(".sea").exists()]
+        todo = [k for k in todo if any(builder.path(*k).with_suffix(x).exists() for x in (".npy", ".sea", ".plain"))]
     log.info("%d tiles -> %s", len(todo), out)
     for lat_i, lon_i in todo:
         builder.build(lat_i, lon_i, force=a.force)
