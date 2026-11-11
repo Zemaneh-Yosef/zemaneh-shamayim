@@ -472,6 +472,9 @@ def check_server(tmp: Path, path: Path):
     assert "area" not in tv, tv
     tvo = get("/v1/terrain-version?lat=40.72&lon=-73.85&area=auto&outline=1")
     assert tvo["area"] == stored and {k: v for k, v in tvo.items() if k != "area"} == tv, tvo
+    # without area=auto: the plain answer (this once failed with a 500 for every place)
+    tvp = get("/v1/terrain-version?lat=40.72&lon=-73.85")
+    assert set(tvp) == {"fine", "layers", "algo"}, tvp
     # sub-quarter 12 (9 km from centre to corner) is over the user-bbox cap (3 km) but within the area cap
     h3 = get("/v1/horizon?lat=31.80&lon=35.15&area=auto")
     assert h3["area"]["id"] == "cbs-subq:3000-12" and calls[-1][2] == [31.775, 35.1, 31.85, 35.25], calls[-1]

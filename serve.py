@@ -1095,7 +1095,7 @@ class Handler(BaseHTTPRequestHandler):
                 body, partial = self.horizons.get_ex(q)
                 return self.send_gzip_json(body, cache_s=600 if partial else 30 * 86400, tags=("terrain",))
             if url.path == "/v1/terrain-version":
-                run, cap = q, None
+                run, extra, cap = q, None, None
                 if q.get("area", [""])[0] in ("auto", "1", "true"):
                     run, extra, cap = resolve_area(self.area_index(), self.store.cfg, q)
                     if not want_outline(q):
