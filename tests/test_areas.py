@@ -372,6 +372,9 @@ def check_build(tmp: Path, la: Path | None) -> Path:
                         "us-sd:40": "Torrey Pines, San Diego", "us-aus:1": "Hancock, Austin",
                         "us-sea:5": "Seward Park, Seattle", "us-bal:60": "Cheswolde, Baltimore"}, us_names
 
+    check_streaming(cache)
+    check_resume(tmp, base, ids)
+
     # --only rebuilds some countries and keeps the rest; --replace writes only those countries
     assert build_areas.main(base + ["--only", "CAN"]) == 0
     assert set(rows(out)) == ids, "--only CAN must not drop the other countries"
@@ -391,6 +394,88 @@ def check_build(tmp: Path, la: Path | None) -> Path:
     except SystemExit as e:
         assert "ISO 3166" in str(e), e
     return out
+
+
+def check_streaming(cache: Path):
+    """The big sources are generators that keep nothing: a country's boundaries are never all in memory."""
+    import inspect
+    src = build_areas.Sources(build_areas.Fetcher(cache, ""), {})
+    for spec in ({"type": "tiger", "layer": "place"}, {"type": "tiger", "layer": "cousub"}, {"type": "statcan-csd"},
+                 {"type": "geoboundaries", "iso": "KOR", "adm": 3, "kind": "x"}):
+        g = src.stream(spec)
+        assert inspect.isgenerator(g), spec
+        assert next(g).id and not [k for k in src.cache if k != "us-states"], (spec, list(src.cache))
+        g.close()
+    assert src.us_states() == {"36": "New York"}, "the states' names only, not their boundaries"
+    assert len(src.units({"type": "tiger", "layer": "place"})) == 3          # still whole when asked for
+    print("streaming ok")
+
+
+class Killed(BaseException):
+    """What the kernel's out-of-memory kill is to a build: nothing after it runs (not an Exception)."""
+
+
+def check_resume(tmp: Path, base: list, ids: set):
+    """A build killed part-way goes on from the next country when started again; --restart starts over."""
+    out = tmp / "data" / "resume.sqlite"
+    args = base + ["--out", str(out)]
+    streamed = []
+    real = build_areas.Sources.stream
+
+    def stream(self, spec, kill_at=[None]):
+        country = {"nyc-nta": "USA", "statcan-csd": "CAN", "cbs-subquarters": "ISR"}.get(spec["type"]) \
+            or spec.get("iso")
+        if country:
+            streamed.append(country)
+        if country and country == kill_at[0]:
+            raise Killed()
+        return real(self, spec)
+
+    build_areas.Sources.stream = stream
+    try:
+        stream.__defaults__[0][0] = "FRA"
+        try:
+            build_areas.main(args)
+            raise AssertionError("the build should have been killed")
+        except Killed:
+            pass
+        assert streamed == ["USA", "CAN", "ISR", "FRA"], streamed
+        assert not out.exists() and (tmp / "data" / "resume.sqlite.tmp").exists()
+        con = sqlite3.connect(tmp / "data" / "resume.sqlite.tmp")
+        done = json.loads(con.execute("SELECT value FROM meta WHERE key = 'progress'").fetchone()[0])["done"]
+        con.close()
+        assert done == ["USA", "CAN", "ISR"], done
+        stream.__defaults__[0][0] = None
+        streamed.clear()
+        assert build_areas.main(args) == 0
+        assert list(dict.fromkeys(streamed)) == ["FRA", "KOR"], f"went on from FRA: {streamed}"
+        assert set(rows(out)) == ids, "the resumed build has every area"
+        assert not (tmp / "data" / "resume.sqlite.tmp").exists()
+        report = (tmp / "data" / "areas_report.txt").read_text(encoding="utf-8")
+        assert report.index("USA: ") < report.index("ISR: ") < report.index("KOR: "), "the whole run's report"
+        meta = areas.AreaIndex(out)
+        meta.refresh()
+        assert "progress" not in meta.meta and set(meta.meta["countries"]) == {"USA", "CAN", "ISR", "FRA", "KOR"}
+        # a leftover from another run (here: other countries) is not resumed; --restart never resumes
+        stream.__defaults__[0][0] = "ISR"
+        try:
+            build_areas.main(args + ["--only", "USA", "--only", "ISR"])
+        except Killed:
+            pass
+        stream.__defaults__[0][0] = None
+        streamed.clear()
+        assert build_areas.main(args) == 0 and streamed[0] == "USA", streamed
+        stream.__defaults__[0][0] = "CAN"
+        try:
+            build_areas.main(args)
+        except Killed:
+            pass
+        stream.__defaults__[0][0] = None
+        streamed.clear()
+        assert build_areas.main(args + ["--restart"]) == 0 and streamed[0] == "USA", streamed
+    finally:
+        build_areas.Sources.stream = real
+    print("resume ok")
 
 
 def check_lookup(path: Path):

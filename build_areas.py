@@ -25,7 +25,10 @@ Settlements get a level below LEVEL_NEIGHBOURHOOD, sub-city units LEVEL_NEIGHBOU
 point's area from them by rule (a city up to Jerusalem's size whole, or the finest unit).
 
 Downloads are cached in <data_dir>/area-sources (delete a file there to fetch it again). The output is
-written beside the old file and swapped in whole; a country whose sources failed keeps the areas it had.
+written beside the old file (<out>.tmp) and swapped in whole; a country whose sources failed keeps the areas
+it had. Each country is committed as it is done: a killed build started again with the same countries and
+options goes on where it stopped (--restart to start over). The big sources (geoBoundaries, TIGER, Statistics
+Canada) are read a feature at a time, so a country never needs all its boundaries in memory at once.
 Needs pyshp (Census shapefiles) and osmium (pyosmium, the OpenStreetMap extract).
 """
 from __future__ import annotations
@@ -502,6 +505,11 @@ def looks_whole_json(body: bytes) -> None:
 
 def read_shapefile(path: Path) -> list[dict]:
     """Features (GeoJSON-like) from a zipped or plain shapefile, in its own lon/lat coordinates."""
+    return list(iter_shapefile(path))
+
+
+def iter_shapefile(path: Path, prj: str = ""):
+    """read_shapefile's features one at a time (a generator), brought to lon/lat from prj's system if given."""
     import shapefile                                            # pyshp
     if path.suffix == ".zip":
         z = zipfile.ZipFile(path)
@@ -516,10 +524,14 @@ def read_shapefile(path: Path) -> list[dict]:
         rd = shapefile.Reader(str(path), encoding=shapefile_text_encoding(path.with_suffix("")),
                               encodingErrors="replace")
     fields = [f[0] for f in rd.fields[1:]]
-    out = []
-    for sr in rd.iterShapeRecords():
-        out.append({"properties": dict(zip(fields, sr.record)), "geometry": sr.shape.__geo_interface__})
-    return out
+    try:
+        for sr in rd.iterShapeRecords():
+            if not sr.shape.points:
+                continue
+            geom = sr.shape.__geo_interface__
+            yield {"properties": dict(zip(fields, sr.record)), "geometry": to_lonlat(geom, prj) if prj else geom}
+    finally:
+        rd.close()
 
 
 def shapefile_encoding(cpg: str) -> str:
@@ -570,18 +582,21 @@ class Sources:
         self.cfg = cfg
         self.cache: dict[str, list[Unit]] = {}
 
+    STREAMED = ("geoboundaries", "tiger", "statcan-csd")      # the big ones: never all in memory at once
+
     def stream(self, spec: dict):
-        """One source's units, as an iterable: geoBoundaries' read a feature at a time, the others whole."""
-        if spec["type"] == "geoboundaries":
-            return self.geoboundaries(spec)
+        """One source's units, as an iterable: the big sources (STREAMED) read and made a feature at a time and
+        dropped once written, the others whole."""
+        if spec["type"] in self.STREAMED:
+            return getattr(self, spec["type"].replace("-", "_"))(spec)
         return self.units(spec)
 
     def units(self, spec: dict) -> list[Unit]:
         """All units of one source."""
         t = spec["type"]
         key = json.dumps(spec, sort_keys=True)
-        if t == "tiger":
-            return [u for f in self.us_states() for u in self.tiger(spec["layer"], f)]
+        if t in self.STREAMED:
+            return list(self.stream(spec))
         if key not in self.cache:
             self.cache[key] = getattr(self, t.replace("-", "_"))(spec)
             log.info("%s: %d units", spec.get("label") or spec.get("source") or t, len(self.cache[key]))
@@ -673,64 +688,54 @@ class Sources:
         return city_units(feats, spec)
 
     # Canada: Statistics Canada 2021 census subdivisions (one download for the country). The file is big
-    # (a 315 MB .shp): it is unpacked to disk once and read one shape at a time.
+    # (a 315 MB .shp): it is unpacked to disk once and read, reprojected and made one shape at a time.
     def statcan_csd(self, spec):
-        import shapefile                                        # pyshp
         path = self.fetch.path(spec.get("path") or spec.get("url", STATCAN_CSD_URL), name="lcsd000b21a_e.zip")
         base = unpack_shapefile(path, self.fetch.cache)
         prj_f = base.with_suffix(".prj")
         prj = prj_f.read_text(encoding="utf-8", errors="replace") if prj_f.exists() else ""
-        rd = shapefile.Reader(str(base), encoding=shapefile_text_encoding(base), encodingErrors="replace")
-        fields = [f[0] for f in rd.fields[1:]]
-        kept, total = [], 0
-        try:
-            for sr in rd.iterShapeRecords():
-                total += 1
-                if not sr.shape.points:
-                    continue
-                kept.append({"properties": dict(zip(fields, sr.record)),
-                             "geometry": to_lonlat(sr.shape.__geo_interface__, prj)})
-        finally:
-            rd.close()
-        log.info("Statistics Canada: %d of %d census subdivisions with a shape", len(kept), total)
-        return statcan_units(kept)
+        n = 0
+        for f in iter_shapefile(base.with_suffix(".shp"), prj):
+            for u in statcan_units([f]):
+                n += 1
+                yield u
+        log.info("Statistics Canada: %d census subdivisions", n)
 
     # US Census TIGER/Line
-    def us_states(self) -> list[str]:
-        """Every state's and territory's FIPS code in the Census state file."""
+    def us_states(self) -> dict[str, str]:
+        """{FIPS code: name} of every state and territory in the Census state file."""
         year = self.cfg.get("tiger_year", 2024)
         if "us-states" not in self.cache:
             path = self.fetch.path(TIGER_URL.format(year=year, layer_uc="STATE", fips="us", layer="state"))
-            self.cache["us-states"] = units_from_features(read_shapefile(path), key="us-state", id_keys=("STATEFP",),
-                                                          name_keys=("NAME",), kind="state", level=0, source="")
-        return sorted(st.id.split(":")[1] for st in self.cache["us-states"])
+            self.cache["us-states"] = {prop(f["properties"], "STATEFP"): prop(f["properties"], "NAME")
+                                       for f in iter_shapefile(path)}
+        return self.cache["us-states"]
 
-    def tiger(self, layer, fips):
-        key = f"tiger-{layer}-{fips}"
-        if key not in self.cache:
-            year = self.cfg.get("tiger_year", 2024)
+    def tiger(self, spec):
+        """A TIGER/Line layer ("place" or "cousub") of every state, a state and a feature at a time."""
+        layer, year = spec["layer"], self.cfg.get("tiger_year", 2024)
+        for fips, state in sorted(self.us_states().items()):
             path = self.fetch.path(TIGER_URL.format(year=year, layer_uc=layer.upper(), fips=fips, layer=layer))
-            feats = read_shapefile(path)
-            if layer == "place":
-                units = []
-                for f in feats:
-                    p = f["properties"]
+            n = 0
+            for f in iter_shapefile(path):
+                p = f["properties"]
+                if layer == "place":
                     cdp = str(p.get("CLASSFP", "")).startswith("U")
-                    units += units_from_features(
+                    units = units_from_features(
                         [f], key="us-place", id_keys=("GEOID",), name_keys=("NAMELSAD",), alt_keys=("NAME",),
                         kind="census-designated place" if cdp else "incorporated place", level=LEVEL_LOCALITY,
                         source=f"US Census TIGER/Line {year} places")
-            else:
-                feats = [f for f in feats if str(f["properties"].get("COUSUBFP")) != "00000"]
-                units = units_from_features(feats, key="us-cousub", id_keys=("GEOID",), name_keys=("NAMELSAD",),
-                                            alt_keys=("NAME",), kind="county subdivision", level=LEVEL_COARSE,
-                                            source=f"US Census TIGER/Line {year} county subdivisions")
-            st = next((s.name for s in self.cache["us-states"] if s.id == f"us-state:{fips}"), fips)
-            for u in units:
-                u.name = f"{u.name}, {st}"
-            self.cache[key] = units
-            log.info("%s: %d units", key, len(units))
-        return self.cache[key]
+                elif str(p.get("COUSUBFP")) != "00000":
+                    units = units_from_features([f], key="us-cousub", id_keys=("GEOID",), name_keys=("NAMELSAD",),
+                                                alt_keys=("NAME",), kind="county subdivision", level=LEVEL_COARSE,
+                                                source=f"US Census TIGER/Line {year} county subdivisions")
+                else:
+                    continue
+                for u in units:
+                    u.name = f"{u.name}, {state or fips}"
+                    n += 1
+                    yield u
+            log.info("tiger-%s-%s: %d units", layer, fips, n)
 
     # Israel: OpenStreetMap, whose admin_level=8 boundaries are the Ministry of Interior's
     def israel_osm(self, spec):
@@ -1138,33 +1143,76 @@ def write_country(con: sqlite3.Connection, country: str, units, tol_m: float, ca
     return {"areas": n, "overCap": over, "sources": sorted(sources)}
 
 
+def read_meta(con: sqlite3.Connection) -> dict:
+    return {k: json.loads(v) for k, v in con.execute("SELECT key, value FROM meta")}
+
+
+def save_meta(con: sqlite3.Connection, **kv) -> None:
+    """Set these metadata keys (in the open transaction: committed with the country written)."""
+    con.executemany("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                    [(k, json.dumps(v, ensure_ascii=False)) for k, v in kv.items()])
+
+
+def resumable(tmp: Path, run: dict) -> dict | None:
+    """The progress left in tmp by an interrupted build of the same run (same countries and options), or None."""
+    if not tmp.exists():
+        return None
+    try:
+        con = sqlite3.connect(tmp)
+        try:
+            p = read_meta(con).get("progress")
+        finally:
+            con.close()
+    except (sqlite3.Error, ValueError):
+        return None
+    return p if p and p.get("run") == run else None
+
+
 def build(args, cfg: dict, dest: Path) -> tuple[dict, list[str]]:
-    """Writes dest.tmp (from a copy of dest unless --replace), then swaps it in. Returns (meta, report)."""
+    """Writes dest.tmp (from a copy of dest unless --replace), then swaps it in. Returns (meta, report).
+    Each country is committed to dest.tmp with the run's progress: a build that was killed (out of memory, a
+    reboot) and is started again with the same countries and options goes on from the next country."""
     fetch = Fetcher(Path(args.cache or Path(cfg["data_dir"]) / "area-sources"), cfg.get("contact", ""))
     sources = Sources(fetch, cfg.get("areas", {}))
     plans = country_plans(fetch, args)
     cap_km = float(cfg["terrain"].get("max_area_radius_km", 30))
     tmp = dest.with_name(dest.name + ".tmp")
-    tmp.unlink(missing_ok=True)
-    fresh = args.replace or not dest.exists()
-    if not fresh:
-        shutil.copyfile(dest, tmp)
+    fresh = bool(args.replace) or not dest.exists()
+    run = {"countries": list(plans), "fresh": fresh, "only": bool(args.only), "simplifyM": args.simplify_m,
+           "sources": args.sources or None}
+    progress = None if args.restart else resumable(tmp, run)
+    if progress is None:
+        tmp.unlink(missing_ok=True)
+        if not fresh:
+            shutil.copyfile(dest, tmp)
     con = sqlite3.connect(tmp)
     try:
-        if fresh:
-            con.executescript(SCHEMA)
-        old = {k: json.loads(v) for k, v in con.execute("SELECT key, value FROM meta")}
-        countries: dict = {} if fresh else dict(old.get("countries", {}))
-        if not args.only and not fresh:                # a full build: countries no plan has any more go
-            for (c,) in con.execute("SELECT DISTINCT country FROM areas").fetchall():
-                if c not in plans:
-                    drop_country(con, c)
-                    countries.pop(c, None)
-        report: list[str] = []
-        failed: dict[str, list[str]] = {}
+        if progress is not None:
+            old = read_meta(con)
+            countries, failed, reports = old.get("countries", {}), old.get("failed", {}), progress["reports"]
+            log.info("resuming the build in %s: %d of %d countries done (--restart to start over)",
+                     tmp, len(progress["done"]), len(plans))
+        else:
+            if fresh:
+                con.executescript(SCHEMA)
+            old = read_meta(con)
+            countries = {} if fresh else dict(old.get("countries", {}))
+            failed, reports = {}, {}
+            if not args.only and not fresh:            # a full build: countries no plan has any more go
+                for (c,) in con.execute("SELECT DISTINCT country FROM areas").fetchall():
+                    if c not in plans:
+                        drop_country(con, c)
+                        countries.pop(c, None)
+            progress = {"run": run, "done": [], "reports": reports}
+            save_meta(con, countries=countries, failed=failed, progress=progress)
+            con.commit()
+        done = set(progress["done"])
         t0 = time.time()
         for ci, (country, plan) in enumerate(plans.items(), 1):
+            if country in done:
+                continue
             log.info("== %s %s, %.0f min so far", bar(ci - 1, len(plans)), country, (time.time() - t0) / 60)
+            report: list[str] = []
             at = [None]
 
             def units():
@@ -1172,35 +1220,34 @@ def build(args, cfg: dict, dest: Path) -> tuple[dict, list[str]]:
                     at[0] = spec
                     yield from sources.stream(spec)
 
-            mark = len(report)
             try:
-                summary = write_country(con, country, units(), args.simplify_m, cap_km, report)
+                countries[country] = write_country(con, country, units(), args.simplify_m, cap_km, report)
+                failed.pop(country, None)
             except Exception as e:                     # noqa: BLE001 - reported; the country keeps its areas
                 con.rollback()
-                del report[mark:]
                 spec = at[0] or {}
                 log.error("%s: source %s failed: %s", country, spec.get("type"), e)
                 failed[country] = [f"{spec.get('type')} {spec.get('key') or spec.get('adm', '')} ({e})"]
                 had = con.execute("SELECT count(*) FROM areas WHERE country = ?", (country,)).fetchone()[0]
-                report.append(f"{country}: FAILED ({'; '.join(failed[country])}); kept the {had} areas it had")
-                continue
+                report = [f"{country}: FAILED ({'; '.join(failed[country])}); kept the {had} areas it had"]
             finally:
                 sources.clear()
+            reports[country] = report
+            progress["done"].append(country)
+            save_meta(con, countries=countries, failed=failed, progress=progress)
             con.commit()
-            countries[country] = summary
         meta = {"version": 2, "built": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 "levels": {"neighbourhood": LEVEL_NEIGHBOURHOOD, "locality": LEVEL_LOCALITY, "coarse": LEVEL_COARSE},
                 "countries": countries, "failed": failed}
         con.execute("DELETE FROM meta")
-        con.executemany("INSERT INTO meta (key, value) VALUES (?, ?)",
-                        [(k, json.dumps(v, ensure_ascii=False)) for k, v in meta.items()])
+        save_meta(con, **meta)
         con.commit()
         if fresh or not args.only:
             con.execute("VACUUM")
     finally:
         con.close()
     tmp.replace(dest)
-    return meta, report
+    return meta, [line for c in plans for line in reports.get(c, [])]
 
 
 def main(argv=None) -> int:
@@ -1212,6 +1259,8 @@ def main(argv=None) -> int:
     ap.add_argument("--only", action="append", help="a country (ISO 3166 alpha-3, repeatable): rebuild only "
                     "these; the other countries' areas already in the output file are kept")
     ap.add_argument("--replace", action="store_true", help="start a new file, dropping every area in the old one")
+    ap.add_argument("--restart", action="store_true", help="start over even if an interrupted build of the same "
+                    "countries left <out>.tmp to go on from")
     ap.add_argument("--simplify-m", type=float, default=25.0)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

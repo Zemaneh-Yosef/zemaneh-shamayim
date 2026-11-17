@@ -478,8 +478,12 @@ sudo -u zmanim-sky venv/bin/python build_areas.py --only USA --only ISR    # reb
                                                                     # codes); the other countries' areas are kept
 ```
 
-It writes `<data_dir>/areas.sqlite` beside the old one and swaps it in whole (the server rereads it when it
-changes; until the first build an older `areas.json` is still used), and `areas_report.txt`: per country how
+It writes `<data_dir>/areas.sqlite.tmp` beside the old file and swaps it in whole at the end (the server
+rereads it when it changes; until the first build an older `areas.json` is still used). Each country is
+committed to the `.tmp` as it is done, so a build that is killed (out of memory, a reboot) and started again
+with the same countries and options goes on from the next country (`--restart` to start over). The big
+sources - geoBoundaries, TIGER, Statistics Canada - are read a feature at a time, so no country needs all its
+boundaries in memory at once. It also writes `areas_report.txt`: per country how
 many areas of each kind, how many are over the cap, and slivers dropped. A country whose source fails keeps
 the areas it had (the report says FAILED; the build exits 1) - run it again with `--only` for that country.
 To use an official file instead of a download (e.g. a city's own neighbourhood layer), pass `--sources`
