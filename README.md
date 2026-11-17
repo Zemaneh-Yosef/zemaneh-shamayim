@@ -43,6 +43,7 @@ horizon, the air the sunlight bends through, and how bright the night sky is.
 | `/v1/area` | the official municipality or neighbourhood containing a point |
 | `/v1/light-pollution` | sky brightness from the World Atlas, brought forward to today, for when the stars become visible |
 | `/v1/haze-calibration` | a factor correcting the CAMS haze forecast at a place, from NASA's AERONET measurements |
+| `/v1/climate-envelope` | the range of near-surface air a place's 5° cell has in each month (NOAA reanalysis), for the website's guardrails |
 | `/v1/terrain-tiles/{z}/{x}/{y}.png` | the same terrain as web-map tiles |
 | `/v1/cesium-terrain/layer.json`, `/{z}/{x}/{y}.terrain` | the same terrain in Cesium's format (quantized-mesh, with surface normals), for the website's 3D horizon view |
 | `/v1/status` | the live forecast cycle and how much climatology each region holds |
@@ -132,6 +133,7 @@ All the Python files sit at the top level and share `config.json` (or the file i
 | `build_prior.py` | builds the NOAA reanalysis climatology, the fallback before your own has data |
 | `climatology.py` | typical profiles by month and time of day; builds a path profile from any source |
 | `weather_guard.py` | rejects weather files with physically impossible values |
+| `climate_envelope.py` | the range of near-surface air per 5° cell and month, for the website's check on forecasts (`/v1/climate-envelope`) |
 | `suggest_region.py` | works out a region box from the places you serve and saves it to the config |
 | **Terrain** | |
 | `terrain.py` | the horizon computation: elevation tiles, lines of sight, vantage-point search |
@@ -253,6 +255,7 @@ Then, as you need them:
 | `fetch_gfs.py` | hourly at :17 (timer); fetches a new GFS cycle when there is one (00Z, 12Z), then adds it to the climatology | `journalctl -u zmanim-sky-fetch` |
 | `fetch_gefs.py` | hourly at :40 (timer), only with `ensemble.enabled` | `journalctl -u zmanim-sky-gefs` |
 | `build_prior.py` | by the fetcher, when the NOAA reanalysis climatology is missing or its 10-year window moved (each March) | the fetcher's |
+| `climate_envelope.py` | by the fetcher, once (when `<data_dir>/climate-envelope.npz` is missing) | the fetcher's |
 | `backfill_gfs.py` | by hand, once (and again after upgrades that add climatology fields) | its own (`nohup`) |
 | `dem_layers.py build` / `build-fine`, `deploy/prebuild-fine.sh` | by hand, to prepare terrain ahead of requests | its own |
 | `build_areas.py`, `haze_calibration.py` | by hand, about once a year | its own |
@@ -438,7 +441,7 @@ second request, not `DYNAMIC`.
 
 **Purging.** Answers carry a `Cache-Tag` (Cloudflare strips it): `zsky-terrain` (horizons, terrain versions,
 terrain tiles, Cesium terrain), `zsky-areas` (`/v1/area` and `area=auto` answers), `zsky-weather`,
-`zsky-lightpol`, `zsky-haze`, and `zsky` on all of them. The API purges by itself: at start and every
+`zsky-lightpol`, `zsky-haze`, `zsky-climate`, and `zsky` on all of them. The API purges by itself: at start and every
 `cdn.check_every_s` (10 minutes) it compares what the terrain and areas are made from with
 `<data_dir>/cdn-state.json`, and purges `zsky-terrain` when the `terrain.layers` or `terrain.fine` sources, the
 horizon algorithm (an upgrade) or a merged tile's revision (`dem_layers.py build --force`) changed, and
@@ -448,7 +451,7 @@ horizon algorithm (an upgrade) or a merged tile's revision (`dem_layers.py build
 override. Without them a change is only logged ("CDN purge needed"); purge in the dashboard then. By hand:
 
 ```sh
-sudo -u zmanim-sky venv/bin/python cdn.py purge terrain        # or areas, weather, lightpol, haze; all
+sudo -u zmanim-sky venv/bin/python cdn.py purge terrain        # or areas, weather, lightpol, haze, climate; all
 sudo -u zmanim-sky venv/bin/python cdn.py purge --everything   # the whole zone, website included
 sudo -u zmanim-sky venv/bin/python cdn.py status
 ```
@@ -536,6 +539,7 @@ for t in tests/test_*.py; do python3 "$t" > /dev/null 2>&1 || echo "FAILED: $t";
 | `test_areas.py` | build_areas.py (whole countries, the municipal and finer geoBoundaries levels, `--only`, a failed source keeping a country's areas), the lookup by both rules, `area=auto` / `finest` (with and without `outline=1`), a rebuilt file swapped in |
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
 | `test_sky_measurements.py` | build_sky_measurements.py's filters on made-up Globe at Night rows, and the Moon |
+| `test_climate_envelope.py` | the climate envelope on synthetic NOAA long-term means (each cell's range against the synthetic pattern, land carried to sea level, places without data, the endpoint's 200 / 400 / 404 / 503) |
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
 | `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (kept apart until the server has the data), the disk cache, `build` ahead of time (each level within its reach, out to the earth's curve, with parents) |

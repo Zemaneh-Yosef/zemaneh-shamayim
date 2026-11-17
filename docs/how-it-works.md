@@ -7,7 +7,7 @@ What each endpoint computes, from which data, and why. For installing and runnin
 **Contents**
 
 * [Weather along the path](#weather-along-the-path-v1path-profiles), with its
-  [guardrails](#guardrails-on-the-weather-data-weather_guardpy) and
+  [guardrails](#guardrails-on-the-weather-data-weather_guardpy) (with the climate envelope) and
   [ensembles](#ensembles-ensemble1-typical-outcomes-and-error-bars)
 * [Terrain horizons](#terrain-horizons-v1horizon) and [moonrise / moonset](#moonrise--moonset-moon1)
 * [Elevation data](#elevation-data): default tiles, bare-earth layers, fine terrain, terrain versions
@@ -104,6 +104,16 @@ The website checks what it receives again (`atmosphere-guard.js` in the website'
 same physical limits per value, a path profile's levels against the hypsometric equation, temperature gradients
 no air sustains, haze outside 0–10, and a forecast more than 45 °C from the place's normal; what fails goes to
 the next source, and with none left the standard refraction model applies.
+
+The place's normal comes from the monthly normals the website downloads (Open-Meteo's ERA5, else NOAA's station
+normals). When neither arrives, `GET /v1/climate-envelope?lat=..&lon=..` (`climate_envelope.py`) is its reference:
+for the place's 5° cell and each month, the lowest and highest near-surface temperature in NOAA's 1991–2020 daily
+long-term means (4 times a day) over every 2.5° reanalysis point on or inside the cell, carried to sea level at
+6.5 K/km over the reanalysis terrain (`seaLevelC.min` / `.max`, `lapseKPerM`). An envelope rather than a normal, so
+a coarse cell never refuses real air in a valley or on a plateau inside it: the website carries it to the
+forecast's height and refuses only a value more than 45 °C outside the whole range (−50 °C in a New York July).
+It is built once by the fetcher (~70 MB from NOAA, deleted after; with `climatology.ncep_prior`) and answers
+anywhere on Earth; 503 until it has been built.
 
 ## Ensembles (`&ensemble=1`): typical outcomes and error bars
 
