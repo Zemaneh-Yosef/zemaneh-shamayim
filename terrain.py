@@ -65,7 +65,7 @@ log = logging.getLogger("terrain")
 # Bump when a change here alters the horizons computed from the same terrain data (selection, sampling,
 # floors, ...): it is part of serve.py's cache key, so cached horizons are recomputed. Version 1 leaves the
 # key as it always was, so existing caches stay valid.
-ALGO_VERSION = 3                                         # 2: alternates; 3: floorM
+ALGO_VERSION = 4                    # 2: alternates; 3: floorM; 4: ranges past high horizons, crests refined
 
 R_EARTH = 6371008.8
 K_SELECT = 0.13
@@ -280,6 +280,121 @@ def azimuth_ranges(lat: float, margin: float = 3.0):
             "sunset": (270 - spread - margin, 270 + spread + margin)}
 
 
+# Over a high horizon the Sun is first seen (last seen) well above it, and by then it has moved along its slanted
+# path: at the winter solstice further south than its sea-level rise / set direction (north in the southern
+# hemisphere; the summer Sun moves inwards first, even in the tropics, where it comes back out past the edge
+# only 40 deg up or more). azimuth_ranges() stops 3 deg past
+# those directions, so where the terrain there is higher than the Sun stands on its way out, the visible sunrise
+# of those mornings fell outside the horizon and was lost. sun_azimuth_ranges() widens a range edge only as far
+# as that place's own terrain still hides the Sun: nothing is added where the horizon is low (most places).
+SUN_MAX_DEC_DEG = 23.44
+# terrain lower than the Sun's true altitude by this no longer hides any of its disk: its semidiameter (0.27 deg)
+# plus room for terrestrial refraction; the astronomical refraction near the horizon (0.2-0.5 deg) only lowers the
+# threshold further
+SUN_CLEAR_DEG = 0.5
+SUN_EDGE_PAD_DEG = 1.0      # past the last direction that hides it: the limb's reach (0.27 deg / cos alt) and more
+SUN_EXTEND_STEP_DEG = 0.5
+SUN_MAX_EXTEND_DEG = 45.0
+
+
+def _rise_path(lat: float, dec_deg: float, max_alt: float = 45.0) -> list[tuple[float, float]]:
+    """(azimuth, altitude) of a body of this declination from its rise up to max_alt (or culmination), deg."""
+    phi, dec = math.radians(lat), math.radians(dec_deg)
+    cos_h0 = -math.tan(phi) * math.tan(dec)
+    if not -1 < cos_h0 < 1:
+        return []
+    out, H, step = [], -math.acos(cos_h0), math.radians(0.02)
+    while H < 0:
+        sin_alt = math.sin(phi) * math.sin(dec) + math.cos(phi) * math.cos(dec) * math.cos(H)
+        alt = math.degrees(math.asin(max(-1.0, min(1.0, sin_alt))))
+        az = math.degrees(math.atan2(-math.cos(dec) * math.sin(H),
+                                     math.sin(dec) * math.cos(phi) - math.cos(dec) * math.sin(phi) * math.cos(H))) % 360
+        out.append((az, alt))
+        if alt >= max_alt:
+            break
+        H += step
+    return out
+
+
+def _outward_alt(path: list[tuple[float, float]], centre: float, sign: int, az: float):
+    """The lowest altitude at which `path` reaches azimuth `az` while moving outwards (sign +1: to larger
+    azimuths, -1: smaller) from `centre` (90 sunrise, 270 sunset); None if it never gets there."""
+    prev = None
+    for a, h in path:
+        x = sign * (a - az)
+        if prev is not None and prev[0] < 0 <= x:
+            return prev[1] + (h - prev[1]) * (-prev[0]) / (x - prev[0])
+        prev = (x, h)
+    return None
+
+
+def sun_azimuth_ranges(lat: float, horizon_deg, base: dict | None = None) -> dict:
+    """azimuth_ranges(lat), each edge widened while the terrain there hides the Sun on its way out.
+
+    horizon_deg(az: np.ndarray) -> the horizon's (geometric, standard-refraction) angle in degrees at those
+    azimuths: the point's own, or for an area the lowest of its spots (the area's earliest sunrise). Only the
+    solstice Sun, whose path leaves through an edge, matters there: every other declination crosses those
+    azimuths higher up. An edge moves out in SUN_EXTEND_STEP_DEG steps while the terrain stands within
+    SUN_CLEAR_DEG of the Sun's altitude there, and SUN_EDGE_PAD_DEG past the last such step; each round asks
+    horizon_deg once for every edge still moving."""
+    ranges = dict(base or azimuth_ranges(lat))
+    edges = []                                    # [side, index (0 lo / 1 hi), sign, path, centre, az]
+    for side, centre in (("sunrise", 90.0), ("sunset", 270.0)):
+        for dec in (SUN_MAX_DEC_DEG, -SUN_MAX_DEC_DEG):
+            path = _rise_path(lat, dec)
+            if not path:
+                continue
+            if side == "sunset":                  # the evening is the morning's mirror image
+                path = [((360 - a) % 360, h) for a, h in path]
+            a0 = path[0][0]
+            sign = 1 if a0 > centre else -1
+            idx = 1 if sign > 0 else 0
+            if not any(e[0] == side and e[1] == idx for e in edges):
+                edges.append([side, idx, sign, [path], centre, ranges[side][idx]])
+            else:
+                next(e for e in edges if e[0] == side and e[1] == idx)[3].append(path)
+    moving = [e for e in edges]
+    out = {e[0] + str(e[1]): None for e in edges}  # the last azimuth that hides the Sun, per edge
+    while moving:
+        probe, alts = [], []
+        for e in moving:
+            nxt = e[5] + e[2] * SUN_EXTEND_STEP_DEG
+            alt = [_outward_alt(p, e[4], e[2], nxt) for p in e[3]]
+            alt = [a for a in alt if a is not None]
+            if not alt or abs(nxt - ranges[e[0]][e[1]]) > SUN_MAX_EXTEND_DEG:
+                e[5] = None
+                continue
+            probe.append(e)
+            alts.append(min(alt))
+        moving = [e for e in moving if e[5] is not None]
+        if not probe:
+            break
+        hz = np.asarray(horizon_deg(np.array([e[5] + e[2] * SUN_EXTEND_STEP_DEG for e in probe])), dtype=float)
+        for e, alt, h in zip(probe, alts, hz):
+            if h < alt - SUN_CLEAR_DEG:             # the Sun clears the terrain here: it was seen before
+                moving.remove(e)
+            else:
+                e[5] += e[2] * SUN_EXTEND_STEP_DEG
+                out[e[0] + str(e[1])] = e[5]
+    for e in edges:
+        last = out[e[0] + str(e[1])]
+        if last is not None:
+            lo, hi = ranges[e[0]]
+            edge = last + e[2] * SUN_EDGE_PAD_DEG
+            ranges[e[0]] = (lo, edge) if e[1] else (edge, hi)
+    return ranges
+
+
+def angle_deg_fn(tiles: "Tiles", spots, eyes, ds, floor: float = 0.0):
+    """horizon_deg for sun_azimuth_ranges: the lowest horizon angle (deg) among `spots` at each azimuth."""
+    def f(az):
+        best = np.full(len(az), np.inf)
+        for (la, lo), h in zip(spots, eyes):
+            best = np.minimum(best, _angles(tiles, la, lo, h, np.asarray(az, float), ds, floor=floor)[0])
+        return np.degrees(best)
+    return f
+
+
 # The Moon's declination reaches the ecliptic's 23.44 deg plus the orbit's 5.145 deg inclination, plus up to
 # ~0.15 deg of perturbations (major lunar standstill: about 28.7 deg).
 MOON_MAX_DEC_DEG = 28.75
@@ -365,36 +480,97 @@ def surface_floor(raw_ground: float) -> float:
     return raw_ground if raw_ground < DEPRESSION_M else 0.0
 
 
+# Ridge crests between two distance steps (algorithm 4). The steps grow with range (0.4%: 200 m at 50 km, 600 m at
+# 150 km, on 30 m data), so a narrow crest between two of them was read lower than it is: on the 1" tiles, against
+# 5 m steps, Armon HaNatziv's horizon came out 0.2' low on average and up to 1.3' (sunrise up to ~6 s early), Salt
+# Lake City's up to 4' (~21 s). Each direction is therefore re-sampled REFINE_REACH steps either side of its
+# REFINE_PEAKS highest local maxima, and of each alternate coefficient's highest point, at REFINE_SAMPLES points
+# (15 m apart at 150 km, a metre or less nearby). Two steps, not one: a crest one cell wide can stand between
+# samples that only climb (Armon HaNatziv, azimuth 103.7: 0.7' missed with one). Against 5 m steps the worst
+# direction is then 0.18' (under 1 s) at all three places checked, for about the same time as before.
+REFINE_PEAKS = 3
+REFINE_SAMPLES = 81
+REFINE_REACH = 2           # steps either side of a window's centre
+
+
+def _heights_on(tiles: Tiles, plat, plon, d, floor: float):
+    """Terrain heights at (plat, plon) for ground distances d (same shape): the fine data within its reach."""
+    H = tiles.heights(plat, plon)
+    if tiles.fine is not None:
+        near = d <= tiles.fine.max_km * 1000
+        if near.any():
+            Hf = tiles.fine.heights(plat[near], plon[near])
+            H[near] = np.where(np.isfinite(Hf), Hf, H[near])
+    return np.maximum(H, floor)
+
+
 def _angles(tiles: Tiles, lat, lon, h_obs, az, ds, chunk: int = 128, floor: float = 0.0,
-            alternates: bool = False):
+            alternates: bool = False, refine: bool = False):
     """For each azimuth: (best angle proxy [rad], its distance [m], its terrain height [m]). With alternates,
     also a fourth item: for each azimuth the [(distance, height), ...] of the points that are highest under
     the coefficients of K_ALTERNATES but are not the main one (usually none), and a fifth: the lowest terrain
-    height out to the farthest of them (floorM, see the module notes)."""
+    height out to the farthest of them (floorM, see the module notes). With refine, crests between the steps
+    are found (see REFINE_PEAKS); the coarse pre-screens leave it off."""
     best_a, best_d, best_h = np.empty(len(az)), np.empty(len(az)), np.empty(len(az))
     alts: list[list[tuple[float, float]]] = [[] for _ in range(len(az))]
     lows = np.empty(len(az))
+    n = len(ds)
     for s in range(0, len(az), chunk):                   # in chunks, to keep memory small
         a = az[s:s + chunk]
         plat, plon = destinations(lat, lon, a, ds)
-        H = tiles.heights(plat, plon)
-        if tiles.fine is not None:                       # the near range from the fine data (where it has any)
-            near = ds <= tiles.fine.max_km * 1000
-            if near.any():
-                Hf = tiles.fine.heights(plat[:, near], plon[:, near])
-                H[:, near] = np.where(np.isfinite(Hf), Hf, H[:, near])
-        H = np.maximum(H, floor)
+        H = _heights_on(tiles, plat, plon, np.broadcast_to(ds, plat.shape), floor)
         rise = (H - h_obs) / ds[None, :]
         ang = rise - ds[None, :] / (2 * REFF)
-        k = np.argmax(ang, axis=1)
         rows = np.arange(len(a))
-        best_a[s:s + chunk], best_d[s:s + chunk], best_h[s:s + chunk] = ang[rows, k], ds[k], H[rows, k]
+        kcs = K_ALTERNATES if alternates else ()
+        if refine and n >= 3:
+            # the windows: around the highest local maxima under standard refraction, and each alternate's highest
+            peak = np.full(ang.shape, -np.inf)
+            inner = (ang[:, 1:-1] >= ang[:, :-2]) & (ang[:, 1:-1] >= ang[:, 2:])
+            peak[:, 1:-1] = np.where(inner, ang[:, 1:-1], -np.inf)
+            peak[:, 0], peak[:, -1] = ang[:, 0], ang[:, -1]
+            top = np.argsort(-peak, axis=1)[:, :REFINE_PEAKS]
+            centres = [top] + [np.argmax(rise - ds[None, :] * ((1 - kc) / (2 * R_EARTH)), axis=1)[:, None] for kc in kcs]
+            centres = np.concatenate(centres, axis=1)                      # (rows, windows)
+            lo, hi = ds[np.clip(centres - REFINE_REACH, 0, n - 1)], ds[np.clip(centres + REFINE_REACH, 0, n - 1)]
+            f = np.linspace(0.0, 1.0, REFINE_SAMPLES)
+            dr = (lo[:, :, None] + (hi - lo)[:, :, None] * f[None, None, :]).reshape(len(a), -1)
+            # destinations for each row's own distances
+            p1, l1 = math.radians(lat), math.radians(lon)
+            ar, dd = np.radians(a)[:, None], dr / R_EARTH
+            sp2 = math.sin(p1) * np.cos(dd) + math.cos(p1) * np.sin(dd) * np.cos(ar)
+            rlat = np.degrees(np.arcsin(np.clip(sp2, -1, 1)))
+            rlon = np.degrees(l1 + np.arctan2(np.sin(ar) * np.sin(dd) * math.cos(p1), np.cos(dd) - math.sin(p1) * sp2))
+            Hr = _heights_on(tiles, rlat, rlon, dr, floor)
+            rise_r = (Hr - h_obs) / dr
+        else:
+            dr = Hr = rise_r = None
+
+        def pick(coef_term):
+            """(angle, distance, height) of the highest point under this curvature term, coarse and refined."""
+            v = rise - ds[None, :] * coef_term
+            k = np.argmax(v, axis=1)
+            val, d, h = v[rows, k], ds[k], H[rows, k]
+            if dr is not None:
+                vr = rise_r - dr * coef_term
+                kr = np.argmax(vr, axis=1)
+                better = vr[rows, kr] > val
+                val = np.where(better, vr[rows, kr], val)
+                d = np.where(better, dr[rows, kr], d)
+                h = np.where(better, Hr[rows, kr], h)
+            return val, d, h
+
+        best_a[s:s + chunk], best_d[s:s + chunk], best_h[s:s + chunk] = pick(1 / (2 * REFF))
         if alternates:
-            for kc in K_ALTERNATES:
-                ka = np.argmax(rise - ds[None, :] * ((1 - kc) / (2 * R_EARTH)), axis=1)
-                # a point at the floor (sea level) is no alternative: the calculator's sea horizon covers it
-                for r in np.where((ka != k) & (H[rows, ka] > floor))[0]:
-                    pt = (float(ds[ka[r]]), float(H[r, ka[r]]))
+            for kc in kcs:
+                _, da, ha = pick((1 - kc) / (2 * R_EARTH))
+                for r in range(len(a)):
+                    d0 = best_d[s + r]
+                    # the same crest as the main point (within two steps of it) is no alternative, nor is a point at
+                    # the floor (sea level): the calculator's sea horizon covers it
+                    if abs(da[r] - d0) <= 2 * max(15.0, 0.004 * d0) or ha[r] <= floor:
+                        continue
+                    pt = (float(da[r]), float(ha[r]))
                     if pt not in alts[s + r]:
                         alts[s + r].append(pt)
             for r in range(len(a)):
@@ -419,7 +595,7 @@ def horizon_for_point(tiles: Tiles, lat: float, lon: float, *, eye: float = 1.7,
     for side in sides:
         lo, hi = ranges[side]
         az = np.arange(lo, hi + 1e-9, az_step)
-        _, dist, hgt, alts, lows = _angles(tiles, lat, lon, h_obs, az, ds, floor=floor, alternates=True)
+        _, dist, hgt, alts, lows = _angles(tiles, lat, lon, h_obs, az, ds, floor=floor, alternates=True, refine=True)
         out[side] = []
         for a, d, h, al, lo_ in zip(az, dist, hgt, alts, lows):
             e = {"azimuthDeg": round(float(a) % 360, 2), "distanceKm": round(float(d) / 1000, 3),
@@ -522,8 +698,9 @@ def vantage_search(tiles: Tiles, lat: float, lon: float, radius_km: float = 0.0,
     if not cands:
         cands, raw = [(lat, lon)], np.array([tiles.ground(lat, lon)])
     grounds = np.maximum(raw, floor)
-    ranges = azimuth_ranges(lat)
     ds_coarse = steps_for(tiles, min_km, max_km, fine=False)
+    # the area's earliest sunrise / latest sunset is over its lowest horizon: widen where even that hides the Sun
+    ranges = sun_azimuth_ranges(lat, angle_deg_fn(tiles, cands, grounds + eye, ds_coarse, floor))
     winners: dict[int, dict] = {}
     for side, (lo, hi) in ranges.items():
         az = np.arange(lo, hi + 1e-9, 0.5)
@@ -601,7 +778,7 @@ def moon_horizon(tiles: Tiles, lat0: float, lon0: float, spots, heights, *, floo
         for k in np.unique(pick):
             idx = np.where(pick == k)[0]
             la, lo_ = spots[k]
-            _, d, hgt = _angles(tiles, la, lo_, heights[k], fine[idx], ds_fine, floor=floor)
+            _, d, hgt = _angles(tiles, la, lo_, heights[k], fine[idx], ds_fine, floor=floor, refine=True)
             t = math.degrees(dist[k] / R_EARTH) * np.cos(np.radians(fine[idx] - bearing[k]))
             for j, a, dd, hh, tt in zip(idx, fine[idx], d, hgt, t):
                 entries[j] = {"azimuthDeg": round(float(a) % 360, 2), "distanceKm": round(float(dd) / 1000, 3),
@@ -648,8 +825,11 @@ def horizon_set(tiles: Tiles, lat: float | None = None, lon: float | None = None
         params["moon"] = True
         params["moonPercentile"] = moon_percentile
     if radius_km <= 0 and bbox is None:
-        hz = horizon_for_point(tiles, lat, lon, eye=eye, height=height, min_km=min_km, max_km=max_km)
-        r = azimuth_ranges(lat)
+        fl = surface_floor(tiles.ground(lat, lon))
+        h_obs = height if height is not None else max(tiles.ground(lat, lon), fl) + eye
+        r = sun_azimuth_ranges(lat, angle_deg_fn(tiles, [(lat, lon)], [h_obs],
+                                                 steps_for(tiles, min_km, max_km, fine=False), fl))
+        hz = horizon_for_point(tiles, lat, lon, eye=eye, height=height, min_km=min_km, max_km=max_km, az_ranges=r)
         hz["wins"] = {s: [[round(a % 360, 2), round(b % 360, 2)]] for s, (a, b) in r.items()}
         res = {"mode": "point", "points": [hz]}
         if moon:

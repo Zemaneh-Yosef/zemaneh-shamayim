@@ -69,6 +69,7 @@ import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from datetime import date, datetime, timedelta, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -524,6 +525,8 @@ class Horizons:
         self.dir.mkdir(parents=True, exist_ok=True)
         self.tiles_folder = folder
         self.slots = threading.BoundedSemaphore(int(t["max_parallel"]))
+        self.extra_cache: "OrderedDict[tuple, bytes]" = OrderedDict()   # with_extra's answers
+        self.extra_lock = threading.Lock()
         if worker:
             return
         # the same terrain as web-map tiles; low zooms only from data already here (no downloads / builds)
@@ -590,9 +593,32 @@ class Horizons:
         answer is not kept and the next request (after a while) builds it again: not for caches to keep long."""
         body, partial = self.compute_ex(q, max_bbox_km)
         if extra:
-            res = json.loads(gzip.decompress(body))
-            body = gzip.compress(json.dumps({**res, **extra}, separators=(",", ":")).encode())
+            body = self.with_extra(body, extra)
         return body, partial
+
+    def with_extra(self, body: bytes, extra: dict) -> bytes:
+        """The stored answer with `extra`'s fields added (the area), made once per answer and area and kept in
+        memory: an area's answer is asked for over and over, and unzipping, parsing and zipping a vantage set
+        (~50-300 KB) each time was most of the cost of serving it. The JSON is spliced rather than parsed (the
+        stored answer is an object written with these separators and has none of extra's keys), so the bytes
+        are those json.dumps({**res, **extra}) gave; gzip's timestamp is 0, so the same answer is the same bytes."""
+        tail = json.dumps(extra, separators=(",", ":"))
+        key = (hashlib.sha1(body).digest(), tail)
+        with self.extra_lock:
+            hit = self.extra_cache.get(key)
+            if hit is not None:
+                self.extra_cache.move_to_end(key)
+                return hit
+        raw = gzip.decompress(body).rstrip()
+        if not (raw.endswith(b"}") and tail.startswith("{")):
+            raise ValueError("a stored horizon is not a JSON object")
+        sep = b"" if raw == b"{}" or tail == "{}" else b","
+        out = gzip.compress(raw[:-1] + sep + tail[1:].encode(), mtime=0)
+        with self.extra_lock:
+            self.extra_cache[key] = out
+            while len(self.extra_cache) > 256:          # ~256 areas' answers, a few tens of MB at most
+                self.extra_cache.popitem(last=False)
+        return out
 
     def fine_version(self, p: dict) -> str | None:
         """The fine terrain's part in a horizon with these params (FineTiles.version over the vantage points

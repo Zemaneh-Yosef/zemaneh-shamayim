@@ -496,8 +496,19 @@ works for any place between 60°S and 60°N, inside your regions or not.
 | `moon` | – | `1`: also return a `moon` horizon for visible moonrise / moonset (below) |
 
 How it is computed: for every 0.1° of azimuth across the year's sunrise and sunset directions, out to
-150 km, the terrain point with the highest apparent elevation is kept (distance and height; the
-calculator adds Earth curvature and refraction for the day's air). Which point that is depends on the
+150 km, the terrain point with the highest apparent elevation is kept. Those directions run 3° past the
+solstices' rise and set directions, and further where the terrain is high (algorithm 4): over a high horizon
+the winter Sun is first seen well south of its sea-level rise direction (north in the southern hemisphere),
+having moved along its slanted path, so each edge is widened in 0.5° steps while the terrain there (an area's
+lowest horizon among its spots) stands within 0.5° of the solstice Sun's altitude, and 1° past the last such
+step. Nothing is added where the horizon is low; at Salt Lake City's point horizon (6° to the south-east) the
+sunrise range gained 3.5° and the 36 December mornings it used to lose. Each kept point is its distance and height (the
+calculator adds Earth curvature and refraction for the day's air). Distances are stepped 0.4% apart (200 m at 50 km,
+600 m at 150 km), and since algorithm 4 each direction is sampled again, finely, two steps either side of its three
+highest ridges (and of each alternate's): a narrow crest between two steps was read low before, by up to 1.3′ at
+Armon HaNatziv and 4′ at Salt Lake City against 5 m sampling (sunrise up to 6 s and 21 s early in those
+directions); now the worst direction at either is within 0.2′ (under a second), at about the same cost. Over a year
+at Armon HaNatziv this moves the visible sunrise 1.4 s later on average, at most 6.2 s. Which point that is depends on the
 refraction it is chosen with (standard air, k = 0.13): a strong inversion can make a farther, higher ridge
 the one that hides the Sun. So where another coefficient from −0.2 to 0.9 would pick a different point,
 the entry also lists it under `alternates` (`[[distanceKm, heightM], ...]`, usually absent); the
@@ -1074,7 +1085,8 @@ same: ERA5 8.9 s rms (mean +1.5 s), normals + rule 9.5 s, normals 10.9 s, the st
 eye at ground level; an eye on the roof (+10 m) fits worse (10.2 / 10.5 / 11.1 s). An eye height of 802 m
 at Armon HaNatziv, used in an earlier version of this README, fits clearly worse.
 
-These numbers use horizons from `terrain.py` version 3 (with `alternates` and `floorM`) and the client's terrain rays
+These numbers use horizons from `terrain.py` version 3 (with `alternates` and `floorM`; version 4's crest
+refinement moves Armon HaNatziv's sunrises 1.4 s later on average and has not been re-scored yet) and the client's terrain rays
 traced through the day's air (royzmanimwebsite `terrainElevation`). With the earlier one-curvature terrain
 formula (`validateSunrise.mjs --terrain-compare`, row `era5:formula`) ERA5 scored +1.5 s / 10.8 s, +0.1 s /
 12.2 s and +2.1 s / 9.2 s (Druk 1993–96, Druk 1985–92, Golan): the traced rays move sunrise about 0.65 s later
@@ -1162,6 +1174,8 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (kept apart until the server has the data), the disk cache, `build` ahead of time (each level within its reach, out to the earth's curve, with parents) |
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
 | `test_horizon_workers.py` | horizons computed in worker processes: real searches on a synthetic tile outside the API process, one computation per place when 8 ask at once (more than `api.max_threads`), cached answers quick while two vantage searches run, a killed worker reported once and the pool started anew, errors carried back, the search time learned from the worker |
+| `test_sun_range.py` | sunrise / sunset ranges widened past high horizons only as far as the terrain hides the solstice Sun (both hemispheres, the tropics, a ridge that ends), and a point's horizon and wins over them; a crest between two distance steps found by the refinement |
+| `test_area_answer.py` | an area's horizon answer: the same bytes as merging the parsed answer, kept in memory, quick when asked again |
 | `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time with an estimate from the work left (the tiles its rays cross), computed once in the background however often it is asked for, then served; the timings learned and kept; a failure reported once, then retried |
 | `test_cdn.py` | the caching headers (browsers a day, the CDN the full lifetime, stale-if-error, tags; a partial horizon 10 minutes), purge requests as Cloudflare's API takes them, and purging only what changed (a tile revision, a new areas.json), a refused purge retried |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights and values IGRA's quality control removed, the three versions, which sounding a date gets) |
