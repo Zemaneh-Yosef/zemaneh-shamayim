@@ -30,7 +30,7 @@ from pathlib import Path
 import numpy as np
 
 import weather_guard
-from common import Cycle, cycle_field_names, forecast_hours, gfs_dir, load_config, single_run, write_json_atomic
+from common import Cycle, cycle_field_names, forecast_hours, gfs_dir, load_config, replace_dir, single_run, write_json_atomic
 
 log = logging.getLogger("fetch_gfs")
 
@@ -265,9 +265,7 @@ def fetch_cycle(cfg: dict, cycle: Cycle, source_dir: Path | None = None) -> bool
     (work / "complete").write_text("")
     write_json_atomic(work / "cycle.json", {"cycle": cycle.id, "hours": hours,
                                             "regions": [r["name"] for r in cfg["regions"]]})
-    if final.exists():
-        shutil.rmtree(final)
-    work.rename(final)
+    replace_dir(work, final)
     write_json_atomic(root / "current.json", {"cycle": cycle.id, "published": time.time()})
     prune(cfg)
     return True

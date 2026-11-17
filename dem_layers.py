@@ -51,7 +51,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common import load_config
+from common import load_config, load_npy
 import terrain
 
 HERE = Path(__file__).resolve().parent
@@ -353,7 +353,7 @@ class Builder:
             return f.exists() or sea.exists() or f.with_suffix(".plain").exists()
 
         def stored():                                      # None: use the plain (skadi) tile, or open sea
-            return np.load(f, mmap_mode="r") if f.exists() else None
+            return load_npy(f) if f.exists() else None
 
         def due() -> bool:                                 # a provisional tile whose hour is up
             try:
@@ -383,7 +383,7 @@ class Builder:
         # a rebuild that changes the heights raises the tile's revision (tile_rev), which is part of the
         # terrain version of every horizon reaching it (serve.Horizons.layers_version)
         plain = f.with_suffix(".plain")
-        old = (np.array(np.load(f, mmap_mode="r")) if f.exists() else "sea" if sea.exists()
+        old = (np.load(f) if f.exists() else "sea" if sea.exists()
                else "plain" if plain.exists() else None)
         t0 = time.time()
         # sample centres on the 1" grid lines, edges included (like .hgt)
@@ -436,7 +436,7 @@ class Builder:
         log.info("built %s in %.1f s: %s%s", name, time.time() - t0, ", ".join(f"{k} {v:.0%}" for k, v in stats.items()),
                  f" (provisional, without {', '.join(skipped)})" if skipped else "")
         terrain.report_timing("tile", time.time() - t0)
-        return np.load(f, mmap_mode="r")
+        return load_npy(f)
 
 
 def slim(out: Path) -> tuple[int, int]:
@@ -571,7 +571,7 @@ class FineTiles:
     def _load_or_build(self, k: tuple[int, int]) -> "np.ndarray | None":
         f = self.dir / f"{self.chunk_name(k)}.npy"
         if f.exists():
-            return np.load(f, mmap_mode="r")
+            return load_npy(f)
         if f.with_suffix(".none").exists() or self.builder is None:
             return None
         with self.build_lock, terrain.file_lock(self.dir / ".locks" / self.chunk_name(k)):
@@ -619,7 +619,7 @@ class FineTiles:
         log.info("built fine terrain %s in %.1f s: %s", self.chunk_name(k), time.time() - t0,
                  ", ".join(f"{n} {v:.0%}" for n, v in stats.items()))
         terrain.report_timing("fine", time.time() - t0)
-        return np.load(f, mmap_mode="r")
+        return load_npy(f)
 
     def missing(self, s: float, w: float, n: float, e: float) -> int:
         """How many chunks in the box would be built on first use (none on disk, not known empty, not failed

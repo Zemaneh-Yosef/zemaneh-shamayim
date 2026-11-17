@@ -37,7 +37,7 @@ import numpy as np
 
 import weather_guard
 from climatology import clim_dir
-from common import load_config, write_json_atomic
+from common import load_config, replace_dir, write_json_atomic
 
 log = logging.getLogger("build_prior")
 
@@ -396,8 +396,7 @@ def build_region(cfg: dict, region: dict, means, lats, lons, static, label: str,
         "slot_hours": SLOT_HOURS, "near_surface_agl": SIGMA995_AGL, "region": region,
         "target": want, "years": label,
         "source": f"NCEP/NCAR Reanalysis 1, {label} average, 4x daily (NOAA PSL)"})
-    shutil.rmtree(out, ignore_errors=True)
-    tmp.rename(out)
+    replace_dir(tmp, out)
     p = values[:, :, OUT_FIELDS.index("t2m")]
     log.info("region %s (%s): %dx%d points; near-surface air %.1f..%.1f C (Jan 00Z mean %.1f C)", region["name"],
              label, len(rlats), len(rlons), np.nanmin(p) - 273.15, np.nanmax(p) - 273.15,

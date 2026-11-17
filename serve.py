@@ -90,7 +90,7 @@ import terrain
 import terrain_tiles
 import cesium_terrain
 from climatology import ClimGrid, build_profile, clim_dir
-from common import Cycle, destination, gfs_dir, load_config, solar_date, sun_event, write_json_atomic
+from common import Cycle, destination, gfs_dir, load_config, load_npy, solar_date, sun_event, write_json_atomic
 
 log = logging.getLogger("serve")
 
@@ -154,7 +154,7 @@ class Store:
         key = (region, hour)
         a = self.arrays.get(key)
         if a is None:
-            a = np.load(self.regions[region]["dir"] / f"f{hour:03d}.npy", mmap_mode="r")
+            a = load_npy(self.regions[region]["dir"] / f"f{hour:03d}.npy")
             self.arrays[key] = a
         return a
 

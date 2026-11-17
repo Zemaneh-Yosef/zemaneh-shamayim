@@ -238,6 +238,32 @@ def write_json_atomic(path: Path, obj) -> None:
     os.replace(tmp, path)
 
 
+# Data files are replaced (os.replace, replace_dir) or deleted while readers may still have them open. Linux allows
+# that: a reader keeps the old file until it lets go. Windows refuses to rename over, or delete, a file that is
+# open or memory-mapped, so there (development and tests only) readers take a copy in memory instead of a map.
+KEEP_MAPS = os.name != "nt"
+
+
+def load_npy(path):
+    """A .npy file for reading only: memory-mapped on Linux (pages read as used, shared between processes),
+    read into memory on Windows, where a map would keep the file from being replaced or deleted."""
+    import numpy as np
+    return np.load(path, mmap_mode="r") if KEEP_MAPS else np.load(path)
+
+
+def replace_dir(src: Path, dst: Path) -> None:
+    """Put the finished directory `src` in place of `dst` (which may not exist). The old one is renamed aside
+    first and removed after, so `dst` is only missing for the moment between two renames, and a rename never
+    has to go over an existing directory (which Windows refuses)."""
+    import shutil
+    aside = dst.with_name(f".{dst.name}.old-{os.getpid()}")
+    shutil.rmtree(aside, ignore_errors=True)
+    if dst.exists():
+        os.rename(dst, aside)
+    os.rename(src, dst)
+    shutil.rmtree(aside, ignore_errors=True)
+
+
 # ---------------------------------------------------------------------------------------------
 # Sun: Meeus, Astronomical Algorithms (2nd ed.), ch. 25 "low accuracy" (0.01 deg), solved for the moment the
 # centre is at -0.8333 deg (34' refraction + 16' radius at sea level): within 4 s and 0.01 deg of DE421 up to

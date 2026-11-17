@@ -60,6 +60,8 @@ from pathlib import Path
 
 import numpy as np
 
+from common import load_npy
+
 log = logging.getLogger("terrain")
 
 # Bump when a change here alters the horizons computed from the same terrain data (selection, sampling,
@@ -147,7 +149,7 @@ class Tiles:
             except Exception as e:
                 log.warning("could not rebuild provisional tile %s (%s)", tile_name(lat_i, lon_i), e)
         if f.exists():
-            return np.load(f, mmap_mode="r")
+            return load_npy(f)
         if built:                                          # all sea, or no source has data: the skadi tile
             return None
         if self.builder is not None:
