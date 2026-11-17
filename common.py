@@ -50,7 +50,7 @@ DEFAULT_CONFIG = {
         "archive": True,          # add the first hours of every GFS run to your own climatology
         "archive_hours": 12,
         "min_days": 8,            # days of data a month / time-of-day slot needs before it is used
-        "ncep_prior": True,       # build the NOAA reanalysis climatology (the fallback) for each region
+        "ncep_prior": True,       # build the NOAA reanalysis climatology (the fallback) for each region, and the climate envelope
         "ncep_years": 10,         # ... averaged over the last N complete years (~600 MB download per year,
                                   # once; the window moves forward each March). 0 = NOAA's fixed
                                   # 1991-2020 long-term means (~2.1 GB, a couple of decades behind)
