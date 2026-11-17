@@ -16,6 +16,7 @@ purges just those answers:
     weather   /v1/path-profiles
     lightpol  /v1/light-pollution
     haze      /v1/haze-calibration
+    climate   /v1/climate-envelope
 
 The server purges by itself (watch(), from serve.py): it keeps what the terrain and areas were made from in
 <data_dir>/cdn-state.json, checks at start and every cdn.check_every_s, and when the terrain layers, the fine
@@ -47,7 +48,7 @@ from pathlib import Path
 
 log = logging.getLogger("cdn")
 
-TAGS = ("terrain", "areas", "weather", "lightpol", "haze")
+TAGS = ("terrain", "areas", "weather", "lightpol", "haze", "climate")
 API = "https://api.cloudflare.com/client/v4/zones/{zone}/purge_cache"
 
 

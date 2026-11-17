@@ -333,6 +333,13 @@ def after_fetch(cfg: dict, cycle: Cycle, prior_source_dir: Path | None = None) -
                 build_prior.build(cfg, missing, prior_source_dir)
         except Exception:
             log.exception("building the NOAA reanalysis climatology failed (will retry next run)")
+        try:
+            import climate_envelope                  # the same NOAA reanalysis, for /v1/climate-envelope
+            if not climate_envelope.envelope_path(cfg).exists():
+                log.info("building the climate envelope (website guardrails)")
+                climate_envelope.build(cfg, prior_source_dir)
+        except Exception:
+            log.exception("building the climate envelope failed (will retry next run)")
 
 
 def main(argv=None) -> int:

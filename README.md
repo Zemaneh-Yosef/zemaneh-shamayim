@@ -15,6 +15,7 @@ inputs that the ROYZmanim app (royzmanimwebsite) uses to correct for that:
 | `/v1/area` | the official municipality or neighbourhood containing a point |
 | `/v1/light-pollution` | sky brightness from the World Atlas, brought forward to today, for when the stars become visible |
 | `/v1/haze-calibration` | a factor correcting the CAMS haze forecast at a place, from NASA's AERONET measurements |
+| `/v1/climate-envelope` | the range of near-surface air a place's 5° cell has in each month (NOAA reanalysis), for the website's guardrails |
 | `/v1/terrain-tiles/{z}/{x}/{y}.png` | the same terrain as web-map tiles |
 | `/v1/cesium-terrain/layer.json`, `/{z}/{x}/{y}.terrain` | the same terrain in Cesium's format (quantized-mesh, with surface normals), for the website's 3D horizon view |
 | `/v1/status` | the live forecast cycle and how much climatology each region holds |
@@ -132,6 +133,7 @@ Then, as you need them:
 | `fetch_gfs.py` | hourly at :17 (timer); fetches a new GFS cycle when there is one (00Z, 12Z), then adds it to the climatology | `journalctl -u zmanim-sky-fetch` |
 | `fetch_gefs.py` | hourly at :40 (timer), only with `ensemble.enabled` | `journalctl -u zmanim-sky-gefs` |
 | `build_prior.py` | by the fetcher, when the NOAA reanalysis climatology is missing or its 10-year window moved (each March) | the fetcher's |
+| `climate_envelope.py` | by the fetcher, once (when `<data_dir>/climate-envelope.npz` is missing) | the fetcher's |
 | `backfill_gfs.py` | by hand, once (and again after upgrades that add climatology fields) | its own (`nohup`) |
 | `dem_layers.py build` / `build-fine`, `deploy/prebuild-fine.sh` | by hand, to prepare terrain ahead of requests | its own |
 | `build_areas.py`, `haze_calibration.py` | by hand, about once a year | its own |
@@ -303,7 +305,7 @@ second request, not `DYNAMIC`.
 
 **Purging.** Answers carry a `Cache-Tag` (Cloudflare strips it): `zsky-terrain` (horizons, terrain versions,
 terrain tiles, Cesium terrain), `zsky-areas` (`/v1/area` and `area=auto` answers), `zsky-weather`,
-`zsky-lightpol`, `zsky-haze`, and `zsky` on all of them. The API purges by itself: at start and every
+`zsky-lightpol`, `zsky-haze`, `zsky-climate`, and `zsky` on all of them. The API purges by itself: at start and every
 `cdn.check_every_s` (10 minutes) it compares what the terrain and areas are made from with
 `<data_dir>/cdn-state.json`, and purges `zsky-terrain` when the `terrain.layers` or `terrain.fine` sources, the
 horizon algorithm (an upgrade) or a merged tile's revision (`dem_layers.py build --force`) changed, and
@@ -313,7 +315,7 @@ horizon algorithm (an upgrade) or a merged tile's revision (`dem_layers.py build
 override. Without them a change is only logged ("CDN purge needed"); purge in the dashboard then. By hand:
 
 ```sh
-sudo -u zmanim-sky venv/bin/python cdn.py purge terrain        # or areas, weather, lightpol, haze; all
+sudo -u zmanim-sky venv/bin/python cdn.py purge terrain        # or areas, weather, lightpol, haze, climate; all
 sudo -u zmanim-sky venv/bin/python cdn.py purge --everything   # the whole zone, website included
 sudo -u zmanim-sky venv/bin/python cdn.py status
 ```
@@ -448,6 +450,16 @@ The website checks what it receives again (`atmosphere-guard.js` in the website'
 same physical limits per value, a path profile's levels against the hypsometric equation, temperature gradients
 no air sustains, haze outside 0–10, and a forecast more than 45 °C from the place's normal; what fails goes to
 the next source, and with none left the standard refraction model applies.
+
+The place's normal comes from the monthly normals the website downloads (Open-Meteo's ERA5, else NOAA's station
+normals). When neither arrives, `GET /v1/climate-envelope?lat=..&lon=..` (`climate_envelope.py`) is its reference:
+for the place's 5° cell and each month, the lowest and highest near-surface temperature in NOAA's 1991–2020 daily
+long-term means (4 times a day) over every 2.5° reanalysis point on or inside the cell, carried to sea level at
+6.5 K/km over the reanalysis terrain (`seaLevelC.min` / `.max`, `lapseKPerM`). An envelope rather than a normal, so
+a coarse cell never refuses real air in a valley or on a plateau inside it: the website carries it to the
+forecast's height and refuses only a value more than 45 °C outside the whole range (−50 °C in a New York July).
+It is built once by the fetcher (~70 MB from NOAA, deleted after; with `climatology.ncep_prior`) and answers
+anywhere on Earth; 503 until it has been built.
 
 ### Ensembles (`&ensemble=1`): typical outcomes and error bars
 
@@ -1169,6 +1181,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_fine_terrain.py` (rasterio) | near-range fine terrain on a synthetic 1/3″ source (a narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers), per-place versions and cache keys |
 | `test_areas.py` | build_areas.py, the lookup and `area=auto` (with and without `outline=1`) |
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
+| `test_climate_envelope.py` | the climate envelope on synthetic NOAA long-term means (each cell's range against the synthetic pattern, land carried to sea level, places without data, the endpoint's 200 / 400 / 404 / 503) |
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
 | `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (kept apart until the server has the data), the disk cache, `build` ahead of time (each level within its reach, out to the earth's curve, with parents) |

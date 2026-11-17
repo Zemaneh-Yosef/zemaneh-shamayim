@@ -8,6 +8,7 @@
     GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329[&outline=1]
     GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &bbox=S,W,N,E][&percentile=90][&year=2026]
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
+    GET /v1/climate-envelope?lat=40.71&lon=-74.01
     GET /v1/terrain-tiles/{z}/{x}/{y}.png   (Terrarium-encoded heights for the website's 3D horizon view)
     GET /v1/cesium-terrain/layer.json, /v1/cesium-terrain/{z}/{x}/{y}.terrain   (the same in Cesium's quantized-mesh)
     GET /v1/status
@@ -49,6 +50,10 @@ pixel in the area.
 AERONET's measured haze over CAMS's, estimated at the place from the stations by kriging (the network's
 average where none is near). Built by haze_calibration.py; 503 until it has run.
 
+/v1/climate-envelope returns the range of near-surface air the place's 5 degree cell has in each month (sea-level
+equivalent, from NOAA's 1991-2020 reanalysis): the website's guardrails refuse a forecast far outside it when the
+place's monthly normals did not download. Built by climate_envelope.py (fetch_gfs.py runs it once); 503 until then.
+
 /v1/terrain-tiles serves the ground the horizons are computed from as web-map tiles (terrain_tiles.py), so the
 website's 3D view shows the same terrain; 404 where the server doesn't have it (the view then uses AWS's tiles).
 
@@ -80,6 +85,7 @@ import numpy as np
 
 import areas
 import cdn
+import climate_envelope
 import climatology
 import dem_layers
 import haze_calibration
@@ -1084,6 +1090,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     _cal: tuple = (None, None)          # (mtime, data) of haze-calibration.json
+    _env: tuple = (None, None)          # (mtime, data) of climate-envelope.npz
 
     def haze_calibration(self) -> dict:
         path = haze_calibration.calibration_path(self.store.cfg)
@@ -1094,6 +1101,16 @@ class Handler(BaseHTTPRequestHandler):
         if Handler._cal[0] != mt:
             Handler._cal = (mt, json.loads(path.read_text()))
         return Handler._cal[1]
+
+    def climate_envelope(self) -> dict:
+        path = climate_envelope.envelope_path(self.store.cfg)
+        try:
+            mt = path.stat().st_mtime_ns
+        except OSError:
+            raise FileNotFoundError("no climate envelope yet (run climate_envelope.py)") from None
+        if Handler._env[0] != mt:
+            Handler._env = (mt, climate_envelope.load(path))
+        return Handler._env[1]
 
     def area_index(self) -> areas.AreaIndex:
         if Handler.areas is None:
@@ -1144,6 +1161,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("lat/lon out of range")
                 body = haze_calibration.calibration_at(self.haze_calibration(), lat, lon)
                 return self.send_json(200, body, cache_s=7 * 86400, tags=("haze",))
+            if url.path == "/v1/climate-envelope":
+                body = climate_envelope.at(self.climate_envelope(), float(q["lat"][0]), float(q["lon"][0]))
+                return self.send_json(200, body, cache_s=30 * 86400, tags=("climate",))
             if url.path == "/v1/area":
                 lat, lon = float(q["lat"][0]), float(q["lon"][0])
                 a = self.area_index().find(lat, lon)
