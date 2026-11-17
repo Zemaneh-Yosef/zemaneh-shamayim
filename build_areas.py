@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from areas import LEVEL_COARSE, LEVEL_LOCALITY, LEVEL_NEIGHBOURHOOD, SCHEMA, encode_polygons, half_diagonal_km
+from areas import LEVEL_COARSE, LEVEL_LOCALITY, LEVEL_NEIGHBOURHOOD, SCHEMA, half_diagonal_km, insert_area
 from common import load_config
 
 log = logging.getLogger("build_areas")
@@ -1124,15 +1124,9 @@ def write_country(con: sqlite3.Connection, country: str, units, tol_m: float, ca
             if dropped <= 20:
                 report.append(f"    dropped {u.name} ({u.id}): thinner than {tol_m:g} m")
             continue
-        s, w, nn, e = a["bbox"]
-        cur = con.execute("INSERT OR IGNORE INTO areas (id, country, name, kind, level, source, s, w, n, e, "
-                          "radius_km, polygons) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                          (a["id"], country, a["name"], a["kind"], a["level"], a["source"], s, w, nn, e,
-                           a["radiusKm"], encode_polygons(a["polygons"])))
-        if not cur.rowcount:
+        if not insert_area(con, a, country):
             dup += 1
             continue
-        con.execute("INSERT INTO areas_box (id, w, e, s, n) VALUES (?, ?, ?, ?, ?)", (cur.lastrowid, w, e, s, nn))
         n += 1
         over += a["radiusKm"] > cap_km
         kinds[a["kind"]] = kinds.get(a["kind"], 0) + 1
@@ -1247,6 +1241,10 @@ def build(args, cfg: dict, dest: Path) -> tuple[dict, list[str]]:
     finally:
         con.close()
     tmp.replace(dest)
+    old_json = dest.with_name("areas.json")             # what build_areas.py wrote before areas.sqlite
+    if old_json.exists():
+        old_json.unlink()
+        log.info("removed %s (replaced by %s)", old_json, dest.name)
     return meta, [line for c in plans for line in reports.get(c, [])]
 
 
@@ -1265,9 +1263,7 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
-    configured = cfg.get("areas", {}).get("file")
-    dest = Path(args.out or (configured if configured and not configured.endswith(".json") else
-                             Path(cfg["data_dir"]) / "areas.sqlite"))
+    dest = Path(args.out or cfg.get("areas", {}).get("file") or Path(cfg["data_dir"]) / "areas.sqlite")
     dest.parent.mkdir(parents=True, exist_ok=True)
     meta, report = build(args, cfg, dest)
     total = sum(c["areas"] for c in meta["countries"].values())

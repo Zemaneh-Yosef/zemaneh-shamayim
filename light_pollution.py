@@ -31,7 +31,7 @@ natural 0.174 mcd/m^2 + twilight), so an absolute error of 0.001 mcd/m^2 is at m
 pristine site), and far less where light pollution matters. In calc_time.py's nightfall, 1% of the
 artificial brightness moved the time by at most 7 s (3 small stars, Monsey, March; most cases 0 s).
 
-For an area (an official area from areas.json, or a box), every pixel whose centre lies inside it is
+For an area (an official area from areas.sqlite, or a box), every pixel whose centre lies inside it is
 read, and the value used is the `percentile` (default 90) of their brightness: a brighter sky means a
 later nightfall, so the 90th percentile is a time by which about 90% of the area has the stars - the
 same convention as the moonrise horizons (terrain.moon_percentile).

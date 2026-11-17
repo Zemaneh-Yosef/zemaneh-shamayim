@@ -935,23 +935,8 @@ def _worker_build(task: int, p: dict) -> tuple[bytes, bool, float | None]:
 
 
 def areas_path(cfg: dict) -> Path:
-    """areas.file, else <data_dir>/areas.sqlite - or the areas.json an older build_areas.py wrote, until then."""
-    if cfg.get("areas", {}).get("file"):
-        return Path(cfg["areas"]["file"])
-    new = Path(cfg["data_dir"]) / "areas.sqlite"
-    old = new.with_name("areas.json")
-    return old if old.exists() and not new.exists() else new
-
-
-def current_area_index(cfg: dict) -> areas.AreaIndex:
-    """Handler.areas, moved to areas.sqlite once a build has written it: a server started while only an
-    older areas.json existed switches by itself (areas_path is checked on every use, two stat calls)."""
-    path = areas_path(cfg)
-    if Handler.areas is None or Handler.areas.path != path:
-        if Handler.areas is not None:
-            log.info("official areas: now %s (was %s)", path, Handler.areas.path)
-        Handler.areas = areas.AreaIndex(path)
-    return Handler.areas
+    """areas.file, else <data_dir>/areas.sqlite (written by build_areas.py; read once it appears)."""
+    return Path(cfg.get("areas", {}).get("file") or Path(cfg["data_dir"]) / "areas.sqlite")
 
 
 def area_rule(q: dict) -> str | None:
@@ -1150,7 +1135,9 @@ class Handler(BaseHTTPRequestHandler):
         return Handler._env[1]
 
     def area_index(self) -> areas.AreaIndex:
-        return current_area_index(self.store.cfg)
+        if Handler.areas is None:
+            Handler.areas = areas.AreaIndex(areas_path(self.store.cfg))
+        return Handler.areas
 
     def do_OPTIONS(self):
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -1319,7 +1306,7 @@ def main(argv=None):
     srv = APIServer((cfg["api"]["host"], int(cfg["api"]["port"])), Handler, cfg["api"].get("max_threads", 64))
     log.info("listening on %s:%s", cfg["api"]["host"], cfg["api"]["port"])
     # once listening (a purged CDN asks again at once): terrain or areas changed since the last run -> purge them
-    cdn.watch(cfg, Handler.horizons, lambda: current_area_index(cfg))
+    cdn.watch(cfg, Handler.horizons, lambda: Handler.areas)
     srv.serve_forever()
 
 

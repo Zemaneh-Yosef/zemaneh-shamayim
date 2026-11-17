@@ -267,15 +267,15 @@ def check_correction(tmp: Path):
 
 def check_server(tmp: Path):
     jerusalem = {"id": "test:jlm", "name": "Test quarter", "kind": "neighborhood", "level": 30, "source": "test",
-                 "places": [], "bbox": [31.70, 35.10, 31.86, 35.30],
+                 "country": "ISR", "bbox": [31.70, 35.10, 31.86, 35.30],
                  "radiusKm": round(areas.half_diagonal_km([31.70, 35.10, 31.86, 35.30]), 2),
                  "polygons": [[[35.10, 31.70, 35.30, 31.72, 35.25, 31.86, 35.12, 31.80]]]}
     big = {**jerusalem, "id": "test:big", "name": "Big", "level": 10, "bbox": [29.0, 33.0, 34.0, 37.0],
            "radiusKm": round(areas.half_diagonal_km([29.0, 33.0, 34.0, 37.0]), 2),
            "polygons": [[[33.0, 29.0, 37.0, 29.0, 37.0, 34.0, 33.0, 34.0]]]}
-    (tmp / "areas.json").write_text(json.dumps({"built": "test", "areas": [jerusalem, big]}))
+    areas.write_areas(tmp / "areas.sqlite", [jerusalem, big], {"built": "test"})
     cfg_path = tmp / "srv.json"
-    cfg_path.write_text(json.dumps({"data_dir": str(tmp / "data"), "areas": {"file": str(tmp / "areas.json")},
+    cfg_path.write_text(json.dumps({"data_dir": str(tmp / "data"), "areas": {"file": str(tmp / "areas.sqlite")},
                                     "regions": [],
                                     "light_pollution": {"dir": str(tmp / "orig"), "file": "lp_{row}_{col}.tif",
                                                         "url": ""}}))
@@ -283,7 +283,7 @@ def check_server(tmp: Path):
     serve.Handler.store = serve.Store(cfg)
     serve.Handler.horizons = None
     serve.Handler.lightpol = lpm.LightPollution(cfg)
-    serve.Handler.areas = areas.AreaIndex(tmp / "areas.json")
+    serve.Handler.areas = areas.AreaIndex(tmp / "areas.sqlite")
     srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"

@@ -479,7 +479,7 @@ sudo -u zmanim-sky venv/bin/python build_areas.py --only USA --only ISR    # reb
 ```
 
 It writes `<data_dir>/areas.sqlite.tmp` beside the old file and swaps it in whole at the end (the server
-rereads it when it changes; until the first build an older `areas.json` is still used). Each country is
+rereads it when it changes, and deletes an `areas.json` from before). Each country is
 committed to the `.tmp` as it is done, so a build that is killed (out of memory, a reboot) and started again
 with the same countries and options goes on from the next country (`--restart` to start over). The big
 sources - geoBoundaries, TIGER, Statistics Canada - are read a feature at a time, so no country needs all its

@@ -19,7 +19,7 @@ pick a point's area:
 
 Polygons are stored like neighborhoods.js: a list of polygons, each a list of rings (outer ring first,
 then holes), each ring a flat [lon, lat, lon, lat, ...] list. The test is even-odd over all rings.
-An areas.json (the format before areas.sqlite: {"areas": [...]}) is still read. Standard library only.
+Standard library only.
 """
 from __future__ import annotations
 
@@ -42,7 +42,6 @@ CITY_RADIUS_KM = 13.0
 RULES = ("city", "finest")
 
 KM_PER_DEG = 111.19
-CELL_DEG = 0.25                      # grid index cell size (areas.json)
 DECODED_KEPT = 4096                  # areas kept decoded in memory (areas.sqlite)
 
 SCHEMA = """
@@ -124,10 +123,38 @@ def encode_polygons(polys) -> bytes:
     return zlib.compress(json.dumps(polys, separators=(",", ":")).encode(), 6)
 
 
+def insert_area(con: sqlite3.Connection, a: dict, country: str) -> bool:
+    """Add an area (as AreaIndex returns them) to an areas.sqlite; False if its id is already there."""
+    s, w, n, e = a["bbox"]
+    cur = con.execute("INSERT OR IGNORE INTO areas (id, country, name, kind, level, source, s, w, n, e, radius_km, "
+                      "polygons) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                      (a["id"], country, a["name"], a["kind"], a["level"], a["source"], s, w, n, e, a["radiusKm"],
+                       encode_polygons(a["polygons"])))
+    if not cur.rowcount:
+        return False
+    con.execute("INSERT INTO areas_box (id, w, e, s, n) VALUES (?, ?, ?, ?, ?)", (cur.lastrowid, w, e, s, n))
+    return True
+
+
+def write_areas(path: Path, area_list: list[dict], meta: dict | None = None) -> None:
+    """A new areas.sqlite holding these areas (each with its "country"): for tests and hand-made files."""
+    Path(path).unlink(missing_ok=True)
+    con = sqlite3.connect(path)
+    try:
+        con.executescript(SCHEMA)
+        for a in area_list:
+            insert_area(con, a, a.get("country", ""))
+        con.executemany("INSERT INTO meta (key, value) VALUES (?, ?)",
+                        [(k, json.dumps(v)) for k, v in (meta or {}).items()])
+        con.commit()
+    finally:
+        con.close()
+
+
 class AreaIndex:
-    """areas.sqlite (or an areas.json), reread when the file changes. An areas.sqlite stays on disk and is read
-    through its R-tree (a connection per lookup, so a rebuilt file can be swapped in at any time), the areas a
-    lookup needs decoded once and kept; an areas.json is held in memory."""
+    """areas.sqlite, reread when the file changes (or appears). It stays on disk and is read through its R-tree
+    (a connection per lookup, so a rebuilt file can be swapped in at any time), the areas a lookup needs decoded
+    once and kept."""
 
     def __init__(self, path: Path):
         self.path = Path(path)
@@ -136,18 +163,13 @@ class AreaIndex:
         self.meta: dict = {}
         self.count = 0
         self.decoded: OrderedDict[int, dict] = OrderedDict()
-        self.areas: list[dict] = []                # areas.json only
-        self.grid: dict[tuple[int, int], list[int]] = {}
-
-    def is_sqlite(self) -> bool:
-        return self.path.suffix != ".json"
 
     def refresh(self) -> None:
         try:
             st = self.path.stat()
         except FileNotFoundError:
             with self.lock:
-                self.stamp, self.meta, self.count, self.areas, self.grid = None, {}, 0, [], {}
+                self.stamp, self.meta, self.count = None, {}, 0
                 self.decoded.clear()
             return
         stamp = (st.st_mtime_ns, st.st_size)
@@ -156,26 +178,14 @@ class AreaIndex:
         with self.lock:
             if stamp == self.stamp:
                 return
-            if self.is_sqlite():
-                con = self.connect()
-                try:
-                    meta = {k: json.loads(v) for k, v in con.execute("SELECT key, value FROM meta")}
-                    count = con.execute("SELECT count(*) FROM areas").fetchone()[0]
-                finally:
-                    con.close()
-                self.meta, self.count = meta, count
-                self.decoded.clear()
-            else:
-                data = json.loads(self.path.read_text(encoding="utf-8"))
-                grid: dict[tuple[int, int], list[int]] = {}
-                for i, a in enumerate(data["areas"]):
-                    s, w, n, e = a["bbox"]
-                    for gy in range(math.floor(s / CELL_DEG), math.floor(n / CELL_DEG) + 1):
-                        for gx in range(math.floor(w / CELL_DEG), math.floor(e / CELL_DEG) + 1):
-                            grid.setdefault((gy, gx), []).append(i)
-                self.areas, self.grid, self.count = data["areas"], grid, len(data["areas"])
-                self.meta = {k: v for k, v in data.items() if k not in ("areas", "unresolved")}
-            self.stamp = stamp
+            con = self.connect()
+            try:
+                meta = {k: json.loads(v) for k, v in con.execute("SELECT key, value FROM meta")}
+                count = con.execute("SELECT count(*) FROM areas").fetchone()[0]
+            finally:
+                con.close()
+            self.meta, self.count, self.stamp = meta, count, stamp
+            self.decoded.clear()
 
     def connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path.resolve().as_uri() + "?mode=ro", uri=True, check_same_thread=False)
@@ -185,9 +195,6 @@ class AreaIndex:
         self.refresh()
         if self.stamp is None:
             return []
-        if not self.is_sqlite():
-            cell = self.grid.get((math.floor(lat / CELL_DEG), math.floor(lon / CELL_DEG)), ())
-            return [a for a in (self.areas[i] for i in cell) if area_contains(a, lat, lon)]
         con = self.connect()
         try:
             rows = con.execute("SELECT id FROM areas_box WHERE w <= ? AND e >= ? AND s <= ? AND n >= ?",

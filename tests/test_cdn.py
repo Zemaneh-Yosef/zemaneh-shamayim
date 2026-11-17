@@ -7,7 +7,7 @@
 2. a horizon over the API: a full one kept 30 days at the CDN, a partial one (a fine-terrain chunk failed) 10 minutes
 3. purge requests as Cloudflare's API takes them (tags, everything), and refusals reported
 4. the state check: nothing purged on the first run, then only what changed (terrain on a tile revision, areas on a
-   new areas.json); a refused purge kept for the next check; without credentials, logged and moved on
+   new areas.sqlite); a refused purge kept for the next check; without credentials, logged and moved on
 """
 from __future__ import annotations
 

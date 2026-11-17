@@ -20,7 +20,7 @@ purges just those answers:
 
 The server purges by itself (watch(), from serve.py): it keeps what the terrain and areas were made from in
 <data_dir>/cdn-state.json, checks at start and every cdn.check_every_s, and when the terrain layers, the fine
-terrain, the horizon algorithm, a merged tile's revision (dem_layers.py build --force) or areas.json changed,
+terrain, the horizon algorithm, a merged tile's revision (dem_layers.py build --force) or areas.sqlite changed,
 purges those tags at Cloudflare. By hand:
 
     python3 cdn.py purge terrain [areas ...]      # the answers made from these
