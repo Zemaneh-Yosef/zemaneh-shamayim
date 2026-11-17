@@ -178,7 +178,7 @@ DEFAULT_CONFIG = {
         # instead of the weather model's smoothed terrain (climatology.follow_terrain). Only columns within
         # max_km (beyond that the ray is far above the ground) and over land; ground_radius_m: the ground is
         # the mean of the elevation data within this distance of the column's point. OFF: on Rabbi Druk's
-        # 1993-96 sunrises with ERA5 it made the fit worse (rms 15.2 s against 13.5 s; README).
+        # 1993-96 sunrises with ERA5 it made the fit worse (rms 15.2 s against 13.5 s; docs/validation.md).
         "follow_terrain": {"enabled": False, "max_km": 150.0, "full_m": 500.0, "fade_m": 2000.0,
                            "ground_radius_m": 1000.0},
         "max_days": 400,          # longest date range one request may ask for

@@ -23,7 +23,7 @@ winter the 05-06Z launch just after sunrise, in summer the 23Z one before it, as
 The smoothed terrain is a local quadratic fit (Gaussian weights, --sigma-km, default 3) of the elevation
 tiles along the Sun's azimuth: unlike a plain average it keeps the trend up to the observer (Armon HaNatziv:
 738 m, the Dead Sea -430 m, Moab ~750 m, as Keller & Hall's Fig. 12). Beyond --shift-km (80) the offset is
-held. Result at Armon HaNatziv (README, "Checking against observed sunrises"): every shifted version was
+held. Result at Armon HaNatziv (docs/validation.md): every shifted version was
 worse than the raw sounding, which was worse than ERA5.
 """
 from __future__ import annotations
