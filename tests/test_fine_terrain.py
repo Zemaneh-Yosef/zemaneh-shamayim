@@ -58,7 +58,7 @@ def main():
         print(("PASS " if cond else "FAIL ") + msg)
         ok &= bool(cond)
 
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:   # GDAL may still hold the source .tif (Windows)
         tmp = Path(d)
         tiles_dir = write_sources(tmp)
         fine_cfg = {"max_km": 10.0, "step_arcsec": 1 / 3, "auto_build": True,

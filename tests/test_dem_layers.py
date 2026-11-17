@@ -100,7 +100,7 @@ def main():
         print(("PASS " if cond else "FAIL ") + msg)
         ok &= bool(cond)
 
-    with tempfile.TemporaryDirectory() as d:
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:   # GDAL may still hold the source .tif (Windows)
         tmp = Path(d)
         tiles_dir = write_sources(tmp)
         layers = {"dir": str(tmp / "layers"), "auto_build": True, "sources": [

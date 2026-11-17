@@ -36,7 +36,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common import Cycle, field_names, write_json_atomic
+from common import Cycle, field_names, load_npy, write_json_atomic
 
 G0, R_DRY = 9.80665, 287.05
 DEPRESSION_M = -20.0                     # as terrain.DEPRESSION_M: below this the low ground is real
@@ -64,7 +64,7 @@ class ClimGrid:
         self.levels_mb = self.meta["levels_mb"]
         self.slot_hours = self.meta["slot_hours"]          # UTC hour at the centre of each slot
         self.near_surface_agl = self.meta.get("near_surface_agl", 2.0)
-        self.values = np.load(path / "values.npy", mmap_mode="r")
+        self.values = load_npy(path / "values.npy")
         cpath = path / "counts.npy"
         self.counts = np.load(cpath) if cpath.exists() else None   # None: values are means
         self.stamp = self.version(path)

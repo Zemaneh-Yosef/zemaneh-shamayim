@@ -37,7 +37,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common import Cycle, cycle_field_names, load_config, single_run, write_json_atomic
+from common import Cycle, cycle_field_names, load_config, replace_dir, single_run, write_json_atomic
 from fetch_gfs import decode, download, latest_cycles
 
 log = logging.getLogger("fetch_gefs")
@@ -129,9 +129,7 @@ def fetch_cycle(cfg: dict, cycle: Cycle, source_dir: Path | None = None) -> bool
     (work / "complete").write_text("")
     write_json_atomic(work / "cycle.json", {"cycle": cycle.id, "hours": hrs, "members": mems,
                                             "regions": [r["name"] for r in cfg["regions"]]})
-    if final.exists():
-        shutil.rmtree(final)
-    work.rename(final)
+    replace_dir(work, final)
     write_json_atomic(root / "current.json", {"cycle": cycle.id, "published": time.time()})
     done = sorted(p for p in root.iterdir() if p.is_dir() and (p / "complete").exists())
     for p in done[:-int(cfg["ensemble"].get("cycles_to_keep", 1))]:
