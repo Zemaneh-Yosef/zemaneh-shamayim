@@ -1,47 +1,45 @@
 #!/usr/bin/env python3
-"""Build <data_dir>/areas.json: the official areas covering every place in the Chai Tables list.
+"""Build <data_dir>/areas.sqlite: the official areas of the whole world, for area=auto (areas.py).
 
-    venv/bin/python build_areas.py [--config config.json] [--only USA --only France] [--chai FILE|URL]
+    venv/bin/python build_areas.py [--config config.json] [--only USA --only FRA] [--replace]
 
-Each place in chaiTable.json (a metro-area box, or a single point) becomes the official units it
-covers - never a box drawn by hand:
-  * a box:   every official unit with at least a quarter of its area inside the box, or whose part inside
-             covers 3% of the box (or, failing both, the unit around the box centre); units completely
-             covered by finer ones (a city by its neighbourhoods) are dropped
-  * a point: the finest official unit containing it
-  * nothing: listed as unresolved until areas_overrides.json gives it names, a point or a box
-
-Official units, finest first (serve.py gives a point the finest area containing it):
-  USA      NYC Planning Neighborhood Tabulation Areas, LA Times "Mapping L.A." neighbourhoods,
-           Census TIGER places (cities, villages, CDPs), then county subdivisions (towns) as fallback
-  Israel   the Central Bureau of Statistics' locality outlines (statistical areas 2022), then Ministry of
-           Interior municipal jurisdictions and other locality outlines (OpenStreetMap, which
-           carries the Ministry's boundaries; one download of Geofabrik's daily Israel and Palestine
-           extract, read with pyosmium). For the places listed under "Eretz Yisrael (Neighborhoods)":
-           the Central Bureau of Statistics' sub-quarters (statistical areas 2022; a city without
-           sub-quarters gets its statistical areas). Regional councils are never used as an area.
-  Canada   the cities' own neighbourhood layers (Toronto neighbourhoods, Montreal arrondissements, Ottawa
+Every country gets its official units, and nothing else decides which: no list of places. Per country
+(ISO 3166 alpha-3 code), finest first:
+  USA      NYC Planning Neighborhood Tabulation Areas, LA Times "Mapping L.A." neighbourhoods, the big cities'
+           own neighbourhood layers (US_CITIES), Census TIGER places (cities, villages, CDPs), then county
+           subdivisions (towns) - every state and territory (Puerto Rico, Guam, ... too)
+  ISR      the Central Bureau of Statistics' sub-quarters (statistical areas 2022; cities of 40,000+; a few
+           cities without sub-quarters get their statistical areas), its locality outlines, then Ministry of
+           Interior municipal jurisdictions and other locality outlines (OpenStreetMap, which carries the
+           Ministry's boundaries; one download of Geofabrik's daily Israel and Palestine extract, read with
+           pyosmium). Regional councils are never an area.
+  CAN      the cities' own neighbourhood layers (Toronto neighbourhoods, Montreal arrondissements, Ottawa
            ONS Gen 3, Hamilton planning units, Halifax communities, Calgary community districts, Edmonton
            and Winnipeg neighbourhoods), then Statistics Canada 2021 census subdivisions (municipalities)
-  others   the municipal level of geoBoundaries (national statistics / mapping agencies; see PLANS)
-A source can be replaced with a local file (e.g. the CBS localities layer) via --sources.
+  others   geoBoundaries (national statistics / mapping agencies): the municipal level, and where there is one
+           a finer level inside it (wards, sub-municipalities, cadastral areas...) as neighbourhoods
+           (GB_LEVELS; countries it does not list follow default_levels)
+A country's plan can be replaced with local files via --sources.
 
-Downloads are cached in <data_dir>/area-sources (delete a file there to fetch it again).
+Settlements get a level below LEVEL_NEIGHBOURHOOD, sub-city units LEVEL_NEIGHBOURHOOD: areas.py picks a
+point's area from them by rule (a city up to Jerusalem's size whole, or the finest unit).
+
+Downloads are cached in <data_dir>/area-sources (delete a file there to fetch it again). The output is
+written beside the old file and swapped in whole; a country whose sources failed keeps the areas it had.
 Needs pyshp (Census shapefiles) and osmium (pyosmium, the OpenStreetMap extract).
 """
 from __future__ import annotations
 
 import argparse
-import difflib
 import io
 import json
 import logging
 import math
-import random
 import re
+import shutil
+import sqlite3
 import sys
 import time
-import unicodedata
 import urllib.parse
 import urllib.request
 import zipfile
@@ -49,14 +47,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from areas import LEVEL_COARSE, LEVEL_LOCALITY, LEVEL_NEIGHBOURHOOD, half_diagonal_km
-from common import HERE, load_config
+from areas import LEVEL_COARSE, LEVEL_LOCALITY, LEVEL_NEIGHBOURHOOD, SCHEMA, encode_polygons, half_diagonal_km
+from common import load_config
 
 log = logging.getLogger("build_areas")
 
-# The site dropped chaiTable.json on 2026-10-15 (8e4a99f); this is the last version it had.
-CHAI_URL = ("https://raw.githubusercontent.com/Zemaneh-Yosef/royzmanimwebsite/"
-            "2ad093b8c5f95aaca8bc608da09f09544a941a39/_data/chaiTable.json")
+GB_META_URL = "https://www.geoboundaries.org/api/current/gbOpen/ALL/ALL/"   # every boundary file's metadata
+
 GB_URL = ("https://media.githubusercontent.com/media/wmgeolab/geoBoundaries/main/releaseData/gbOpen/"
           "{iso}/ADM{adm}/geoBoundaries-{iso}-ADM{adm}_simplified.geojson")
 TIGER_URL = "https://www2.census.gov/geo/tiger/TIGER{year}/{layer_uc}/tl_{year}_{fips}_{layer}.zip"
@@ -66,8 +63,8 @@ LA_TIMES_URL = ("https://raw.githubusercontent.com/codeforgermany/click_that_hoo
 CBS_STAT_URL = ("https://services8.arcgis.com/JcXY3lLZni6BK4El/arcgis/rest/services/"
                 "statistical_areas_2022/FeatureServer/0/query")     # Israel CBS statistical areas 2022
 CBS_PAGE = 2000                                   # the service's maxRecordCount
-# the "Eretz Yisrael (Neighborhoods)" cities: Jerusalem, Haifa, Beit Shemesh, Tiberias, Safed (CBS codes);
-# where a city has no sub-quarters (only cities of 40,000+ do), its statistical areas are used instead
+# cities without sub-quarters whose statistical areas are their neighbourhoods (CBS codes): Jerusalem,
+# Haifa, Beit Shemesh, Tiberias, Safed - only cities of 40,000+ have sub-quarters
 CBS_HOOD_CITIES = [3000, 4000, 2610, 6700, 8000]
 GEOFABRIK_URL = "https://download.geofabrik.de/asia/israel-and-palestine-latest.osm.pbf"   # daily, ~150 MB
 
@@ -76,7 +73,6 @@ GEOFABRIK_URL = "https://download.geofabrik.de/asia/israel-and-palestine-latest.
 # reprojected here. Open Government Licence - Canada. (Its ArcGIS query service is not reliable enough.)
 STATCAN_CSD_URL = ("https://www12.statcan.gc.ca/census-recensement/2021/geo/sip-pis/boundary-limites/"
                    "files-fichiers/lcsd000b21a_e.zip")
-STATCAN_MARGIN_DEG = (0.1, 0.15)    # CSDs within ~10 km of a place's box are kept (lat, lon)
 CA_PROVINCES = {"10": "NL", "11": "PE", "12": "NS", "13": "NB", "24": "QC", "35": "ON", "46": "MB",
                 "47": "SK", "48": "AB", "59": "BC", "60": "YT", "61": "NT", "62": "NU"}
 CSD_TYPES = {"CY": "city", "C": "city", "T": "town", "TV": "town", "VL": "village", "V": "ville",
@@ -100,11 +96,6 @@ TORONTO_URL = ("https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/fc443770
                "resource/0719053b-28b7-48ea-b863-068823a93aaa/download/neighbourhoods-4326.geojson")
 MONTREAL_URL = ("https://donnees.montreal.ca/dataset/9797a946-9da8-41ec-8815-f6b276dec7e9/resource/"
                 "e18bfd07-edc8-4ce8-8a5a-3b617662a794/download/limites-administratives-agglomeration.geojson")
-
-MIN_SHARE = 0.25            # a unit belongs to a place's box if this share of it lies inside the box,
-MIN_BOX_SHARE = 0.03        # or if its part inside covers this share of the box (big units at the edge)
-POINT_KM = 0.3              # boxes smaller than this (centre to corner) are points
-BIG_BOX_KM = 60.0           # chaiTable boxes bigger than this are flagged in the report
 
 
 # Big US cities (Census places over, near or well into terrain.max_area_radius_km) and their own layers
@@ -145,19 +136,11 @@ US_CITIES = [
 ]
 
 
-def gb(iso, adm, kind):
-    return {"type": "geoboundaries", "iso": iso, "adm": adm, "kind": kind}
-
-
-# Official units per chaiTable country, finest first. "level" defaults per type.
-PLANS: dict[str, list[dict]] = {
-    "Argentina": [gb("ARG", 2, "department")],          # in Buenos Aires city: the 15 comunas
-    "Australia": [gb("AUS", 2, "local government area")],
-    "Austria": [gb("AUT", 3, "municipality")],
-    "Belgium": [gb("BEL", 4, "municipality")],
-    "Brazil": [gb("BRA", 2, "municipality")],
-    "Bulgaria": [gb("BGR", 2, "municipality")],
-    "Canada": [                                          # city neighbourhoods, then StatCan municipalities
+# The countries with plans of their own, finest first ("level" defaults per type)
+COUNTRY_PLANS: dict[str, list[dict]] = {
+    "USA": [{"type": "nyc-nta"}, {"type": "la-times"}, *US_CITIES,
+            {"type": "tiger", "layer": "place"}, {"type": "tiger", "layer": "cousub"}],
+    "CAN": [                                          # city neighbourhoods, then StatCan municipalities
         {"type": "city", "key": "ca-tor", "url": TORONTO_URL, "id_fields": ["AREA_SHORT_CODE", "AREA_ID"],
          "name_fields": ["AREA_NAME"], "name_suffix": ", Toronto", "kind": "neighbourhood",
          "source": "City of Toronto, Neighbourhoods (158) (Open Government Licence - Toronto)"},
@@ -188,36 +171,95 @@ PLANS: dict[str, list[dict]] = {
          "source": "City of Winnipeg, Neighbourhoods (OpenData Licence - City of Winnipeg)"},
         {"type": "statcan-csd"},
     ],
-    "Chile": [gb("CHL", 3, "commune")],
-    "China": [],                                         # Hong Kong: no district layer available
-    "Colombia": [gb("COL", 2, "municipality")],
-    "Czech Republic": [gb("CZE", 3, "municipality")],
-    "Denmark": [gb("DNK", 2, "municipality")],
-    "France": [gb("FRA", 5, "commune")],                 # Paris, Lyon, Marseille: arrondissements
-    "Germany": [gb("DEU", 3, "district / independent city")],
-    "Greece": [gb("GRC", 3, "municipality")],
-    "Hungary": [gb("HUN", 3, "municipality")],           # Budapest: districts
-    "Italy": [gb("ITA", 4, "comune")],
-    "Mexico": [gb("MEX", 2, "municipality")],
-    "Netherlands": [gb("NLD", 2, "municipality")],
-    "Panama": [gb("PAN", 3, "corregimiento")],
-    "Poland": [gb("POL", 3, "gmina")],
-    "Romania": [gb("ROU", 2, "municipality")],
-    "Russia": [gb("RUS", 2, "district")],
-    "South-Africa": [gb("ZAF", 4, "ward")],              # local municipalities are metro-sized
-    "Spain": [gb("ESP", 3, "municipality")],
-    "Switzerland": [gb("CHE", 3, "municipality")],
-    "Turkey": [gb("TUR", 2, "district")],
-    "UK and Ireland": [gb("GBR", 3, "local authority district"), gb("IRL", 2, "local electoral area"),
-                       gb("GIB", 0, "territory")],         # Gibraltar: one unit, not part of GBR
-    "Ukraine": [gb("UKR", 3, "hromada / council")],
-    "Uruguay": [gb("URY", 2, "municipality")],
-    "Venezuela": [gb("VEN", 2, "municipality")],
-    "USA": [{"type": "nyc-nta"}, {"type": "la-times"}, *US_CITIES,
-            {"type": "tiger", "layer": "place"}, {"type": "tiger", "layer": "cousub"}],
-    "Eretz Yisrael (Cities)": [{"type": "cbs-localities"}, {"type": "israel-osm"}],
-    "Eretz Yisrael (Neighborhoods)": [{"type": "cbs-subquarters"}, {"type": "cbs-localities"}, {"type": "israel-osm"}],
+    "ISR": [{"type": "cbs-subquarters"}, {"type": "cbs-localities"}, {"type": "israel-osm"}],
 }
+COVERED_BY = {"PRI": "USA", "GUM": "USA", "VIR": "USA", "ASM": "USA", "MNP": "USA", "UMI": "USA"}   # TIGER has them
+
+# geoBoundaries levels: (municipal level, a finer level inside it or None, what the municipal units are).
+# Countries not listed follow default_levels. Listed: every country chosen by hand before (the kinds are
+# theirs), and where the rule picks wrong - India's villages are its settlements (its blocks are 15 km
+# groups of them); Austria's, Czechia's and Slovakia's finest level is cadastral areas inside municipalities;
+# Rwanda's sectors are its municipal level.
+GB_LEVELS: dict[str, tuple[int, int | None, str | None]] = {
+    "ARG": (2, None, "department"),                     # in Buenos Aires city: the 15 comunas
+    "AUS": (2, None, "local government area"),
+    "AUT": (3, 4, "municipality"),
+    "BEL": (4, None, "municipality"),
+    "BGR": (2, None, "municipality"),
+    "BRA": (2, None, "municipality"),
+    "BRN": (2, None, "mukim"),
+    "CAF": (3, 5, "municipality"),
+    "CHE": (3, None, "municipality"),
+    "CHL": (3, None, "commune"),
+    "COL": (2, None, "municipality"),
+    "CZE": (3, 4, "municipality"),
+    "DEU": (3, None, "district / independent city"),
+    "DNK": (2, None, "municipality"),
+    "ESP": (3, None, "municipality"),
+    "FJI": (3, None, "tikina"),                         # its finest level is census enumeration areas
+    "FRA": (5, None, "commune"),                        # Paris, Lyon, Marseille: arrondissements
+    "GBR": (3, None, "local authority district"),
+    "GRC": (3, None, "municipality"),
+    "HUN": (3, None, "municipality"),                   # Budapest: districts
+    "IND": (5, None, "village / town"),
+    "IRL": (2, None, "local electoral area"),
+    "ITA": (4, None, "comune"),
+    "JAM": (1, 2, "parish"),
+    "MEX": (2, None, "municipality"),
+    "NLD": (2, None, "municipality"),
+    "PAN": (3, None, "corregimiento"),
+    "POL": (3, None, "gmina"),
+    "ROU": (2, None, "municipality"),
+    "RUS": (2, None, "district"),
+    "RWA": (3, 4, "sector"),
+    "SVK": (3, 4, "municipality"),
+    "TUR": (2, None, "district"),
+    "UKR": (3, None, "hromada / council"),
+    "URY": (2, None, "municipality"),
+    "VEN": (2, None, "municipality"),
+    "ZAF": (3, 4, "local municipality"),                # wards inside the metros
+}
+# a finest level named like these is inside the municipalities: the level above it is the municipal one
+SUB_MUNICIPAL = re.compile(r"village|ward|cell|colline|fokontany|grama|enumeration|barrio|quartier|^communit|"
+                           r"submunic|freguesia|hamlet|mukim|dehestan|union council", re.I)
+
+
+def gb(iso, adm, kind, level=LEVEL_LOCALITY, source=None, url=None):
+    return {"type": "geoboundaries", "iso": iso, "adm": adm, "kind": kind, "level": level,
+            **({"source": source} if source else {}), **({"url": url} if url else {})}
+
+
+def gb_name(rec: dict | None, adm: int) -> str:
+    """What a level's units are called (geoBoundaries' boundaryCanonical), or "ADM<n> unit"."""
+    c = str((rec or {}).get("boundaryCanonical") or "").strip()
+    return c if c and c.lower() not in ("unknown", "gbopen") and not c.upper().startswith("ADM") else f"ADM{adm} unit"
+
+
+def default_levels(levels: dict[int, dict]) -> tuple[int, int | None]:
+    """The finest level as the municipal one - unless it is named like a unit inside municipalities (wards,
+    villages, cells...): then the level above it, with the finest as its neighbourhoods."""
+    have = sorted(levels) or [0]
+    fin = have[-1]
+    coarser = [a for a in have if 0 < a < fin]
+    if coarser and SUB_MUNICIPAL.search(gb_name(levels.get(fin), fin)):
+        return coarser[-1], fin
+    return fin, None
+
+
+def gb_plan(iso: str, levels: dict[int, dict]) -> list[dict]:
+    """A country's geoBoundaries sources; levels = {adm: its metadata record} (empty: none known)."""
+    muni, hood, kind = GB_LEVELS.get(iso) or (*default_levels(levels), None)
+
+    def spec(adm, kind, level):
+        rec = levels.get(adm) or {}
+        src = rec.get("boundarySource")
+        src = f"{src} (via geoBoundaries; {rec.get('boundaryLicense') or 'see geoBoundaries'})" if src else None
+        return gb(iso, adm, kind or gb_name(rec, adm), level, src, rec.get("simplifiedGeometryGeoJSON"))
+
+    out = [spec(muni, kind, LEVEL_LOCALITY)]
+    if hood is not None:
+        out.append(spec(hood, None, LEVEL_NEIGHBOURHOOD))
+    return out
 
 
 # ---------------------------------------------------------------- geometry
@@ -288,71 +330,6 @@ def unit_contains(u: Unit, lat, lon) -> bool:
     return False
 
 
-def ring_area(r) -> float:
-    """Planar area in square degrees (signed)."""
-    a = 0.0
-    for i in range(len(r) - 1):
-        a += r[i][0] * r[i + 1][1] - r[i + 1][0] * r[i][1]
-    return a / 2
-
-
-def unit_area(u: Unit) -> float:
-    return sum(abs(ring_area(p[0])) - sum(abs(ring_area(h)) for h in p[1:]) for p in u.polys)
-
-
-def clip_ring(r, box):
-    """Sutherland-Hodgman clip of a ring to (south, west, north, east)."""
-    s, w, n, e = box
-    edges = [(lambda p: p[0] >= w, lambda a, b: (w, a[1] + (b[1] - a[1]) * (w - a[0]) / (b[0] - a[0]))),
-             (lambda p: p[0] <= e, lambda a, b: (e, a[1] + (b[1] - a[1]) * (e - a[0]) / (b[0] - a[0]))),
-             (lambda p: p[1] >= s, lambda a, b: (a[0] + (b[0] - a[0]) * (s - a[1]) / (b[1] - a[1]), s)),
-             (lambda p: p[1] <= n, lambda a, b: (a[0] + (b[0] - a[0]) * (n - a[1]) / (b[1] - a[1]), n))]
-    pts = list(r[:-1]) if r and r[0] == r[-1] else list(r)
-    for inside, cut in edges:
-        if not pts:
-            break
-        out = []
-        prev = pts[-1]
-        for cur in pts:
-            if inside(cur):
-                if not inside(prev):
-                    out.append(cut(prev, cur))
-                out.append(cur)
-            elif inside(prev):
-                out.append(cut(prev, cur))
-            prev = cur
-        pts = out
-    return pts + pts[:1] if pts else []
-
-
-def share_inside(u: Unit, box) -> float:
-    total = unit_area(u)
-    if total <= 0:
-        return 0.0
-    s, w, n, e = box
-    us, uw, un, ue = u.bbox
-    if us >= s and un <= n and uw >= w and ue <= e:
-        return 1.0
-    inside = 0.0
-    for p in u.polys:
-        inside += abs(ring_area(clip_ring(p[0], box)))
-        inside -= sum(abs(ring_area(clip_ring(h, box))) for h in p[1:])
-    return max(0.0, inside / total)
-
-
-def sample_points(u: Unit, k: int = 24, seed: int = 0):
-    """Up to k points inside the unit (for the coverage test)."""
-    rnd = random.Random(f"{u.id}/{seed}")
-    s, w, n, e = u.bbox
-    pts = []
-    for _ in range(k * 40):
-        lat, lon = rnd.uniform(s, n), rnd.uniform(w, e)
-        if unit_contains(u, lat, lon):
-            pts.append((lat, lon))
-            if len(pts) == k:
-                break
-    return pts
-
 
 def simplify_ring(r, tol_m: float):
     """Douglas-Peucker in local metres; keeps the ring closed. None if it collapses."""
@@ -393,17 +370,6 @@ def simplify_ring(r, tol_m: float):
 
 def flat(r):
     return [round(v, 5) for x, y in r for v in (x, y)]
-
-
-def norm_name(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s or "").encode("ascii", "ignore").decode().lower()
-    s = re.sub(r"\b(village|city|town|borough|cdp|township|municipality|comune|commune)\b", "", s)
-    for a, b in (("kiriat", "kiryat"), ("tz", "z"), ("kh", "h"), ("ch", "h"), ("ph", "f"), ("ee", "i"),
-                 ("ei", "e"), ("ey", "e"), ("ah ", "a "), ("eh ", "e ")):
-        s = s.replace(a, b)
-    s = re.sub(r"ah$|eh$", "a", s.strip())
-    s = re.sub(r"[^a-z0-9]", "", s)
-    return re.sub(r"(.)\1+", r"\1", s)
 
 
 # ---------------------------------------------------------------- downloads
@@ -490,6 +456,50 @@ def read_geojson(path: Path) -> list[dict]:
     return json.loads(path.read_text(encoding="utf-8"))["features"]
 
 
+def iter_geojson_features(path: Path, chunk: int = 1 << 23):
+    """A FeatureCollection's features one at a time, never the whole file in memory: geoBoundaries' biggest
+    file (India's 650,000 villages) is ~470 MB, which json.loads would make several GB of objects."""
+    dec = json.JSONDecoder()
+    with open(path, encoding="utf-8") as f:
+        buf, i = "", 0
+
+        def more() -> bool:
+            nonlocal buf, i
+            got = f.read(chunk)
+            buf, i = buf[i:] + got, 0
+            return bool(got)
+
+        while (k := buf.find('"features"', i)) < 0 or buf.find("[", k) < 0:
+            if not more():
+                raise ValueError(f"{path.name}: no features")
+        i = buf.index("[", buf.find('"features"', i)) + 1
+        while True:
+            while i < len(buf) and buf[i] in " \t\r\n,":
+                i += 1
+            if i >= len(buf):
+                if not more():
+                    raise ValueError(f"{path.name}: ends inside its features")
+                continue
+            if buf[i] == "]":
+                return
+            try:
+                obj, j = dec.raw_decode(buf, i)
+            except json.JSONDecodeError:
+                if not more():                     # a feature cut off by the end of what was read
+                    raise
+                continue
+            yield obj
+            i = j
+            if i > chunk:
+                buf, i = buf[i:], 0
+
+
+def looks_whole_json(body: bytes) -> None:
+    """A cheap check that a download is a whole JSON object (a big one is never parsed all at once)."""
+    if not body.lstrip()[:1] == b"{" or not body.rstrip()[-1:] == b"}":
+        raise ValueError("not a whole JSON object")
+
+
 def read_shapefile(path: Path) -> list[dict]:
     """Features (GeoJSON-like) from a zipped or plain shapefile, in its own lon/lat coordinates."""
     import shapefile                                            # pyshp
@@ -539,9 +549,10 @@ def fix_text(s: str) -> str:
     return s
 
 
-def units_from_features(feats, *, key, id_keys, name_keys, kind, level, source, name_suffix="", alt_keys=()):
+def units_from_features(feats, *, key, id_keys, name_keys, kind, level, source, name_suffix="", alt_keys=(),
+                        index=0):
     out = []
-    for i, f in enumerate(feats):
+    for i, f in enumerate(feats, index):
         polys = geojson_polys(f.get("geometry"))
         if not polys:
             continue
@@ -559,27 +570,38 @@ class Sources:
         self.cfg = cfg
         self.cache: dict[str, list[Unit]] = {}
 
-    def units(self, spec: dict, boxes: list) -> list[Unit]:
-        """All units of one source; boxes = the places' boxes (used to pick US states)."""
+    def stream(self, spec: dict):
+        """One source's units, as an iterable: geoBoundaries' read a feature at a time, the others whole."""
+        if spec["type"] == "geoboundaries":
+            return self.geoboundaries(spec)
+        return self.units(spec)
+
+    def units(self, spec: dict) -> list[Unit]:
+        """All units of one source."""
         t = spec["type"]
         key = json.dumps(spec, sort_keys=True)
         if t == "tiger":
-            fips = self.us_states(boxes)
-            return [u for f in fips for u in self.tiger(spec["layer"], f)]
+            return [u for f in self.us_states() for u in self.tiger(spec["layer"], f)]
         if key not in self.cache:
-            fn = getattr(self, t.replace("-", "_"))
-            self.cache[key] = fn(spec, boxes) if t in ("israel-osm", "statcan-csd") else fn(spec)
+            self.cache[key] = getattr(self, t.replace("-", "_"))(spec)
             log.info("%s: %d units", spec.get("label") or spec.get("source") or t, len(self.cache[key]))
         return self.cache[key]
 
+    def clear(self) -> None:
+        """Forget the units read (each country's are written, then dropped)."""
+        self.cache.clear()
+
     # geoBoundaries (national statistics / mapping agencies, via the geoBoundaries project)
     def geoboundaries(self, spec):
+        """A geoBoundaries level's units, read and made one feature at a time (a generator)."""
         iso, adm = spec["iso"], spec["adm"]
-        path = self.fetch.path(spec.get("path") or GB_URL.format(iso=iso, adm=adm), name=f"gb-{iso}-ADM{adm}.geojson")
+        path = self.fetch.path(spec.get("path") or spec.get("url") or GB_URL.format(iso=iso, adm=adm),
+                               name=f"gb-{iso}-ADM{adm}.geojson", check=looks_whole_json)
         meta_src = spec.get("source") or f"geoBoundaries {iso} ADM{adm}"
-        return units_from_features(read_features(path), key=f"gb-{iso}{adm}", id_keys=("shapeID",),
-                                   name_keys=("shapeName",), kind=spec["kind"], level=spec.get("level", LEVEL_LOCALITY),
-                                   source=meta_src)
+        for i, f in enumerate(iter_geojson_features(path)):
+            yield from units_from_features([f], key=f"gb-{iso}{adm}", id_keys=("shapeID",), name_keys=("shapeName",),
+                                           kind=spec["kind"], level=spec.get("level", LEVEL_LOCALITY),
+                                           source=meta_src, index=i)
 
     def nyc_nta(self, spec):
         path = self.fetch.path(spec.get("path") or NYC_NTA_URL, name="nyc-nta2020.geojson")
@@ -650,10 +672,9 @@ class Sources:
                                                   check=lambda b: json.loads(b)["features"]))
         return city_units(feats, spec)
 
-    # Canada: Statistics Canada 2021 census subdivisions near the places (one download for the country).
-    # The file is big (a 315 MB .shp): it is unpacked to disk once and read one shape at a time, and only
-    # the shapes whose box lies near a place are converted and reprojected.
-    def statcan_csd(self, spec, boxes=()):
+    # Canada: Statistics Canada 2021 census subdivisions (one download for the country). The file is big
+    # (a 315 MB .shp): it is unpacked to disk once and read one shape at a time.
+    def statcan_csd(self, spec):
         import shapefile                                        # pyshp
         path = self.fetch.path(spec.get("path") or spec.get("url", STATCAN_CSD_URL), name="lcsd000b21a_e.zip")
         base = unpack_shapefile(path, self.fetch.cache)
@@ -661,38 +682,28 @@ class Sources:
         prj = prj_f.read_text(encoding="utf-8", errors="replace") if prj_f.exists() else ""
         rd = shapefile.Reader(str(base), encoding=shapefile_text_encoding(base), encodingErrors="replace")
         fields = [f[0] for f in rd.fields[1:]]
-        dl, dw = STATCAN_MARGIN_DEG
-        near = [project_box((s - dl, w - dw, n + dl, e + dw), prj) for s, w, n, e in boxes]
         kept, total = [], 0
         try:
             for sr in rd.iterShapeRecords():
                 total += 1
-                x0, y0, x1, y1 = sr.shape.bbox if sr.shape.points else (0, 0, -1, -1)
-                if x1 < x0 or (near and not any(w <= x1 and e >= x0 and s <= y1 and n >= y0
-                                                for s, w, n, e in near)):
+                if not sr.shape.points:
                     continue
                 kept.append({"properties": dict(zip(fields, sr.record)),
                              "geometry": to_lonlat(sr.shape.__geo_interface__, prj)})
         finally:
             rd.close()
-        log.info("Statistics Canada: %d of %d census subdivisions near the places", len(kept), total)
+        log.info("Statistics Canada: %d of %d census subdivisions with a shape", len(kept), total)
         return statcan_units(kept)
 
     # US Census TIGER/Line
-    def us_states(self, boxes) -> list[str]:
+    def us_states(self) -> list[str]:
+        """Every state's and territory's FIPS code in the Census state file."""
         year = self.cfg.get("tiger_year", 2024)
         if "us-states" not in self.cache:
             path = self.fetch.path(TIGER_URL.format(year=year, layer_uc="STATE", fips="us", layer="state"))
             self.cache["us-states"] = units_from_features(read_shapefile(path), key="us-state", id_keys=("STATEFP",),
                                                           name_keys=("NAME",), kind="state", level=0, source="")
-        fips = []
-        for st in self.cache["us-states"]:
-            s, w, n, e = st.bbox
-            for b in boxes:
-                if b[0] <= n and b[2] >= s and b[1] <= e and b[3] >= w:
-                    fips.append(st.id.split(":")[1])
-                    break
-        return sorted(fips)
+        return sorted(st.id.split(":")[1] for st in self.cache["us-states"])
 
     def tiger(self, layer, fips):
         key = f"tiger-{layer}-{fips}"
@@ -722,8 +733,7 @@ class Sources:
         return self.cache[key]
 
     # Israel: OpenStreetMap, whose admin_level=8 boundaries are the Ministry of Interior's
-    # Israel: OpenStreetMap, whose admin_level=8 boundaries are the Ministry of Interior's
-    def israel_osm(self, spec, boxes=()):
+    def israel_osm(self, spec):
         if "israel-osm-units" not in self.cache:
             path = self.fetch.path(spec.get("path") or spec.get("url", GEOFABRIK_URL),
                                    name=GEOFABRIK_URL.rsplit("/", 1)[1])
@@ -809,21 +819,6 @@ def dbf_encoding(dbf: bytes) -> str:
         return "utf-8"
     except UnicodeDecodeError:
         return "cp1252"
-
-
-def project_box(box, prj: str):
-    """A lon/lat (south, west, north, east) box in a projected system's coordinates, as the extent of a grid
-    of points over it (enough for boxes of a few dozen km); the box itself if prj is geographic."""
-    s, w, n, e = box
-    if not prj or prj.lstrip().upper().startswith("GEOGCS"):
-        return box
-    from rasterio.crs import CRS
-    from rasterio.warp import transform
-    k = 6
-    lons = [w + (e - w) * i / k for i in range(k + 1) for _ in range(k + 1)]
-    lats = [s + (n - s) * j / k for _ in range(k + 1) for j in range(k + 1)]
-    xs, ys = transform("EPSG:4326", CRS.from_wkt(prj), lons, lats)
-    return (min(ys), min(xs), max(ys), max(xs))
 
 
 def to_lonlat(geom: dict | None, prj: str) -> dict | None:
@@ -941,7 +936,7 @@ def cbs_units(feats: list[dict], stat_areas_for) -> list[Unit]:
         if sub:
             key = ("q", code, int(sub))
             name = f"{town}, sub-quarter {int(sub)}"
-            kind = f"sub-quarter (quarter {p.get('ROVA')})"
+            kind = f"sub-quarter (quarter {p['ROVA']})" if p.get("ROVA") else "sub-quarter"
         elif code in stat_areas_for and p.get("STAT_2022"):
             key = ("s", code, int(p["STAT_2022"]))
             name = f"{town}, statistical area {int(p['STAT_2022'])}"
@@ -1050,238 +1045,42 @@ def osm_unit(ref: str, t: dict, polys: list) -> Unit | None:
     return None
 
 
-# ---------------------------------------------------------------- selection
 
+# ---------------------------------------------------------------- build
 
-def place_box(b: dict):
-    return (b["s"], b["w"], b["n"], b["e"])
-
-
-def is_empty(box) -> bool:
-    return all(abs(v) < 1e-9 for v in box)
-
-
-def select(units: list[Unit], box, neighbourhoods: bool) -> list[Unit]:
-    """The official units for one place."""
-    s, w, n, e = box
-    clat, clon = (s + n) / 2, (w + e) / 2
-    if half_diagonal_km(box) < POINT_KM:
-        hits = [u for u in units if unit_contains(u, clat, clon)]
-        if not hits:
-            return []
-        return [max(hits, key=lambda u: (u.level, -unit_area(u)))]
-    cands, around = [], []
-    box_area = (n - s) * (e - w)
-    for u in units:
-        us, uw, un, ue = u.bbox
-        if us > n or un < s or uw > e or ue < w:
-            continue
-        share = share_inside(u, box)
-        if share >= MIN_SHARE or share * unit_area(u) >= MIN_BOX_SHARE * box_area:
-            cands.append(u)
-        elif unit_contains(u, clat, clon):
-            around.append(u)
-    if not cands:                 # the box lies inside one bigger unit (a town inside its department)
-        cands = around[:1] if len(around) <= 1 else [max(around, key=lambda u: (u.level, -unit_area(u)))]
-    return prune(cands)
-
-
-def prune(cands: list[Unit]) -> list[Unit]:
-    """Drop units that finer units cover completely (they would never be returned)."""
-    keep = []
-    for u in cands:
-        finer = [v for v in cands if v.level > u.level and v is not u
-                 and v.bbox[0] <= u.bbox[2] and v.bbox[2] >= u.bbox[0]
-                 and v.bbox[1] <= u.bbox[3] and v.bbox[3] >= u.bbox[1]]
-        if finer:
-            pts = sample_points(u)
-            if pts and all(any(unit_contains(v, la, lo) for v in finer) for la, lo in pts):
-                continue
-        keep.append(u)
-    return keep
-
-
-def place_name(name: str) -> str:
-    return re.sub(r"_area_.*$|_", " ", name).strip()
-
-
-def check_point_name(units, u: Unit, name: str, box, key: str, report: list) -> list[Unit]:
-    """A chaiTable point inside a unit whose name has nothing to do with the place's (Beit El inside Tel
-    Aviv) is usually a city's default coordinates: if a unit elsewhere carries the place's name, use it."""
-    want = norm_name(place_name(name))
-    here = max((difflib.SequenceMatcher(None, want, norm_name(n)).ratio() for n in u.names or [u.name]), default=0)
-    if here >= 0.75:
-        return [u]
-    (_, other, sc), = match_names(units, [place_name(name)], min_score=0.9)
-    if other is None or other is u:
-        return [u]
-    s, w, n, e = box
-    la, lo = (s + n) / 2, (w + e) / 2
-    os_, ow, on, oe = other.bbox
-    km = math.hypot((la - (os_ + on) / 2) * 111.19, (lo - (ow + oe) / 2) * 111.19 * math.cos(math.radians(la)))
-    report.append(f"{key}: the chaiTable point is in {u.name}, but the name matches {other.name} ({sc}), "
-                  f"{km:.0f} km away - used {other.name}; check it")
-    return [other]
-
-
-def match_names(units: list[Unit], wanted: list, min_score: float = 0.82):
-    """Best unit per wanted name (municipal / locality level), or None. A wanted entry may be a list of
-    alternative spellings of one place (["Halamish", "Neve Tsuf"]): the best-scoring spelling wins."""
-    pool = [u for u in units if LEVEL_COARSE < u.level < LEVEL_NEIGHBOURHOOD]
-    out = []
-    for nm in wanted:
-        best, score = None, 0.0
-        for spelling in ([nm] if isinstance(nm, str) else nm):
-            key = norm_name(spelling)
-            for u in pool:
-                for alt in u.names or [u.name]:
-                    r = difflib.SequenceMatcher(None, key, norm_name(alt)).ratio()
-                    if r > score or (r == score and best is not None and u.level > best.level):
-                        best, score = u, r
-        label = nm if isinstance(nm, str) else " / ".join(nm)
-        out.append((label, best if score >= min_score else None, round(score, 2)))
+def gb_meta(fetch: Fetcher) -> dict[str, dict[int, dict]]:
+    """geoBoundaries' metadata: {ISO: {adm level: record}}; empty (logged) if it can't be had - the countries
+    in GB_LEVELS are then still built, without source details."""
+    try:
+        recs = json.loads(fetch.path(GB_META_URL, name="gb-meta.json",
+                                     check=lambda b: json.loads(b)[0]["boundaryISO"]).read_text(encoding="utf-8"))
+    except Exception as e:                         # noqa: BLE001 - reported, the rest still builds
+        log.error("geoBoundaries metadata: %s; only the countries in GB_LEVELS get geoBoundaries areas", e)
+        return {}
+    out: dict[str, dict[int, dict]] = {}
+    for r in recs:
+        m = re.fullmatch(r"ADM(\d)", str(r.get("boundaryType", "")))
+        if m and r.get("boundaryISO"):
+            out.setdefault(r["boundaryISO"], {})[int(m.group(1))] = r
     return out
 
 
-# ---------------------------------------------------------------- main
-
-def load_json(src: str, fetch: Fetcher):
-    return json.loads(fetch.path(src, name="chaiTable.json").read_text(encoding="utf-8"))
-
-
-def build(args, cfg) -> dict:
-    data_dir = Path(cfg["data_dir"])
-    fetch = Fetcher(Path(args.cache or data_dir / "area-sources"), cfg.get("contact", ""))
-    chai = load_json(args.chai, fetch)
-    plans = json.loads(json.dumps(PLANS))
+def country_plans(fetch: Fetcher, args) -> dict[str, list[dict]]:
+    """{country: its sources}: the countries with plans of their own, then every other country geoBoundaries
+    has; --sources replaces plans, --only keeps those countries."""
+    meta = gb_meta(fetch)
+    plans = {k: list(v) for k, v in COUNTRY_PLANS.items()}
+    for iso in sorted(meta or GB_LEVELS):
+        if iso not in plans and iso not in COVERED_BY:
+            plans[iso] = gb_plan(iso, meta.get(iso, {}))
     if args.sources:
-        plans.update(json.loads(Path(args.sources).read_text()))
-    overrides = json.loads(Path(args.overrides).read_text()) if args.overrides and Path(args.overrides).exists() else {}
-    extra = overrides.get("_extra", {})            # places chaiTable lacks: {country title: [{name, point|bounds}]}
-    overrides = {k: v for k, v in overrides.items() if not k.startswith("_")}
-    sources = Sources(fetch, cfg.get("areas", {}))
-
-    areas: dict[str, dict] = {}
-    collapsed: set[str] = set()
-    unresolved, report = [], []
-    todo = [c for c in chai if not args.only or c["info"]["title"] in args.only]
-    t_start = time.time()
-    for ci, country in enumerate(todo, 1):
-        title = country["info"]["title"]
-        log.info("== %s %s (%d places), %.0f min so far", bar(ci - 1, len(todo)), title,
-                 len(country["metroAreas"]), (time.time() - t_start) / 60)
-        plan = plans.get(title)
-        if plan is None:
-            log.warning("no plan for %s; skipped", title)
-            continue
-        neighbourhoods = "Neighborhoods" in title
-        metros = []
-        for m in country["metroAreas"]:
-            key = f"{title}/{m['name']}"
-            ov = overrides.get(key, {})
-            box = place_box(ov["bounds"]) if "bounds" in ov else place_box(m["bounds"])
-            if "point" in ov:
-                la, lo = ov["point"]
-                box = (la, lo, la, lo)
-            metros.append((key, m["name"], box, ov))
-        for e in extra.get(title, []):
-            key = f"{title}/{e['name']}"
-            if any(k == key for k, *_ in metros):
-                raise ValueError(f"_extra place {key} is already in chaiTable.json; use a normal override")
-            if "point" in e:
-                la, lo = e["point"]
-                box = (la, lo, la, lo)
-            else:
-                box = place_box(e["bounds"])
-            metros.append((key, e["name"], box, {}))
-        boxes = [b for _, _, b, _ in metros if not is_empty(b)]
-        units: list[Unit] = []
-        failed = []
-        for spec in plan:
-            try:
-                units += sources.units(spec, boxes)
-            except Exception as e:
-                log.error("%s: source %s failed: %s", title, spec, e)
-                failed.append(f"{spec.get('type')} ({e})")
-        for mi, (key, name, box, ov) in enumerate(metros, 1):
-            if mi % 50 == 0:
-                log.info("   %s places matched", bar(mi, len(metros)))
-            if ov.get("skip"):
-                report.append(f"{key}: skipped by override")
-                continue
-            if ov.get("names"):
-                chosen, notes = [], []
-                for nm, u, sc in match_names(units, ov["names"]):
-                    if u:
-                        chosen.append(u)
-                        notes.append(f"{nm} -> {u.name} ({sc})")
-                    else:
-                        notes.append(f"{nm} -> NO MATCH (best {sc})")
-                if not all("NO MATCH" not in x for x in notes):
-                    unresolved.append({"place": key, "reason": "override names not matched: " + "; ".join(notes)})
-                report.append(f"{key}: by name: " + "; ".join(notes))
-            elif is_empty(box):
-                (_, u, sc), = match_names(units, [place_name(name)], min_score=0.9)
-                if not u:
-                    unresolved.append({"place": key, "reason": "no location in chaiTable.json; add names, a "
-                                       "point or bounds in areas_overrides.json"})
-                    continue
-                chosen = [u]
-                report.append(f"{key}: no location in chaiTable.json; matched by name -> {u.name} ({sc}) - check it")
-            else:
-                chosen = select(units, box, neighbourhoods)
-                if len(chosen) == 1 and half_diagonal_km(box) < POINT_KM:
-                    chosen = check_point_name(units, chosen[0], name, box, key, report)
-            if not chosen and not ov.get("names") and not is_empty(box):
-                # the chaiTable point may simply be wrong: try the place's own name
-                (_, u, sc), = match_names(units, [place_name(name)], min_score=0.9)
-                if u:
-                    s_, w_, n_, e_ = box
-                    la, lo = (s_ + n_) / 2, (w_ + e_) / 2
-                    us, uw, un, ue = u.bbox
-                    km = math.hypot((la - (us + un) / 2) * 111.19,
-                                    (lo - (uw + ue) / 2) * 111.19 * math.cos(math.radians(la)))
-                    chosen = [u]
-                    report.append(f"{key}: the chaiTable point is in no official unit; matched by name -> "
-                                  f"{u.name} ({sc}), {km:.0f} km from the point - check it")
-            if not chosen:
-                why = "no official unit found" + (f" (failed sources: {', '.join(failed)})" if failed else "")
-                if not ov.get("names"):
-                    unresolved.append({"place": key, "reason": why})
-                continue
-            big = max(half_diagonal_km(u.bbox) for u in chosen)
-            if not ov.get("names"):
-                hd = half_diagonal_km(box)
-                flag = "  <- chaiTable box looks too big" if hd > BIG_BOX_KM else ""
-                report.append(f"{key}: box {hd:.1f} km -> {len(chosen)} unit(s), largest {big:.1f} km{flag}")
-            else:
-                report[-1] += f" -> {len(chosen)} unit(s), largest {big:.1f} km"
-            if neighbourhoods:
-                hoods = [u for u in chosen if u.level >= LEVEL_NEIGHBOURHOOD]
-                for city in (u for u in chosen if u.level < LEVEL_NEIGHBOURHOOD
-                             and half_diagonal_km(u.bbox) >= 2.0):
-                    pts = sample_points(city, 200)
-                    cov = sum(any(unit_contains(h, la, lo) for h in hoods) for la, lo in pts) / max(len(pts), 1)
-                    report.append(f"    {city.name}: neighbourhoods cover ~{cov:.0%}; the rest gets the whole "
-                                  f"{city.kind} ({half_diagonal_km(city.bbox):.1f} km)")
-            for u in chosen:
-                if u.id in collapsed:
-                    continue
-                a = areas.get(u.id)
-                if a is None:
-                    a = to_area(u, args.simplify_m)
-                    if a is None:                      # a sliver thinner than the simplification
-                        collapsed.add(u.id)
-                        report.append(f"    dropped {u.name} ({u.id}): thinner than {args.simplify_m:g} m")
-                        continue
-                    areas[u.id] = a
-                if key not in a["places"]:
-                    a["places"].append(key)
-    out = {"version": 1, "built": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-           "chaiTable": args.chai, "levels": {"neighbourhood": LEVEL_NEIGHBOURHOOD, "locality": LEVEL_LOCALITY,
-                                              "coarse": LEVEL_COARSE},
-           "areas": sorted(areas.values(), key=lambda a: a["id"]), "unresolved": unresolved}
-    return out, report
+        plans.update(json.loads(Path(args.sources).read_text(encoding="utf-8")))
+    if args.only:
+        unknown = [c for c in args.only if c not in plans]
+        if unknown:
+            raise SystemExit(f"--only: no plan for {unknown} (countries are ISO 3166 alpha-3 codes: USA, FRA, ...)")
+        plans = {c: plans[c] for c in args.only}
+    return plans
 
 
 def to_area(u: Unit, tol_m: float) -> dict | None:
@@ -1297,64 +1096,139 @@ def to_area(u: Unit, tol_m: float) -> dict | None:
     s, w, n, e = u.bbox
     bbox = [round(s, 5), round(w, 5), round(n, 5), round(e, 5)]
     return {"id": u.id, "name": u.name, "kind": u.kind, "level": u.level, "source": u.source,
-            "places": [], "bbox": bbox, "radiusKm": round(half_diagonal_km(bbox), 2), "polygons": polys}
+            "bbox": bbox, "radiusKm": round(half_diagonal_km(bbox), 2), "polygons": polys}
 
 
-def merge_previous(out: dict, old: dict, rebuilt: set[str]) -> int:
-    """A build with --only covers some countries: add the previous file's areas and unresolved places of every
-    other country (an area shared across countries keeps the other countries' places). Returns how many
-    areas came from the old file."""
-    country = lambda place: place.split("/", 1)[0]
-    by_id = {a["id"]: a for a in out["areas"]}
-    kept = 0
-    for a in old.get("areas", []):
-        places = [p for p in a.get("places", []) if country(p) not in rebuilt]
-        if not places:
+def drop_country(con: sqlite3.Connection, country: str) -> None:
+    con.execute("DELETE FROM areas_box WHERE id IN (SELECT rowid FROM areas WHERE country = ?)", (country,))
+    con.execute("DELETE FROM areas WHERE country = ?", (country,))
+
+
+def write_country(con: sqlite3.Connection, country: str, units, tol_m: float, cap_km: float,
+                  report: list[str]) -> dict:
+    """Replace the country's areas with these units (any iterable: they are written as they come). Not
+    committed: the caller commits, or rolls back to the areas it had. Returns its summary for the metadata."""
+    drop_country(con, country)
+    kinds: dict[str, int] = {}
+    sources: dict[str, int] = {}
+    n = over = dropped = dup = 0
+    for u in units:
+        a = to_area(u, tol_m)
+        if a is None:                                  # a sliver thinner than the simplification
+            dropped += 1
+            if dropped <= 20:
+                report.append(f"    dropped {u.name} ({u.id}): thinner than {tol_m:g} m")
             continue
-        if a["id"] in by_id:
-            by_id[a["id"]]["places"] += [p for p in places if p not in by_id[a["id"]]["places"]]
-        else:
-            by_id[a["id"]] = dict(a, places=places)
-            kept += 1
-    out["areas"] = sorted(by_id.values(), key=lambda a: a["id"])
-    out["unresolved"] = [u for u in old.get("unresolved", []) if country(u["place"]) not in rebuilt] + out["unresolved"]
-    return kept
+        s, w, nn, e = a["bbox"]
+        cur = con.execute("INSERT OR IGNORE INTO areas (id, country, name, kind, level, source, s, w, n, e, "
+                          "radius_km, polygons) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                          (a["id"], country, a["name"], a["kind"], a["level"], a["source"], s, w, nn, e,
+                           a["radiusKm"], encode_polygons(a["polygons"])))
+        if not cur.rowcount:
+            dup += 1
+            continue
+        con.execute("INSERT INTO areas_box (id, w, e, s, n) VALUES (?, ?, ?, ?, ?)", (cur.lastrowid, w, e, s, nn))
+        n += 1
+        over += a["radiusKm"] > cap_km
+        kinds[a["kind"]] = kinds.get(a["kind"], 0) + 1
+        sources[a["source"]] = sources.get(a["source"], 0) + 1
+    report.append(f"{country}: {n} areas, {over} over the {cap_km:g} km cap"
+                  + (f", {dropped} slivers dropped" if dropped else "") + (f", {dup} ids already taken" if dup else ""))
+    report += [f"    {c:6d} {k}" for k, c in sorted(kinds.items(), key=lambda kv: -kv[1])[:8]]
+    return {"areas": n, "overCap": over, "sources": sorted(sources)}
+
+
+def build(args, cfg: dict, dest: Path) -> tuple[dict, list[str]]:
+    """Writes dest.tmp (from a copy of dest unless --replace), then swaps it in. Returns (meta, report)."""
+    fetch = Fetcher(Path(args.cache or Path(cfg["data_dir"]) / "area-sources"), cfg.get("contact", ""))
+    sources = Sources(fetch, cfg.get("areas", {}))
+    plans = country_plans(fetch, args)
+    cap_km = float(cfg["terrain"].get("max_area_radius_km", 30))
+    tmp = dest.with_name(dest.name + ".tmp")
+    tmp.unlink(missing_ok=True)
+    fresh = args.replace or not dest.exists()
+    if not fresh:
+        shutil.copyfile(dest, tmp)
+    con = sqlite3.connect(tmp)
+    try:
+        if fresh:
+            con.executescript(SCHEMA)
+        old = {k: json.loads(v) for k, v in con.execute("SELECT key, value FROM meta")}
+        countries: dict = {} if fresh else dict(old.get("countries", {}))
+        if not args.only and not fresh:                # a full build: countries no plan has any more go
+            for (c,) in con.execute("SELECT DISTINCT country FROM areas").fetchall():
+                if c not in plans:
+                    drop_country(con, c)
+                    countries.pop(c, None)
+        report: list[str] = []
+        failed: dict[str, list[str]] = {}
+        t0 = time.time()
+        for ci, (country, plan) in enumerate(plans.items(), 1):
+            log.info("== %s %s, %.0f min so far", bar(ci - 1, len(plans)), country, (time.time() - t0) / 60)
+            at = [None]
+
+            def units():
+                for spec in plan:
+                    at[0] = spec
+                    yield from sources.stream(spec)
+
+            mark = len(report)
+            try:
+                summary = write_country(con, country, units(), args.simplify_m, cap_km, report)
+            except Exception as e:                     # noqa: BLE001 - reported; the country keeps its areas
+                con.rollback()
+                del report[mark:]
+                spec = at[0] or {}
+                log.error("%s: source %s failed: %s", country, spec.get("type"), e)
+                failed[country] = [f"{spec.get('type')} {spec.get('key') or spec.get('adm', '')} ({e})"]
+                had = con.execute("SELECT count(*) FROM areas WHERE country = ?", (country,)).fetchone()[0]
+                report.append(f"{country}: FAILED ({'; '.join(failed[country])}); kept the {had} areas it had")
+                continue
+            finally:
+                sources.clear()
+            con.commit()
+            countries[country] = summary
+        meta = {"version": 2, "built": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "levels": {"neighbourhood": LEVEL_NEIGHBOURHOOD, "locality": LEVEL_LOCALITY, "coarse": LEVEL_COARSE},
+                "countries": countries, "failed": failed}
+        con.execute("DELETE FROM meta")
+        con.executemany("INSERT INTO meta (key, value) VALUES (?, ?)",
+                        [(k, json.dumps(v, ensure_ascii=False)) for k, v in meta.items()])
+        con.commit()
+        if fresh or not args.only:
+            con.execute("VACUUM")
+    finally:
+        con.close()
+    tmp.replace(dest)
+    return meta, report
 
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--config")
-    ap.add_argument("--chai", default=CHAI_URL, help="chaiTable.json path or URL")
-    ap.add_argument("--out", help="default <data_dir>/areas.json")
+    ap.add_argument("--out", help="default areas.file, else <data_dir>/areas.sqlite")
     ap.add_argument("--cache", help="download cache, default <data_dir>/area-sources")
-    ap.add_argument("--sources", help="JSON {country title: [source, ...]} replacing PLANS entries")
-    ap.add_argument("--overrides", default=str(HERE / "areas_overrides.json"))
-    ap.add_argument("--only", action="append", help="chaiTable country title (repeatable); the other countries' "
-                    "areas already in the output file are kept")
-    ap.add_argument("--replace", action="store_true", help="with --only: write only those countries, dropping "
-                    "every other area in the output file")
+    ap.add_argument("--sources", help="JSON {country: [source, ...]} replacing those countries' plans")
+    ap.add_argument("--only", action="append", help="a country (ISO 3166 alpha-3, repeatable): rebuild only "
+                    "these; the other countries' areas already in the output file are kept")
+    ap.add_argument("--replace", action="store_true", help="start a new file, dropping every area in the old one")
     ap.add_argument("--simplify-m", type=float, default=25.0)
     args = ap.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     cfg = load_config(args.config)
-    out, report = build(args, cfg)
-    dest = Path(args.out or Path(cfg["data_dir"]) / "areas.json")
-    if args.only and not args.replace and dest.exists():
-        kept = merge_previous(out, json.loads(dest.read_text(encoding="utf-8")), set(args.only))
-        log.info("kept %d areas of the other countries from %s (--replace to drop them)", kept, dest)
+    configured = cfg.get("areas", {}).get("file")
+    dest = Path(args.out or (configured if configured and not configured.endswith(".json") else
+                             Path(cfg["data_dir"]) / "areas.sqlite"))
     dest.parent.mkdir(parents=True, exist_ok=True)
-    tmp = dest.with_suffix(".tmp")
-    tmp.write_text(json.dumps(out, separators=(",", ":"), ensure_ascii=False))
-    tmp.replace(dest)
+    meta, report = build(args, cfg, dest)
+    total = sum(c["areas"] for c in meta["countries"].values())
+    over = sum(c["overCap"] for c in meta["countries"].values())
+    lines = report + ["", f"{total} areas in {len(meta['countries'])} countries, {over} over the cap"]
+    lines += [f"FAILED {c}: {'; '.join(f)}" for c, f in meta["failed"].items()]
     rep = dest.with_name("areas_report.txt")
-    big = [a for a in out["areas"] if a["radiusKm"] > float(cfg["terrain"].get("max_area_radius_km", 30))]
-    lines = report + ["", f"{len(out['areas'])} areas, {len(out['unresolved'])} unresolved places", ""]
-    lines += [f"UNRESOLVED {u['place']}: {u['reason']}" for u in out["unresolved"]]
-    lines += [f"OVER CAP {a['name']} ({a['id']}): {a['radiusKm']} km > terrain.max_area_radius_km" for a in big]
     rep.write_text("\n".join(lines) + "\n", encoding="utf-8")
-    log.info("wrote %s (%d areas, %d unresolved, %d over the cap); report %s", dest, len(out["areas"]),
-             len(out["unresolved"]), len(big), rep)
-    return 0
+    log.info("wrote %s (%d areas, %d countries failed); report %s", dest, total, len(meta["failed"]), rep)
+    return 1 if meta["failed"] else 0
 
 
 if __name__ == "__main__":

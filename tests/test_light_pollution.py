@@ -12,6 +12,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
+import shutil
 import sys
 import tempfile
 import threading
@@ -343,7 +344,8 @@ def check_server(tmp: Path):
 
 
 def main():
-    with tempfile.TemporaryDirectory() as d:
+    # the server keeps the atlas tiles open: Windows can't delete them while this process runs
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
         tmp = Path(d)
         for sub in ("orig", "lerc", "remote"):
             (tmp / sub).mkdir()
@@ -351,7 +353,10 @@ def main():
         write_tile(tmp / "lerc" / "lp_4096_24576_lerc.tif", *TILES[0], "LERC_ZSTD")
         write_tile(tmp / "remote" / "lp_4096_28672.tif", *TILES[1], "ZSTD")
         write_tile(tmp / "remote" / "lp_8192_0.tif", 2, 0, "ZSTD", realistic=True)
-        (tmp / "orig" / "lp_4096_28672.tif").symlink_to(tmp / "remote" / "lp_4096_28672.tif")
+        try:
+            (tmp / "orig" / "lp_4096_28672.tif").symlink_to(tmp / "remote" / "lp_4096_28672.tif")
+        except OSError:                                     # Windows without the right to make symlinks
+            shutil.copyfile(tmp / "remote" / "lp_4096_28672.tif", tmp / "orig" / "lp_4096_28672.tif")
         check_pixels(tmp)
         check_area(tmp)
         (tmp / "orig" / "lp_4096_28672.tif").unlink()

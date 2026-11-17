@@ -152,8 +152,11 @@ DEFAULT_CONFIG = {
         "max_sites_per_run": None,
     },
     "areas": {
-        "file": "",               # default: <data_dir>/areas.json (written by build_areas.py)
+        "file": "",               # default: <data_dir>/areas.sqlite (written by build_areas.py)
         "tiger_year": 2024,       # US Census TIGER/Line vintage build_areas.py downloads
+        # area=auto (the city rule): a settlement up to this size (centre to corner) is one area, a bigger one
+        # is divided by its neighbourhoods. Jerusalem's size: the Chai Tables' one city with one sunrise.
+        "city_radius_km": 13.0,
     },
     # Caching in front of the API (cdn.py): a CDN (Cloudflare) keeps each answer for its full lifetime and can be
     # purged; browsers, which can't, keep it at most browser_max_age_s. stale_if_error_s: how long the CDN may
@@ -302,14 +305,35 @@ def destination(lat: float, lon: float, azimuth_deg: float, distance_km: float):
 
 
 @contextlib.contextmanager
-def single_run(lock_file: Path):
-    """Yields True if this process holds the lock (released at exit), False if another process does: one
-    fetcher at a time, whether started by its timer or by hand (two would write the same cycle's files)."""
-    import fcntl
+def exclusive(lock_file: Path, wait: bool = True):
+    """An exclusive lock between processes on `lock_file` (created, left empty): flock on Linux, msvcrt's
+    byte lock on Windows. Yields True once held (released at exit); with wait=False, False at once if another
+    process holds it."""
     lock_file.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_file, "w") as fh:
+    with open(lock_file, "a") as fh:
         try:
-            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            import fcntl
+        except ImportError:                                   # Windows
+            import msvcrt
+            import time
+            while True:
+                fh.seek(0)
+                try:
+                    msvcrt.locking(fh.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    if not wait:
+                        yield False
+                        return
+                    time.sleep(0.05)
+            try:
+                yield True
+            finally:
+                fh.seek(0)
+                msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+            return
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError:
             yield False
             return
@@ -317,3 +341,11 @@ def single_run(lock_file: Path):
             yield True
         finally:
             fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+@contextlib.contextmanager
+def single_run(lock_file: Path):
+    """Yields True if this process holds the lock (released at exit), False if another process does: one
+    fetcher at a time, whether started by its timer or by hand (two would write the same cycle's files)."""
+    with exclusive(lock_file, wait=False) as mine:
+        yield mine

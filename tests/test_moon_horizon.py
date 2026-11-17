@@ -160,7 +160,7 @@ def check_api_params():
     assert json.dumps(plain, sort_keys=True) != json.dumps(moon, sort_keys=True)
 
     class Index:
-        def find(self, lat, lon):
+        def find(self, lat, lon, rule="finest", city_radius_km=13.0):
             return {"name": "Test", "radiusKm": 1.0, "bbox": [31.77, 35.22, 31.79, 35.25], "id": "t"}
     run, _, _ = serve.resolve_area(Index(), cfg, {"lat": [str(LAT)], "lon": [str(LON)], "area": ["auto"],
                                                  "moon": ["1"]})

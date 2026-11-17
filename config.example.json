@@ -241,7 +241,8 @@
   },
   "areas": {
     "file": "",
-    "tiger_year": 2024
+    "tiger_year": 2024,
+    "city_radius_km": 13.0
   },
   "cdn": {
     "browser_max_age_s": 86400,

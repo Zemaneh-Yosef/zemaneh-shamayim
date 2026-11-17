@@ -307,7 +307,7 @@ terrain tiles, Cesium terrain), `zsky-areas` (`/v1/area` and `area=auto` answers
 `cdn.check_every_s` (10 minutes) it compares what the terrain and areas are made from with
 `<data_dir>/cdn-state.json`, and purges `zsky-terrain` when the `terrain.layers` or `terrain.fine` sources, the
 horizon algorithm (an upgrade) or a merged tile's revision (`dem_layers.py build --force`) changed, and
-`zsky-areas` when `areas.json` was rebuilt. A refused purge is tried again at the next check. For that, set
+`zsky-areas` when `areas.sqlite` was rebuilt. A refused purge is tried again at the next check. For that, set
 `cdn.cloudflare_zone_id` (the zone's Overview page) and a token with the Zone → Cache Purge permission, in
 `cdn.cloudflare_api_token` or `Environment=CLOUDFLARE_API_TOKEN=…` in a `systemctl edit zmanim-sky-api`
 override. Without them a change is only logged ("CDN purge needed"); purge in the dashboard then. By hand:
@@ -485,8 +485,8 @@ works for any place between 60°S and 60°N, inside your regions or not.
 
 | parameter | default | meaning |
 |---|---|---|
-| `area` | – | `auto`: search the whole official area the point is in ([Official areas](#official-areas-areaauto)); the response's `area` names it |
-| `outline` | – | `1`: with `area=auto`, the response's `area` also carries its boundary (`polygons`), so a client can tell which later fixes share the answer ([Official areas](#official-areas-areaauto)) |
+| `area` | – | `auto` (or `city`): search the whole official area the point is in - its town or city up to Jerusalem's size, else its neighbourhood or district; `finest`: the finest official unit ([Official areas](#official-areas-areaauto)); the response's `area` names it |
+| `outline` | – | `1`: with `area`, the response's `area` also carries its boundary (`polygons`), so a client can tell which later fixes share the answer ([Official areas](#official-areas-areaauto)) |
 | `radius_km` | 0 | 0: the exact coordinates. > 0: search a grid of spots within this radius (capped by `terrain.max_radius_km`, default 3) and return the few that see lowest in some direction |
 | `bbox` | – | `south,west,north,east`: search every spot inside this box instead of a circle (e.g. a neighbourhood). `lat`/`lon` may be left out (box centre). Centre-to-corner distance is capped by `terrain.max_radius_km` (3 km); boxes with more than `terrain.max_candidates` (1200) spots get a coarser grid |
 | `grid_m` | 100 | vantage grid spacing (minimum `terrain.min_grid_m`, 50) |
@@ -725,76 +725,84 @@ where it changed and nothing else is downloaded again.
 
 ### Official areas (`area=auto`)
 
-With `area=auto` the client sends only its coordinates; the server finds the official area it is in -
-a neighbourhood, village, town or city - and searches that whole area, so everyone in it gets the same
-visible sunrise (the earliest anywhere in it) and the same latest sunset. The answer is cached per
-area, not per point. Use `fetchHorizonForArea(SERVER, lat, lon)` from `horizon-client.js`; the client
-needs no list of neighbourhoods of its own.
+With `area=auto` the client sends only its coordinates; the server finds the official area it is in and
+searches that whole area, so everyone in it gets the same visible sunrise (the earliest anywhere in it) and
+the same latest sunset. The answer is cached per area, not per point. Use `fetchHorizonForArea(SERVER, lat,
+lon)` from `horizon-client.js`; the client needs no list of places of its own. Areas cover the whole world.
+
+Which area, by the Chai Tables' rule (their introduction, after the *nivreshes* and Rabbi Yosi's praise of
+Tiberias): a city has one sunrise - the earliest seen anywhere in it ("ein osim agudos agudos") - and
+Jerusalem, about 16 km by 15 km, is such a city. Only a bigger city is divided, by the neighbourhood its
+people live in. So:
+
+* `area=auto` (or `area=city`): the town, village or city containing the point, whole, when it is no bigger
+  than Jerusalem (`areas.city_radius_km`, 13 km from the centre of its box to a corner: Jerusalem is
+  11.2 km by the CBS locality outline and 12.8 km by its municipal boundary); a bigger one by the official neighbourhood or district containing the point (New
+  York's NTAs, Toronto's neighbourhoods, Johannesburg's wards...), or whole where it has none
+* `area=finest`: the finest official unit containing the point - a Jerusalem sub-quarter, a New York NTA,
+  a village rather than the town around it - for those who divide even a small city
 
 ```sh
-curl 'http://127.0.0.1:8787/v1/area?lat=40.609283058016736&lon=-73.96828881865329'      # which area (no polygons)
+curl 'http://127.0.0.1:8787/v1/area?lat=40.609283058016736&lon=-73.96828881865329'               # which area (no polygons)
+curl 'http://127.0.0.1:8787/v1/area?lat=31.7767&lon=35.2345&area=finest'                          # the finest unit
 curl 'http://127.0.0.1:8787/v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto&radius_km=0.8'
 ```
 
-A point in no known area, or in one bigger than `terrain.max_area_radius_km` (30 km from centre to
-corner, separate from the 3 km cap on boxes clients send), gets the request as given (here the 0.8 km
-radius) with `"area": null` and an `areaNote` saying why.
+A point in no official area (the sea, a regional council's open land), or in one bigger than
+`terrain.max_area_radius_km` (30 km from centre to corner, separate from the 3 km cap on boxes clients
+send), gets the request as given (here the 0.8 km radius) with `"area": null` and an `areaNote` saying why.
+Most of a country whose municipalities are bigger than that (Russia's districts, Saudi Arabia's
+governorates) falls back this way.
 
-The `area` in an answer is `{"id", "name", "level", "bbox", "radiusKm", ...}` without the boundary, and
-neighbouring areas' boxes overlap. A client that stores the answer and wants to reuse it for later fixes
-adds `outline=1` (to `/v1/horizon`, `/v1/terrain-version` or `/v1/area`): `area` then also carries
-`polygons`, exactly as `areas.json` stores them (a list of polygons, each a list of rings, outer ring first
-then holes, each ring a flat `[lon, lat, lon, lat, ...]` list; already simplified to ~25 m by
+The `area` in an answer is `{"id", "name", "kind", "level", "source", "country", "bbox", "radiusKm"}` without
+the boundary, and neighbouring areas' boxes overlap. A client that stores the answer and wants to reuse it for
+later fixes adds `outline=1` (to `/v1/horizon`, `/v1/terrain-version` or `/v1/area`): `area` then also
+carries `polygons`, exactly as `areas.sqlite` stores them (a list of polygons, each a list of rings, outer
+ring first then holes, each ring a flat `[lon, lat, lon, lat, ...]` list; already simplified to ~25 m by
 `build_areas.py` and sent as is). A point shares the stored answer when an even-odd test over all the rings
 of any polygon (`areas.area_contains`) puts it inside. The horizon is computed and cached the same either
-way, and without `outline=1` every answer is byte for byte what it was. `/v1/terrain-version` adds `area`
-(or `"area": null` and `areaNote`) only with `outline=1`.
+way (and once for both rules when they pick the same area), and without `outline=1` an answer carries no
+polygons. `/v1/terrain-version` adds `area` (or `"area": null` and `areaNote`) only with `outline=1`.
 
 ```sh
 curl 'http://127.0.0.1:8787/v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto&outline=1'
 # ..., "area": {"id": "nyc-nta:BK1503", "name": "...", "level": 30, "bbox": [s, w, n, e], "radiusKm": ...,
 #               "polygons": [[[lon, lat, lon, lat, ...], [hole ...]], ...]}
-``` Big areas get a coarser grid
-(`terrain.max_candidates` spots in all), so a 25 km city is searched on a ~1 km grid.
+```
 
-The areas come from `areas.json`, built by `build_areas.py` from the Chai Tables place list
-(`chaiTable.json` in the royzmanimwebsite repo). Every place becomes the official units it covers:
+Big areas get a coarser grid (`terrain.max_candidates` spots in all), so a 25 km city is searched on a ~1 km
+grid.
 
-* a metro-area box: every unit with a quarter of its area inside the box, or whose part inside covers 3%
-  of the box; units entirely covered by finer ones are dropped (New York City by its NTAs)
-* a single point: the finest unit containing it
-* no location, or a combined name like "Kiriat-yam-mozkin-bialik": whatever `areas_overrides.json` says
-  (names, a point or a box); otherwise it is listed as unresolved
-* places chaiTable lacks (Hollywood FL, Pikesville, Oak Park MI...): the `_extra` list in `areas_overrides.json`
-  (a point or a box each), treated like chaiTable places. A point outside every place's areas gets no area
-  (`area: null`), so add a community there when its users should get one
+The areas come from `areas.sqlite`, built by `build_areas.py` from official boundaries alone - every country,
+every unit, no list of places:
 
-| where | official units (finest wins) | source |
+| where | official units (settlements, then neighbourhoods) | source |
 |---|---|---|
 | New York City | 2020 Neighborhood Tabulation Areas | NYC Department of City Planning |
 | City of Los Angeles | "Mapping L.A." neighbourhoods | Los Angeles Times |
-| Chicago, Houston, Dallas, Phoenix, San Diego, Austin, Seattle, Baltimore | the city's own layer: Chicago's 77 community areas, Houston's super neighborhoods, Dallas's council districts (it has no citywide neighbourhood layer), Phoenix's urban villages, San Diego's community plan areas, Austin's neighborhood planning areas, Seattle's Neighborhood Map Atlas neighborhoods, Baltimore's neighborhood statistical areas. Each city is one Census place of 25-55 km otherwise, at or over the area cap | each city's open-data / GIS service (see `US_CITIES` in `build_areas.py`) |
-| rest of the US | incorporated places and census-designated places, then county subdivisions (towns) | US Census TIGER/Line |
-| Israel | municipal jurisdictions; locality outlines for villages inside regional councils. Regional councils are never an area | OpenStreetMap, whose `admin_level=8` boundaries are the Ministry of Interior's: Geofabrik's daily Israel and Palestine extract (one download) |
-| Israel, the places under "Eretz Yisrael (Neighborhoods)" (Beit Shemesh, Haifa, Jerusalem, Safed, Tiberias) | sub-quarters (תת-רובע; cities of 40,000+), or statistical areas for a listed city without them | Central Bureau of Statistics, statistical areas 2022 (downloaded from its ArcGIS service) |
-| Toronto, Montreal, Ottawa, Hamilton, Halifax, Calgary, Edmonton, Winnipeg | the city's own neighbourhoods: Toronto's 158 neighbourhoods, Montreal's arrondissements, Ottawa Neighbourhood Study Gen 3, Hamilton's planning units, Halifax's communities, Calgary's community districts, Edmonton's and Winnipeg's neighbourhoods | each city's open-data portal (see `PLANS["Canada"]` in `build_areas.py`) |
-| rest of Canada | 2021 census subdivisions (municipalities); amalgamated cities such as Halifax (~190 km) or Ottawa (~55 km) are far over the area cap, hence the layers above | Statistics Canada 2021 cartographic boundary file (`lcsd000b21a_e.zip`, one download, reprojected from Statistics Canada Lambert) |
-| other countries | the municipal level (communes, comuni, local authority districts, ...; Paris, Lyon and Marseille by arrondissement; see `PLANS` in `build_areas.py`) | geoBoundaries (national statistics / mapping agencies) |
+| Chicago, Houston, Dallas, Phoenix, San Diego, Austin, Seattle, Baltimore | the city's own layer: Chicago's 77 community areas, Houston's super neighborhoods, Dallas's council districts (it has no citywide neighbourhood layer), Phoenix's urban villages, San Diego's community plan areas, Austin's neighborhood planning areas, Seattle's Neighborhood Map Atlas neighborhoods, Baltimore's neighborhood statistical areas | each city's open-data / GIS service (see `US_CITIES` in `build_areas.py`) |
+| the US, Puerto Rico and the territories | incorporated places and census-designated places, then county subdivisions (towns) | US Census TIGER/Line |
+| Israel | municipal jurisdictions; locality outlines for villages inside regional councils (regional councils are never an area); sub-quarters (תת-רובע) of the cities of 40,000+, statistical areas for Beit Shemesh, Haifa, Jerusalem, Safed and Tiberias where they have no sub-quarters | OpenStreetMap, whose `admin_level=8` boundaries are the Ministry of Interior's (Geofabrik's daily Israel and Palestine extract, one download); Central Bureau of Statistics, statistical areas 2022 (its ArcGIS service) |
+| Toronto, Montreal, Ottawa, Hamilton, Halifax, Calgary, Edmonton, Winnipeg | the city's own neighbourhoods: Toronto's 158 neighbourhoods, Montreal's arrondissements, Ottawa Neighbourhood Study Gen 3, Hamilton's planning units, Halifax's communities, Calgary's community districts, Edmonton's and Winnipeg's neighbourhoods | each city's open-data portal (see `COUNTRY_PLANS["CAN"]` in `build_areas.py`) |
+| Canada | 2021 census subdivisions (municipalities); amalgamated cities such as Halifax (~190 km) or Ottawa (~55 km) are far over the area cap, hence the layers above | Statistics Canada 2021 cartographic boundary file (`lcsd000b21a_e.zip`, one download, reprojected from Statistics Canada Lambert) |
+| every other country | the municipal level (communes, comuni, municipalities, local authority districts, Indian villages and towns, ...), and where geoBoundaries has one a finer level inside it as neighbourhoods (South African wards, Korean dong, Portuguese freguesias, Czech and Austrian cadastral areas, ...). Chosen per country in `GB_LEVELS`; a country it does not list takes its finest level, or the one above it when the finest is named like a unit inside municipalities (wards, villages, cells, barrios...) | geoBoundaries (each country's national statistics or mapping agency; the source and licence are in each area's `source`) |
 
 ```sh
 sudo -u zmanim-sky venv/bin/pip install pyshp osmium               # Census shapefiles; the OpenStreetMap extract
-sudo -u zmanim-sky venv/bin/python build_areas.py                   # all countries; ~1-2 GB of downloads, cached in
+sudo -u zmanim-sky venv/bin/python build_areas.py                   # the world; a few GB of downloads, cached in
                                                                     # <data_dir>/area-sources (delete a file to refresh it)
-sudo -u zmanim-sky venv/bin/python build_areas.py --only USA --only "Eretz Yisrael (Cities)"   # rebuild just these; the other countries' areas are kept (--replace drops them)
+sudo -u zmanim-sky venv/bin/python build_areas.py --only USA --only ISR    # rebuild just these (ISO 3166 alpha-3
+                                                                    # codes); the other countries' areas are kept
 ```
 
-It writes `<data_dir>/areas.json` (the server reloads it when it changes) and `areas_report.txt`: every
-place with the units it got, the places still unresolved, chaiTable boxes that look too big (Zhytomyr,
-Rome, Hamburg...), and areas over the cap. Read the report after each build; check every name match it
-lists. To use an official file instead of a download (e.g. the CBS localities layer, or a city's own
-neighbourhood layer), pass `--sources` with `{"Eretz Yisrael (Cities)": [{"type": "file", "path":
-"localities.zip", "id_field": "<its code field>", "name_field": "<its English name field>", "kind":
-"locality", "source": "Israel CBS localities"}]}` (shapefile, zipped shapefile or GeoJSON, in lon/lat).
+It writes `<data_dir>/areas.sqlite` beside the old one and swaps it in whole (the server rereads it when it
+changes; until the first build an older `areas.json` is still used), and `areas_report.txt`: per country how
+many areas of each kind, how many are over the cap, and slivers dropped. A country whose source fails keeps
+the areas it had (the report says FAILED; the build exits 1) - run it again with `--only` for that country.
+To use an official file instead of a download (e.g. a city's own neighbourhood layer), pass `--sources`
+with `{"ISR": [{"type": "file", "path": "localities.zip", "id_field": "<its code field>", "name_field": "<its
+English name field>", "kind": "locality", "source": "Israel CBS localities"}, ...]}` (shapefile, zipped
+shapefile or GeoJSON, in lon/lat; it replaces the country's whole plan).
 
 ### Light pollution for nightfall by the stars
 
@@ -825,7 +833,7 @@ light-pollution term (`Blp`) of the star-visibility nightfall model in
  "source": "Falchi et al. 2016, ..."}
 ```
 
-With `area=auto` or `bbox` the top-level values are the area's percentile, and the response adds `area`
+With `area` (`auto` or `finest`, as for horizons) or `bbox` the top-level values are the area's percentile, and the response adds `area`
 (or `bbox`), `stats` (`pixels`, `min`, `p10`, `median`, `p90`, `max`, `mean`, `percentile`, corrected
 like the value) and `point` (the point's own answer, as above). A point in no known area, an area over the
 cap, or one smaller than a pixel gets the point's value with `area: null` and an `areaNote`. Outside the
@@ -1167,7 +1175,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_dem_layers.py` (rasterio, pyproj) | merged bare-earth tiles (priority per pixel, reprojection from the Israeli grid, open sea, aborting on unreadable sources) and tile revisions on rebuilds |
 | `test_dem_fallback.py` (rasterio) | FABDEM read from a remote zip (a local HTTP server stands in for Bristol's), a missing file told apart from an outage, provisional tiles kept and retried after the hour (also when read through terrain.Tiles, as the server does), ALOS masked by land cover (forest falls through to the plain tiles), `.plain` markers where no source has data, and `slim` |
 | `test_fine_terrain.py` (rasterio) | near-range fine terrain on a synthetic 1/3″ source (a narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers), per-place versions and cache keys |
-| `test_areas.py` | build_areas.py, the lookup and `area=auto` (with and without `outline=1`) |
+| `test_areas.py` | build_areas.py (whole countries, the municipal and finer geoBoundaries levels, `--only`, a failed source keeping a country's areas), the lookup by both rules, `area=auto` / `finest` (with and without `outline=1`), a rebuilt file swapped in |
 | `test_light_pollution.py` (rasterio) | the light-pollution lookup on synthetic atlas tiles (pixel indices against the tiles' georeferencing, reads across tile edges, area masks and percentiles, LERC copies, downloads filling gaps, conversion on download, the HTTP endpoint) |
 | `test_haze_calibration.py` | the AERONET / CAMS calibration on a fake AERONET file and CAMS series (500 -> 550 nm, resuming, the factor's falloff, the endpoint) |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
@@ -1177,7 +1185,7 @@ No network needed; those marked (rasterio) need it installed. From a checkout: `
 | `test_sun_range.py` | sunrise / sunset ranges widened past high horizons only as far as the terrain hides the solstice Sun (both hemispheres, the tropics, a ridge that ends), and a point's horizon and wins over them; a crest between two distance steps found by the refinement |
 | `test_area_answer.py` | an area's horizon answer: the same bytes as merging the parsed answer, kept in memory, quick when asked again |
 | `test_horizon_pending.py` | a slow first horizon: answered 503 "computing" in time with an estimate from the work left (the tiles its rays cross), computed once in the background however often it is asked for, then served; the timings learned and kept; a failure reported once, then retried |
-| `test_cdn.py` | the caching headers (browsers a day, the CDN the full lifetime, stale-if-error, tags; a partial horizon 10 minutes), purge requests as Cloudflare's API takes them, and purging only what changed (a tile revision, a new areas.json), a refused purge retried |
+| `test_cdn.py` | the caching headers (browsers a day, the CDN the full lifetime, stale-if-error, tags; a partial horizon 10 minutes), purge requests as Cloudflare's API takes them, and purging only what changed (a tile revision, a new areas.sqlite), a refused purge retried |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights and values IGRA's quality control removed, the three versions, which sounding a date gets) |
 | `test_weather_guard.py` | the guardrails: record extremes kept, impossible values (units mixed up, a land fraction of 7, levels out of order) refused, a refused run leaving the previous one serving, a run that jumps away from the serving one held back and an ordinary update published |
 

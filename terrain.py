@@ -91,21 +91,12 @@ def report_timing(kind: str, seconds: float) -> None:
 
 @contextlib.contextmanager
 def file_lock(path: Path):
-    """Held by one process at a time (an flock on `path`; a no-op where there is no fcntl, i.e. Windows):
-    horizons are built in worker processes (serve.Horizons), and two of them must not download or build the
-    same tile at once. The lock file stays (empty) in a .locks folder beside the data."""
-    try:
-        import fcntl
-    except ImportError:                                    # pragma: no cover - Windows (development only)
+    """Held by one process at a time (common.exclusive): horizons are built in worker processes
+    (serve.Horizons), and two of them must not download or build the same tile at once. The lock file stays
+    (empty) in a .locks folder beside the data."""
+    from common import exclusive
+    with exclusive(path):
         yield
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
 
 
 def write_atomic(path: Path, data: bytes) -> None:

@@ -23,7 +23,6 @@ Storage:  <data_dir>/climatology/<source>/<region>/meta.json + values.npy [+ cou
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import math
 import os
@@ -36,7 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common import Cycle, field_names, write_json_atomic
+from common import Cycle, exclusive, field_names, write_json_atomic
 
 G0, R_DRY = 9.80665, 287.05
 DEPRESSION_M = -20.0                     # as terrain.DEPRESSION_M: below this the low ground is real
@@ -233,13 +232,8 @@ def follow_terrain(levels: list[dict], model_ground: float, ground: float, full_
 @contextmanager
 def locked(out: Path):
     """Exclusive lock on one region's climatology (the fetcher and backfill_gfs.py may run at once)."""
-    out.parent.mkdir(parents=True, exist_ok=True)
-    with open(out.parent / f".{out.name}.lock", "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh, fcntl.LOCK_UN)
+    with exclusive(out.parent / f".{out.name}.lock"):
+        yield
 
 
 GFS_STORES = ("gfs", "gfs-near", "gfs-moments")

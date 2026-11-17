@@ -3,10 +3,10 @@
 
     GET /v1/path-profiles?lat=40.71&lon=-74.01[&from=2026-10-05][&days=8][&ensemble=1][&typical=1]
     GET /v1/horizon?lat=31.7486&lon=35.2374[&radius_km=0.8 | &bbox=S,W,N,E][&grid_m=100][&eye=1.7][&height=..][&min_km=1][&moon=1]
-    GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..][&outline=1]   (the official area containing the point; outline=1 adds its polygons)
+    GET /v1/horizon?lat=40.609283058016736&lon=-73.96828881865329&area=auto[&radius_km=..][&outline=1]   (the official area containing the point; area=finest: its finest unit; outline=1 adds its polygons)
     GET /v1/terrain-version?<the same query as /v1/horizon>   ({"fine": ..., "layers": ..., "algo": ...}: is a stored horizon current?)
-    GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329[&outline=1]
-    GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &bbox=S,W,N,E][&percentile=90][&year=2026]
+    GET /v1/area?lat=40.609283058016736&lon=-73.96828881865329[&area=finest][&outline=1]
+    GET /v1/light-pollution?lat=31.7767&lon=35.2345[&area=auto | &area=finest | &bbox=S,W,N,E][&percentile=90][&year=2026]
     GET /v1/haze-calibration?lat=40.71&lon=-74.01
     GET /v1/terrain-tiles/{z}/{x}/{y}.png   (Terrarium-encoded heights for the website's 3D horizon view)
     GET /v1/cesium-terrain/layer.json, /v1/cesium-terrain/{z}/{x}/{y}.terrain   (the same in Cesium's quantized-mesh)
@@ -31,9 +31,11 @@ sigma_members), whose weighted mean time is the typical sunrise rather than the 
 /v1/horizon returns terrain horizon profiles for visible sunrise / sunset (terrain.py), computed from
 elevation tiles (downloaded on first use; bare-earth layers from dem_layers.py when terrain.layers is
 set) and cached on disk: with radius_km 0 the exact point, otherwise the
-vantage points within that radius that see lowest in some direction. With area=auto the server looks the
-point up in areas.json (build_areas.py) and searches the whole official area it is in - a neighbourhood,
-village or city - so everyone in it gets the same visible sunrise; the response's "area" says which.
+vantage points within that radius that see lowest in some direction. With area=auto (or area=city) the
+server looks the point up in areas.sqlite (build_areas.py) and searches the whole official area it is in -
+its town or city when that is no bigger than Jerusalem (areas.city_radius_km), else the neighbourhood or
+district - so everyone in it gets the same visible sunrise; the response's "area" says which. area=finest
+takes the finest official unit instead (a neighbourhood even in a small city; see areas.py).
 With moon=1 it also returns moonrise / moonset horizons (terrain.py): over the Moon's wider range of
 directions, and in an area from the spots at terrain.moon_percentile (default 90) of horizon height,
 so the moonrise printed for the area is one nearly all of it can see. A
@@ -927,16 +929,38 @@ def _worker_build(task: int, p: dict) -> tuple[bytes, bool, float | None]:
 
 
 def areas_path(cfg: dict) -> Path:
-    return Path(cfg.get("areas", {}).get("file") or Path(cfg["data_dir"]) / "areas.json")
+    """areas.file, else <data_dir>/areas.sqlite - or the areas.json an older build_areas.py wrote, until then."""
+    if cfg.get("areas", {}).get("file"):
+        return Path(cfg["areas"]["file"])
+    new = Path(cfg["data_dir"]) / "areas.sqlite"
+    old = new.with_name("areas.json")
+    return old if old.exists() and not new.exists() else new
+
+
+def area_rule(q: dict) -> str | None:
+    """The area= parameter: "city" (auto, city, 1, true), "finest", or None (no area asked for)."""
+    v = q.get("area", [""])[0]
+    if v in ("auto", "city", "1", "true"):
+        return "city"
+    if v == "finest":
+        return "finest"
+    if v in ("", "0", "false"):
+        return None
+    raise ValueError("area must be auto, city or finest")
+
+
+def find_area(index: areas.AreaIndex, cfg: dict, lat: float, lon: float, rule: str) -> dict | None:
+    return index.find(lat, lon, rule, float(cfg.get("areas", {}).get("city_radius_km", areas.CITY_RADIUS_KM)))
 
 
 def resolve_area(index: areas.AreaIndex, cfg: dict, q: dict):
-    """For area=auto: (query to run, extra fields for the response, bbox cap). With outline=1 the area keeps
-    its polygons; the query run (and so the horizon's cache key) is the same either way."""
+    """For area=auto / city / finest: (query to run, extra fields for the response, bbox cap). With outline=1
+    the area keeps its polygons; the query run (and so the horizon's cache key) is the same either way, and
+    the same for both rules when they pick the same area."""
     lat, lon = float(q["lat"][0]), float(q["lon"][0])
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
         raise ValueError("lat/lon out of range")
-    a = index.find(lat, lon)
+    a = find_area(index, cfg, lat, lon, area_rule(q) or "city")
     cap = float(cfg["terrain"]["max_area_radius_km"])
     rest = {k: v for k, v in q.items() if k != "area"}
     if a is None:
@@ -954,7 +978,8 @@ def want_outline(q: dict) -> bool:
     return q.get("outline", [""])[0] in ("1", "true")
 
 
-def light_pollution_query(lp: light_pollution.LightPollution, index: areas.AreaIndex, q: dict) -> tuple[dict, int]:
+def light_pollution_query(lp: light_pollution.LightPollution, index: areas.AreaIndex, q: dict,
+                          cfg: dict | None = None) -> tuple[dict, int]:
     """/v1/light-pollution: (response, cache seconds)."""
     get = lambda k: q[k][0] if k in q and q[k][0] != "" else None
     pct = None if get("percentile") is None else float(get("percentile"))
@@ -976,9 +1001,10 @@ def light_pollution_query(lp: light_pollution.LightPollution, index: areas.AreaI
     if year is not None and not 1990 <= year <= 2100:
         raise ValueError("year must be between 1990 and 2100")
     area, extra = None, {}
-    want_area = get("area") in ("auto", "1", "true")
+    rule = area_rule(q)
+    want_area = rule is not None
     if want_area:
-        a = index.find(lat, lon)
+        a = find_area(index, cfg or {}, lat, lon, rule)
         if a is None:
             extra = {"area": None, "areaNote": "no official area here; the value at the point"}
         elif a["radiusKm"] > lp.max_radius_km:
@@ -1113,7 +1139,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path == "/v1/horizon":
                 # a partial answer (a fine-terrain chunk failed; built again after a while): 10 minutes, like
                 # /v1/terrain-version's for the same place
-                if q.get("area", [""])[0] in ("auto", "1", "true"):
+                if area_rule(q):
                     run, extra, cap = resolve_area(self.area_index(), self.store.cfg, q)
                     body, partial = self.horizons.get_ex(run, extra, cap)
                     return self.send_gzip_json(body, cache_s=600 if partial else 7 * 86400,
@@ -1122,7 +1148,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_gzip_json(body, cache_s=600 if partial else 30 * 86400, tags=("terrain",))
             if url.path == "/v1/terrain-version":
                 run, extra, cap = q, None, None
-                if q.get("area", [""])[0] in ("auto", "1", "true"):
+                if area_rule(q):
                     run, extra, cap = resolve_area(self.area_index(), self.store.cfg, q)
                     if not want_outline(q):
                         extra = None           # the area only when asked for its outline: same answer as before
@@ -1136,7 +1162,7 @@ class Handler(BaseHTTPRequestHandler):
             if url.path.startswith("/v1/cesium-terrain/"):
                 return self.send_cesium_terrain(url.path)
             if url.path == "/v1/light-pollution":
-                body, cache_s = light_pollution_query(self.lightpol, self.area_index(), q)
+                body, cache_s = light_pollution_query(self.lightpol, self.area_index(), q, self.store.cfg)
                 return self.send_json(200, body, cache_s=cache_s, tags=("lightpol", "areas"))
             if url.path == "/v1/haze-calibration":
                 lat, lon = float(q["lat"][0]), float(q["lon"][0])
@@ -1146,7 +1172,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(200, body, cache_s=7 * 86400, tags=("haze",))
             if url.path == "/v1/area":
                 lat, lon = float(q["lat"][0]), float(q["lon"][0])
-                a = self.area_index().find(lat, lon)
+                a = find_area(self.area_index(), self.store.cfg, lat, lon, area_rule(q) or "city")
                 if a is None:
                     return self.send_json(404, {"area": None, "error": "no official area contains this point"})
                 return self.send_json(200, {"area": areas.public(a, want_outline(q))}, cache_s=86400, tags=("areas",))

@@ -1,4 +1,4 @@
-"""build_areas.py + areas.py + serve.py area=auto, without network: every source is a local fixture
+"""build_areas.py + areas.py + serve.py area=auto / finest, without network: every source is a local fixture
 placed in the download cache under the name build_areas.py would give the real download.
 
     python3 tests/test_areas.py [--la PATH_TO_REAL_la-times.geojson]
@@ -21,6 +21,7 @@ HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE.parent))
 
 import shapefile  # noqa: E402  (pyshp)
+import sqlite3  # noqa: E402
 
 import areas  # noqa: E402
 import build_areas  # noqa: E402
@@ -182,6 +183,24 @@ def make_fixtures(cache: Path, la_src: Path | None):
                 [[(2.350, 48.860), (2.355, 48.860), (2.360, 48.860), (2.360, 48.86001),
                   (2.355, 48.86001), (2.350, 48.86001), (2.350, 48.860)]])]}
     (cache / "gb-FRA-ADM5.geojson").write_text(json.dumps(gbf))
+    # a country without a plan of its own, by geoBoundaries' metadata alone: its finest level is named like
+    # a unit inside municipalities, so the level above it is the municipal one and the finest its neighbourhoods.
+    # A big city (~21 km centre to corner) in two sub-municipalities, and a small one (~4 km) in one
+    (cache / "gb-KOR-ADM2.geojson").write_text(json.dumps(fc(
+        feature({"shapeID": "KOR-B", "shapeName": "Bigcity"}, [sq(37.40, 126.80, 37.70, 127.20)]),
+        feature({"shapeID": "KOR-S", "shapeName": "Smallcity"}, [sq(37.00, 127.00, 37.05, 127.06)]))))
+    (cache / "gb-KOR-ADM3.geojson").write_text(json.dumps(fc(
+        feature({"shapeID": "KOR-B1", "shapeName": "Bigcity West"}, [sq(37.40, 126.80, 37.70, 127.00)]),
+        feature({"shapeID": "KOR-B2", "shapeName": "Bigcity East"}, [sq(37.40, 127.00, 37.70, 127.20)]),
+        feature({"shapeID": "KOR-S1", "shapeName": "Smallcity Dong"}, [sq(37.00, 127.00, 37.05, 127.06)]))))
+    rec = lambda iso, adm, canon: {"boundaryISO": iso, "boundaryType": f"ADM{adm}", "boundaryCanonical": canon,
+                                   "boundarySource": f"{iso} statistics office", "boundaryLicense": "CC BY 4.0",
+                                   "simplifiedGeometryGeoJSON": f"https://example.invalid/{iso}{adm}.geojson"}
+    (cache / "gb-meta.json").write_text(json.dumps(
+        [rec("FRA", a, c) for a, c in ((0, "Country"), (4, "Unknown"), (5, "Arrondissement municipal, Commune"))]
+        + [rec("KOR", a, c) for a, c in ((0, "Republic of Korea"), (1, "Province"),
+                                          (2, "Si, Kun (districts and cities)"), (3, "submunicipalities"))]
+        + [rec("PRI", 2, "Municipality")]))                              # covered by TIGER: no plan of its own
     make_canada_fixtures(cache)
     # the big US cities' layers, each in its own field names (away from the test places)
     far = lambda k: [sq(30.0 + k, -100.0, 30.01 + k, -99.99)]
@@ -255,98 +274,75 @@ def make_canada_fixtures(cache: Path):
     (cache / "ca-wpg.geojson").write_text(json.dumps(fc(feature({"id": "18", "name": "Tuxedo"}, far(4)))))
 
 
-CA_BOXES = {"Toronto_area_ON": (43.62, -79.58, 43.78, -79.22), "Halifax_area_NS": (44.60, -63.70, 44.70, -63.55),
-            "Montreal_area_QC": (45.455, -73.69, 45.59, -73.51)}
-
-
-CHAI = [
-    {"info": {"title": "USA"}, "metroAreas": [
-        {"name": "Queens_area_NY", "bounds": {"n": 40.745, "s": 40.695, "e": -73.79, "w": -74.01}},
-        {"name": "Great_Neck_area_NY", "bounds": {"n": 40.82, "s": 40.77, "e": -73.70, "w": -73.75}},
-        {"name": "Encino_point_CA", "bounds": {"n": 34.15, "s": 34.15, "e": -118.50, "w": -118.50}}]},
-    {"info": {"title": "Eretz Yisrael (Neighborhoods)"}, "metroAreas": [
-        {"name": "Jerusalem", "bounds": {"n": 31.86, "s": 31.69, "e": 35.26, "w": 35.09}},
-        {"name": "Safed", "bounds": {"n": 32.99, "s": 32.95, "e": 35.52, "w": 35.48}}]},
-    {"info": {"title": "Eretz Yisrael (Cities)"}, "metroAreas": [
-        {"name": "Alon Shvut", "bounds": {"n": 31.6551, "s": 31.6550, "e": 35.1251, "w": 35.1250}},
-        {"name": "Kfar Etzion", "bounds": {"n": 31.6001, "s": 31.6000, "e": 35.1001, "w": 35.1000}},
-        {"name": "Kiriat-yam-mozkin-bialik", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}},
-        {"name": "Smalltown", "bounds": {"n": 30.0001, "s": 30.0, "e": 35.0001, "w": 35.0}},   # wrong point
-        {"name": "Zefat", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}},                        # no location
-        {"name": "Smalltown point", "bounds": {"n": 32.9601, "s": 32.96, "e": 35.5101, "w": 35.51}},
-        {"name": "Beit El", "bounds": {"n": 32.9601, "s": 32.96, "e": 35.4901, "w": 35.49}},     # inside Safed
-        {"name": "Dimonah", "bounds": {"n": 31.0701, "s": 31.07, "e": 35.0301, "w": 35.03}},
-        {"name": "Tzuba", "bounds": {"n": 31.5001, "s": 31.50, "e": 34.9001, "w": 34.90}},       # council land
-        {"name": "Nowhere", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}},
-        {"name": "Smalltown Old", "bounds": {"n": 31.7701, "s": 31.77, "e": 35.2101, "w": 35.21}}]},   # wrong point
-    {"info": {"title": "France"}, "metroAreas": [
-        {"name": "Paris", "bounds": {"n": 48.87, "s": 48.84, "e": 2.38, "w": 2.34}},
-        {"name": "Nantes", "bounds": {"n": 0, "s": 0, "e": 0, "w": 0}}]},
-    {"info": {"title": "Canada"}, "metroAreas": [
-        {"name": k, "bounds": {"s": b[0], "w": b[1], "n": b[2], "e": b[3]}} for k, b in CA_BOXES.items()]},
-]
-
-OVERRIDES = {"_extra": {"USA": [{"name": "Gardens_area_NY", "point": [40.805, -73.725]}]},   # not in chaiTable
-             "Eretz Yisrael (Cities)/Smalltown Old": {"names": [["Nonexistent Spelling", "Smalltown"]]},
-             "Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik": {"names": ["Kiryat Yam", "Kiryat Motzkin", "Kiryat Bialik"]},
-             "France/Nantes": {"names": ["Nantes"]}}
+def rows(path: Path) -> dict[str, dict]:
+    """Every area in an areas.sqlite, by id (as areas.py decodes them)."""
+    idx = areas.AreaIndex(path)
+    idx.refresh()
+    con = idx.connect()
+    try:
+        return {a["id"]: a for a in (idx.area(con, r) for (r,) in con.execute("SELECT rowid FROM areas"))}
+    finally:
+        con.close()
 
 
 def check_build(tmp: Path, la: Path | None) -> Path:
     cache = tmp / "cache"
     make_fixtures(cache, la)
-    (tmp / "chai.json").write_text(json.dumps(CHAI))
-    (tmp / "ov.json").write_text(json.dumps(OVERRIDES))
     (tmp / "config.json").write_text(json.dumps({"data_dir": str(tmp / "data")}))
-    assert build_areas.main(["--config", str(tmp / "config.json"), "--chai", str(tmp / "chai.json"),
-                             "--cache", str(cache), "--overrides", str(tmp / "ov.json")]) == 0
-    out = tmp / "data" / "areas.json"
-    data = json.loads(out.read_text())
-    ids = {a["id"] for a in data["areas"]}
-    report = (tmp / "data" / "areas_report.txt").read_text()
+    base = ["--config", str(tmp / "config.json"), "--cache", str(cache)]
+    assert build_areas.main(base) == 0
+    out = tmp / "data" / "areas.sqlite"
+    by_id = rows(out)
+    ids = set(by_id)
+    report = (tmp / "data" / "areas_report.txt").read_text(encoding="utf-8")
     print(report)
+    meta = areas.AreaIndex(out)
+    meta.refresh()
+    assert set(meta.meta["countries"]) == {"USA", "CAN", "ISR", "FRA", "KOR"}, meta.meta["countries"]
+    assert "PRI" not in meta.meta["countries"], "Puerto Rico comes with the USA's TIGER files"
+    assert {a["country"] for a in by_id.values()} == set(meta.meta["countries"])
 
-    # NYC: the NTAs replace "New York city" (fully covered); Great Neck: village + CDP + the town around them
-    assert {"nyc-nta:QN0801", "nyc-nta:QN0802"} <= ids, ids
-    assert "us-place:3651000" not in ids, "New York city should be pruned: its NTAs cover it"
+    # every official unit, nothing pruned: New York city and its NTAs, the village, the CDP, the town
+    assert {"nyc-nta:QN0801", "nyc-nta:QN0802", "us-place:3651000"} <= ids, ids
     assert {"us-place:3630367", "us-place:3630356", "us-cousub:3605951000"} <= ids, ids
-    assert "la:encino" in ids, ids
-    # Israel: CBS sub-quarters for the Neighborhoods list (Safed: statistical areas, a small town: none);
-    # OpenStreetMap neighbourhoods are not used; never the regional council
+    assert "la:encino" in ids and by_id["la:encino"]["level"] == areas.LEVEL_NEIGHBOURHOOD
+    # Israel: CBS sub-quarters and Safed's statistical areas, every locality outline, the OSM municipalities
+    # and villages; never a regional council, council land or an unnamed area, nor OSM's neighbourhoods
     assert {"cbs-subq:3000-11", "cbs-subq:3000-12", "cbs-stat:8000-1", "cbs-stat:8000-2"} <= ids, ids
     assert not any(i.startswith("cbs-stat:1234") for i in ids), ids
-    # CBS locality outlines: Smalltown by its point, by name (a wrong point), Zefat by name (no location)
-    assert "cbs-loc:1234" in ids and "cbs-loc:8000" in ids, ids
-    assert "Smalltown: the chaiTable point is in no official unit; matched by name -> Smalltown" in report
-    assert "Zefat: no location in chaiTable.json; matched by name -> Zefat" in report
-    assert "cbs-loc:3000" not in ids, "Jerusalem's outline is covered by its sub-quarters"
+    assert {"cbs-loc:1234", "cbs-loc:8000", "cbs-loc:3000", "cbs-loc:3574"} <= ids, ids
     assert not {"cbs-loc:5526", "cbs-loc:9920"} & ids, "council land and unnamed areas are not localities"
-    assert any(u["place"] == "Eretz Yisrael (Cities)/Tzuba" for u in data["unresolved"]), data["unresolved"]
-    assert "cbs-loc:3574" in ids and "the chaiTable point is in Zefat, but the name matches Bet El" in report
-    dim = next(a for a in data["areas"] if a["id"] == "cbs-loc:2200")
-    assert dim["bbox"] == [31.06, 35.02, 31.08, 35.04], dim["bbox"]
-    assert {"osm:w5", "osm:r6", "osm:r7"} <= ids and not {"osm:r2", "osm:w3"} & ids, ids
-    assert "osm:r1" not in ids, "Jerusalem is covered by its sub-quarters, so the city itself is dropped"
-    assert "osm:r4" not in ids, "regional councils must not become areas"
-    unresolved = {u["place"]: u["reason"] for u in data["unresolved"]}
-    assert "Eretz Yisrael (Cities)/Nowhere" in unresolved, unresolved
-    assert "Eretz Yisrael (Cities)/Kfar Etzion" in unresolved, "only a regional council there: unresolved"
-    assert "USA/Gardens_area_NY" in next(a for a in data["areas"] if a["id"] == "us-place:3630356")["places"], \
-        "an _extra place gets its official unit like a chaiTable place"
-    assert "Nonexistent Spelling / Smalltown -> Smalltown (1.0)" in report, "best of the alternative spellings"
-    assert "Eretz Yisrael (Cities)/Smalltown Old" in next(a for a in data["areas"] if a["id"] == "cbs-loc:1234")["places"]
-    assert "Kiryat Yam -> NO MATCH" in unresolved["Eretz Yisrael (Cities)/Kiriat-yam-mozkin-bialik"]
-    assert "gb-FRA5:FRA-2" in ids and "gb-FRA5:FRA-1" in ids, ids
-    assert "gb-FRA5:FRA-3" not in ids and "dropped Sliver" in report, "slivers are dropped and reported"
-    q11 = next(a for a in data["areas"] if a["id"] == "cbs-subq:3000-11")
+    assert by_id["cbs-loc:2200"]["bbox"] == [31.06, 35.02, 31.08, 35.04], "Dimona without its industrial zone"
+    assert {"osm:r1", "osm:w5", "osm:r6", "osm:r7"} <= ids and not {"osm:r2", "osm:w3", "osm:r4"} & ids, ids
+    q11 = by_id["cbs-subq:3000-11"]
     assert len(q11["polygons"]) == 2 and q11["name"] == "Jerusalem, sub-quarter 11", q11
-    assert q11["places"] == ["Eretz Yisrael (Neighborhoods)/Jerusalem"]
+    # France: geoBoundaries with the kind chosen by hand and the source from the metadata; slivers dropped
+    assert {"gb-FRA5:FRA-1", "gb-FRA5:FRA-2"} <= ids and "gb-FRA5:FRA-3" not in ids, ids
+    assert "dropped Sliver" in report, "slivers are dropped and reported"
+    assert by_id["gb-FRA5:FRA-2"]["kind"] == "commune", by_id["gb-FRA5:FRA-2"]
+    assert by_id["gb-FRA5:FRA-2"]["source"] == "FRA statistics office (via geoBoundaries; CC BY 4.0)"
+    # Korea, by the rule: the municipal level and its sub-municipalities as neighbourhoods
+    assert by_id["gb-KOR2:KOR-B"]["level"] == areas.LEVEL_LOCALITY and by_id["gb-KOR2:KOR-B"]["kind"].startswith("Si, Kun")
+    assert by_id["gb-KOR3:KOR-B1"]["level"] == areas.LEVEL_NEIGHBOURHOOD, by_id["gb-KOR3:KOR-B1"]
+    assert build_areas.default_levels({1: {"boundaryCanonical": "Province"}, 2: {"boundaryCanonical": "Unknown"},
+                                       3: {"boundaryCanonical": "Ward"}}) == (2, 3)
+    assert build_areas.default_levels({1: {"boundaryCanonical": "Province"},
+                                       2: {"boundaryCanonical": "Municipalities"}}) == (2, None)
+    assert build_areas.default_levels({0: {"boundaryCanonical": "Gibraltar"}}) == (0, None)
+    # geoBoundaries files are read a feature at a time: the same features, whatever the chunks they are read in
+    whole = json.loads((cache / "gb-KOR-ADM3.geojson").read_text())["features"]
+    for chunk in (5, 16, 97, 1 << 20):
+        assert list(build_areas.iter_geojson_features(cache / "gb-KOR-ADM3.geojson", chunk)) == whole, chunk
+    (tmp / "cut.geojson").write_text(json.dumps(fc(*whole))[:-40])
+    try:
+        list(build_areas.iter_geojson_features(tmp / "cut.geojson", 16))
+        raise AssertionError("a cut-off file must fail")
+    except ValueError:
+        pass
 
-    # Canada: Toronto and Halifax replaced by their neighbourhoods / communities; Vaughan stays a CSD;
-    # Montreal by its arrondissements, its villes liées come from StatCan (not twice)
-    by_id = {a["id"]: a for a in data["areas"]}
-    assert {"ca-tor:34", "ca-tor:173", "ca-hfx:101", "ca-hfx:102", "statcan-csd:3519028"} <= ids, ids
-    assert "statcan-csd:3520005" not in ids and "statcan-csd:1209034" not in ids, "covered by finer units"
+    # Canada: the whole country (Vancouver too, far from any place), names, kinds and reprojection
+    assert {"ca-tor:34", "ca-tor:173", "ca-hfx:101", "ca-hfx:102", "statcan-csd:3519028",
+            "statcan-csd:3520005", "statcan-csd:1209034", "statcan-csd:5915022"} <= ids, ids
     assert by_id["ca-tor:34"]["name"] == "Bathurst Manor, Toronto" and by_id["ca-tor:34"]["level"] == 30
     assert by_id["ca-hfx:101"]["name"] == "Halifax, Halifax Regional Municipality", by_id["ca-hfx:101"]
     assert by_id["statcan-csd:3519028"]["name"] == "Vaughan, ON"
@@ -356,21 +352,17 @@ def check_build(tmp: Path, la: Path | None) -> Path:
     assert by_id["statcan-csd:2466023"]["name"] == "Montréal, QC", by_id["statcan-csd:2466023"]["name"]
     assert build_areas.dbf_encoding(b"\0" * 8 + (32).to_bytes(2, "little") + b"\0" * 22 + "Lévis".encode()) == "utf-8"
     assert (tmp / "cache" / "lcsd000b21a_e-unzipped" / "x.shp").exists(), "unpacked once, read from disk"
-    assert "statcan-csd:5915022" not in ids, "census subdivisions far from every place are left out"
-    s, w, n, e = by_id["statcan-csd:3519028"]["bbox"]                    # reprojected back to lon/lat
-    assert abs(s - 43.75) < 1e-4 and abs(w + 79.60) < 1e-3 and abs(n - 43.90) < 1e-4 and abs(e + 79.40) < 1e-3, (s, w, n, e)
-    assert "statcan-csd:2466023" in ids, "Montréal city: its arrondissements cover only part of it here"
-    # the other cities' layers loaded with their own field names (no source failed)
-    assert "failed" not in report and "UNRESOLVED Canada" not in report, report
+    s_, w, n, e = by_id["statcan-csd:3519028"]["bbox"]                   # reprojected back to lon/lat
+    assert abs(s_ - 43.75) < 1e-4 and abs(w + 79.60) < 1e-3 and abs(n - 43.90) < 1e-4 and abs(e + 79.40) < 1e-3, (s_, w, n, e)
+    assert "FAILED" not in report, report
     feats = json.loads((tmp / "cache" / "ca-ham-0.geojson").read_text())["features"]
-    ham = build_areas.city_units(feats, next(s for s in build_areas.PLANS["Canada"] if s.get("key") == "ca-ham"))
+    ham = build_areas.city_units(feats, next(s for s in build_areas.COUNTRY_PLANS["CAN"] if s.get("key") == "ca-ham"))
     assert [u.name for u in ham] == ["Westdale North, Hamilton"], [u.name for u in ham]
     try:
         build_areas.city_units(feats, {"key": "x", "id_fields": ["nope"], "name_fields": ["NEIGHBOURHOOD"]})
         raise AssertionError("a missing id field must fail the source")
     except ValueError as e:
         assert "PLANNING_UNIT" in str(e), e
-
     us_names = {}
     for spec in build_areas.US_CITIES:
         f = json.loads((cache / (spec["key"] + ("-0.geojson" if "arcgis" in spec else ".geojson"))).read_text())
@@ -379,40 +371,65 @@ def check_build(tmp: Path, la: Path | None) -> Path:
                         "us-dal:13": "Council District 13, Dallas", "us-phx:9": "North Mountain, Phoenix",
                         "us-sd:40": "Torrey Pines, San Diego", "us-aus:1": "Hancock, Austin",
                         "us-sea:5": "Seward Park, Seattle", "us-bal:60": "Cheswolde, Baltimore"}, us_names
-    assert "failed" not in (tmp / "data" / "areas_report.txt").read_text()
 
-    # --only rebuilds some countries and keeps the rest of the file; --replace writes only those countries
-    common = ["--config", str(tmp / "config.json"), "--chai", str(tmp / "chai.json"), "--cache", str(cache),
-              "--overrides", str(tmp / "ov.json"), "--only", "Canada"]
-    assert build_areas.main(common) == 0
-    again = json.loads(out.read_text())
-    assert {a["id"] for a in again["areas"]} == ids, "--only Canada must not drop the other countries"
-    assert again["unresolved"] == [u for u in data["unresolved"] if not u["place"].startswith("Canada/")] + \
-        [u for u in data["unresolved"] if u["place"].startswith("Canada/")]
-    assert next(a for a in again["areas"] if a["id"] == "nyc-nta:QN0801")["places"] == \
-        next(a for a in data["areas"] if a["id"] == "nyc-nta:QN0801")["places"]
-    only = tmp / "data" / "only-canada.json"
-    (only).write_text(out.read_text())
-    assert build_areas.main(common + ["--replace", "--out", str(only)]) == 0
-    canada = {a["id"] for a in json.loads(only.read_text())["areas"]}
+    # --only rebuilds some countries and keeps the rest; --replace writes only those countries
+    assert build_areas.main(base + ["--only", "CAN"]) == 0
+    assert set(rows(out)) == ids, "--only CAN must not drop the other countries"
+    # a country whose source fails keeps the areas it had (and the build says so)
+    (tmp / "bad.json").write_text(json.dumps({"FRA": [{"type": "file", "path": str(tmp / "missing.geojson")}]}))
+    assert build_areas.main(base + ["--only", "FRA", "--sources", str(tmp / "bad.json")]) == 1
+    assert set(rows(out)) == ids, "FRA's areas kept when its source failed"
+    rep = (tmp / "data" / "areas_report.txt").read_text(encoding="utf-8")
+    assert "FRA: FAILED" in rep and "kept the 2 areas it had" in rep, rep
+    only = tmp / "data" / "only-canada.sqlite"
+    assert build_areas.main(base + ["--only", "CAN", "--replace", "--out", str(only)]) == 0
+    canada = set(rows(only))
     assert canada and all(i.startswith(("ca-", "statcan-")) for i in canada), canada
+    try:
+        build_areas.main(base + ["--only", "Canada"])
+        raise AssertionError("--only takes country codes")
+    except SystemExit as e:
+        assert "ISO 3166" in str(e), e
     return out
 
 
 def check_lookup(path: Path):
     idx = areas.AreaIndex(path)
-    f = lambda la, lo: (idx.find(la, lo) or {}).get("id")
-    assert f(40.72, -73.85) == "nyc-nta:QN0801"
-    assert f(40.72, -73.95) == "nyc-nta:QN0802"
-    assert f(40.785, -73.725) == "us-place:3630367"           # village beats the town around it
-    assert f(40.77, -73.75) == "us-cousub:3605951000"         # outside any village / CDP: the town
-    assert f(34.15, -118.50) == "la:encino"
-    assert f(31.81, 35.22) == "cbs-subq:3000-12"              # CBS sub-quarter
-    assert f(31.75, 35.20) == "cbs-subq:3000-11"              # the second statistical area of sub-quarter 11
-    assert f(32.96, 35.49) == "cbs-stat:8000-1"               # Safed: statistical area
-    assert f(31.655, 35.125) == "osm:w5"                      # village
-    assert f(31.60, 35.10) is None                            # regional council only
-    assert f(0, 0) is None
+    fin = lambda la, lo: (idx.find(la, lo, "finest") or {}).get("id")
+    city = lambda la, lo: (idx.find(la, lo, "city") or {}).get("id")
+    # finest: the finest unit
+    assert fin(40.72, -73.85) == "nyc-nta:QN0801"
+    assert fin(40.72, -73.95) == "nyc-nta:QN0802"
+    assert fin(40.785, -73.725) == "us-place:3630367"         # village beats the town around it
+    assert fin(40.77, -73.75) == "us-cousub:3605951000"       # outside any village / CDP: the town
+    assert fin(34.15, -118.50) == "la:encino"
+    assert fin(31.81, 35.22) == "cbs-subq:3000-12"            # CBS sub-quarter
+    assert fin(31.75, 35.20) == "cbs-subq:3000-11"            # the second statistical area of sub-quarter 11
+    assert fin(32.96, 35.49) == "cbs-stat:8000-1"             # Safed: statistical area
+    assert fin(31.655, 35.125) == "osm:w5"                    # village
+    assert fin(37.50, 126.90) == "gb-KOR3:KOR-B1"
+    assert fin(37.02, 127.02) == "gb-KOR3:KOR-S1"
+    # city: a settlement up to Jerusalem's size whole; a bigger one by its neighbourhoods
+    assert city(40.72, -73.85) == city(40.72, -73.95) == "us-place:3651000"     # this "New York" is 8.7 km
+    assert city(40.785, -73.725) == "us-place:3630367"
+    assert city(40.77, -73.75) == "us-cousub:3605951000"
+    assert city(31.81, 35.22) == city(31.75, 35.20) == "cbs-loc:3000"           # all Jerusalem, one area
+    assert city(32.96, 35.49) == "cbs-loc:8000"
+    assert city(43.70, -79.50) == "ca-tor:34"                 # Toronto (~20 km) by its neighbourhoods
+    assert city(43.85, -79.50) == "statcan-csd:3519028"       # Vaughan (~12 km), north of Toronto: whole
+    assert city(45.00, -63.80) == "ca-hfx:101"                # Halifax (~70 km) by its communities
+    assert city(37.50, 126.90) == "gb-KOR3:KOR-B1" and city(37.50, 127.10) == "gb-KOR3:KOR-B2"
+    assert city(37.02, 127.02) == "gb-KOR2:KOR-S"             # the small city whole, not its one dong
+    assert city(49.25, -123.10) == "statcan-csd:5915022"      # no neighbourhoods: the city itself
+    assert idx.find(43.70, -79.50, "city", 30.0)["id"] == "statcan-csd:3520005", "a bigger city_radius_km"
+    for f in (fin, city):
+        assert f(31.60, 35.10) is None                        # regional council only
+        assert f(0, 0) is None
+    try:
+        idx.find(0, 0, "nearest")
+        raise AssertionError("an unknown rule must fail")
+    except ValueError:
+        pass
     print(f"lookup ok ({len(idx)} areas)")
 
 
@@ -435,67 +452,96 @@ def check_server(tmp: Path, path: Path):
     srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{srv.server_address[1]}"
+    stored = rows(path)
 
     def get(u):
         r = urllib.request.urlopen(urllib.request.Request(base + u, headers={"Accept-Encoding": "gzip"}))
         body = r.read()
         return json.loads(gzip.decompress(body) if r.headers.get("Content-Encoding") == "gzip" else body)
 
+    def status(u):
+        try:
+            return urllib.request.urlopen(base + u).status
+        except urllib.error.HTTPError as e:
+            return e.code
+
+    # /v1/area: the city rule unless area=finest
     a = get("/v1/area?lat=40.72&lon=-73.85")["area"]
-    assert a["id"] == "nyc-nta:QN0801" and "polygons" not in a, a
-    try:
-        urllib.request.urlopen(base + "/v1/area?lat=0&lon=0")
-        raise AssertionError("expected 404")
-    except urllib.error.HTTPError as e:
-        assert e.code == 404
+    assert a["id"] == "us-place:3651000" and "polygons" not in a and a["country"] == "USA", a
+    assert get("/v1/area?lat=40.72&lon=-73.85&area=finest")["area"]["id"] == "nyc-nta:QN0801"
+    assert status("/v1/area?lat=0&lon=0") == 404
+    assert status("/v1/area?lat=40.72&lon=-73.85&area=nearest") == 400
     # two different points in the same NTA -> the same computation (cached once), over the NTA's box
-    h1 = get("/v1/horizon?lat=40.72&lon=-73.85&area=auto")
-    h2 = get("/v1/horizon?lat=40.73&lon=-73.82&area=auto&radius_km=0.8")
+    h1 = get("/v1/horizon?lat=40.72&lon=-73.85&area=finest")
+    h2 = get("/v1/horizon?lat=40.73&lon=-73.82&area=finest&radius_km=0.8")
     assert h1["area"]["id"] == h2["area"]["id"] == "nyc-nta:QN0801"
     assert len(calls) == 1, calls
     assert calls[0][2] == [40.7, -73.9, 40.74, -73.8], calls
+    # area=auto: the whole (small) city, one computation over its box, for both NTAs' points
+    ha = get("/v1/horizon?lat=40.72&lon=-73.85&area=auto")
+    hb = get("/v1/horizon?lat=40.72&lon=-73.95&area=city")
+    assert ha["area"]["id"] == hb["area"]["id"] == "us-place:3651000", ha["area"]
+    assert len(calls) == 2 and calls[-1][2] == [40.7, -74.0, 40.74, -73.8], calls
     # outline=1: the same area (and the same cached computation) with its polygons as stored, so a client can
     # test later fixes against the real boundary; without it the answer is as before, polygons and all absent
-    stored = next(x for x in json.loads(path.read_text())["areas"] if x["id"] == "nyc-nta:QN0801")
-    h1o = get("/v1/horizon?lat=40.72&lon=-73.85&area=auto&outline=1")
-    assert len(calls) == 1, calls
-    assert h1o["area"] == stored and h1o["area"]["polygons"] == stored["polygons"], h1o["area"]
-    assert {k: v for k, v in h1o["area"].items() if k != "polygons"} == h1["area"] == areas.public(stored)
+    nta = stored["nyc-nta:QN0801"]
+    h1o = get("/v1/horizon?lat=40.72&lon=-73.85&area=finest&outline=1")
+    assert len(calls) == 2, calls
+    assert h1o["area"] == nta and h1o["area"]["polygons"] == nta["polygons"], h1o["area"]
+    assert {k: v for k, v in h1o["area"].items() if k != "polygons"} == h1["area"] == areas.public(nta)
     assert {k: v for k, v in h1o.items() if k != "area"} == {k: v for k, v in h1.items() if k != "area"}
     assert areas.area_contains(h1o["area"], 40.72, -73.85) and not areas.area_contains(h1o["area"], 40.72, -73.95)
     raw = lambda u: urllib.request.urlopen(base + u).read()
-    assert raw("/v1/horizon?lat=40.72&lon=-73.85&area=auto") == raw("/v1/horizon?lat=40.73&lon=-73.82&area=auto")
+    assert raw("/v1/horizon?lat=40.72&lon=-73.85&area=finest") == raw("/v1/horizon?lat=40.73&lon=-73.82&area=finest")
     assert b"polygons" not in raw("/v1/horizon?lat=40.72&lon=-73.85&area=auto")
     assert get("/v1/horizon?lat=31.60&lon=35.10&area=auto&outline=1")["area"] is None    # no area: nothing to outline
-    assert get("/v1/area?lat=40.72&lon=-73.85&outline=1")["area"] == stored
-    tv = get("/v1/terrain-version?lat=40.72&lon=-73.85&area=auto")
+    assert get("/v1/area?lat=40.72&lon=-73.85&area=finest&outline=1")["area"] == nta
+    tv = get("/v1/terrain-version?lat=40.72&lon=-73.85&area=finest")
     assert "area" not in tv, tv
-    tvo = get("/v1/terrain-version?lat=40.72&lon=-73.85&area=auto&outline=1")
-    assert tvo["area"] == stored and {k: v for k, v in tvo.items() if k != "area"} == tv, tvo
-    # without area=auto: the plain answer (this once failed with a 500 for every place)
+    tvo = get("/v1/terrain-version?lat=40.72&lon=-73.85&area=finest&outline=1")
+    assert tvo["area"] == nta and {k: v for k, v in tvo.items() if k != "area"} == tv, tvo
+    # without area: the plain answer (this once failed with a 500 for every place)
     tvp = get("/v1/terrain-version?lat=40.72&lon=-73.85")
     assert set(tvp) == {"fine", "layers", "algo"}, tvp
-    # sub-quarter 12 (9 km from centre to corner) is over the user-bbox cap (3 km) but within the area cap
-    h3 = get("/v1/horizon?lat=31.80&lon=35.15&area=auto")
+    assert status("/v1/horizon?lat=40.72&lon=-73.85&area=nearest") == 400
+    # Jerusalem: one area by the city rule; sub-quarter 12 (9 km from centre to corner) by area=finest, over
+    # the user-bbox cap (3 km) but within the area cap
+    hj = get("/v1/horizon?lat=31.80&lon=35.15&area=auto")
+    assert hj["area"]["id"] == "cbs-loc:3000" and calls[-1][2] == [31.7, 35.1, 31.85, 35.25], calls[-1]
+    h3 = get("/v1/horizon?lat=31.80&lon=35.15&area=finest")
     assert h3["area"]["id"] == "cbs-subq:3000-12" and calls[-1][2] == [31.775, 35.1, 31.85, 35.25], calls[-1]
     # no area: the request as given (here a 0.8 km radius around the point)
     h4 = get("/v1/horizon?lat=31.60&lon=35.10&area=auto&radius_km=0.8")
     assert h4["area"] is None and "no official area" in h4["areaNote"], h4
     assert calls[-1][:2] == (31.6, 35.1) and calls[-1][3] == 0.8, calls[-1]
     # a client's own bbox still has the 3 km cap
-    try:
-        urllib.request.urlopen(base + "/v1/horizon?bbox=31.7,35.1,31.85,35.25")
-        raise AssertionError("expected 400")
-    except urllib.error.HTTPError as e:
-        assert e.code == 400
+    assert status("/v1/horizon?bbox=31.7,35.1,31.85,35.25") == 400
     # over the area cap: falls back
     serve.Handler.store.cfg["terrain"]["max_area_radius_km"] = 5
-    h5 = get("/v1/horizon?lat=31.80&lon=35.15&area=auto")
+    h5 = get("/v1/horizon?lat=31.80&lon=35.15&area=finest")
     assert h5["area"] is None and "over terrain.max_area_radius_km" in h5["areaNote"], h5
     st = get("/v1/status")
-    assert st["areas"]["count"] == len(serve.Handler.areas), st
+    assert st["areas"]["count"] == len(serve.Handler.areas) == len(stored), st
     srv.shutdown()
     print("server ok:", len(calls), "horizon computations")
+
+
+def check_reload(tmp: Path, path: Path):
+    """A rebuilt file is swapped in whole (even on Windows: no connection is left open); the index rereads it."""
+    copy = tmp / "reload.sqlite"
+    copy.write_bytes(path.read_bytes())
+    idx = areas.AreaIndex(copy)
+    assert idx.find(40.72, -73.85, "finest")["id"] == "nyc-nta:QN0801"
+    con = sqlite3.connect(copy)
+    con.execute("DELETE FROM areas_box WHERE id IN (SELECT rowid FROM areas WHERE id LIKE 'nyc-nta:%')")
+    con.execute("DELETE FROM areas WHERE id LIKE 'nyc-nta:%'")
+    con.commit()
+    con.close()
+    new = tmp / "reload.new"
+    new.write_bytes(copy.read_bytes())
+    new.replace(copy)
+    assert idx.find(40.72, -73.85, "finest")["id"] == "us-place:3651000", "reopened after the swap"
+    print("reload ok")
 
 
 def check_download_progress():
@@ -518,6 +564,7 @@ def main(argv=None):
         path = check_build(tmp, Path(args.la) if args.la else None)
         check_lookup(path)
         check_server(tmp, path)
+        check_reload(tmp, path)
         check_download_progress()
     print("all area tests passed")
 

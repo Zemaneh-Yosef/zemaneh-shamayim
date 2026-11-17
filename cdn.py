@@ -134,7 +134,7 @@ def terrain_state(horizons) -> str:
 
 
 def areas_state(index) -> str | None:
-    index.refresh()                            # reloads areas.json when it changed on disk
+    index.refresh()                            # reopens areas.sqlite when it changed on disk
     return index.meta.get("built") or (index.stamp and f"{index.stamp[0]}-{index.stamp[1]}") or None
 
 

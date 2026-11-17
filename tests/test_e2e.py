@@ -133,5 +133,6 @@ if __name__ == "__main__":
         a.keep.mkdir(parents=True, exist_ok=True)
         run(a.keep, a.json_out)
     else:
-        with tempfile.TemporaryDirectory() as d:
+        # the server keeps the climatology memory-mapped: Windows can't delete it while this process runs
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             run(Path(d), a.json_out)
