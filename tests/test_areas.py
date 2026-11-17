@@ -629,6 +629,24 @@ def check_reload(tmp: Path, path: Path):
     print("reload ok")
 
 
+def check_switch(tmp: Path, path: Path):
+    """A server started while only an older areas.json existed moves to areas.sqlite once a build writes it."""
+    d = tmp / "switch"
+    d.mkdir()
+    old = {"built": "old", "areas": [{"id": "old:1", "name": "Old", "kind": "x", "level": 20, "source": "",
+                                      "bbox": [40.0, -75.0, 41.0, -73.0], "radiusKm": 1.0,
+                                      "polygons": [[[-75.0, 40.0, -73.0, 40.0, -73.0, 41.0, -75.0, 41.0]]]}]}
+    (d / "areas.json").write_text(json.dumps(old))
+    cfg = {"data_dir": str(d), "areas": {}}
+    serve.Handler.areas = None
+    assert serve.current_area_index(cfg).find(40.72, -73.85)["id"] == "old:1"
+    (d / "areas.sqlite").write_bytes(path.read_bytes())                 # a build finished
+    idx = serve.current_area_index(cfg)
+    assert idx.path.name == "areas.sqlite" and idx.find(40.72, -73.85, "finest")["id"] == "nyc-nta:QN0801"
+    assert serve.current_area_index(cfg) is idx, "the same index while the file stays"
+    print("switch to areas.sqlite ok")
+
+
 def check_download_progress():
     """Big downloads log a progress bar and still return every byte."""
     import io
@@ -650,6 +668,7 @@ def main(argv=None):
         check_lookup(path)
         check_server(tmp, path)
         check_reload(tmp, path)
+        check_switch(tmp, path)
         check_download_progress()
     print("all area tests passed")
 

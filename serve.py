@@ -943,6 +943,17 @@ def areas_path(cfg: dict) -> Path:
     return old if old.exists() and not new.exists() else new
 
 
+def current_area_index(cfg: dict) -> areas.AreaIndex:
+    """Handler.areas, moved to areas.sqlite once a build has written it: a server started while only an
+    older areas.json existed switches by itself (areas_path is checked on every use, two stat calls)."""
+    path = areas_path(cfg)
+    if Handler.areas is None or Handler.areas.path != path:
+        if Handler.areas is not None:
+            log.info("official areas: now %s (was %s)", path, Handler.areas.path)
+        Handler.areas = areas.AreaIndex(path)
+    return Handler.areas
+
+
 def area_rule(q: dict) -> str | None:
     """The area= parameter: "city" (auto, city, 1, true), "finest", or None (no area asked for)."""
     v = q.get("area", [""])[0]
@@ -1139,9 +1150,7 @@ class Handler(BaseHTTPRequestHandler):
         return Handler._env[1]
 
     def area_index(self) -> areas.AreaIndex:
-        if Handler.areas is None:
-            Handler.areas = areas.AreaIndex(areas_path(self.store.cfg))
-        return Handler.areas
+        return current_area_index(self.store.cfg)
 
     def do_OPTIONS(self):
         self.send_response(HTTPStatus.NO_CONTENT)
@@ -1310,7 +1319,7 @@ def main(argv=None):
     srv = APIServer((cfg["api"]["host"], int(cfg["api"]["port"])), Handler, cfg["api"].get("max_threads", 64))
     log.info("listening on %s:%s", cfg["api"]["host"], cfg["api"]["port"])
     # once listening (a purged CDN asks again at once): terrain or areas changed since the last run -> purge them
-    cdn.watch(cfg, Handler.horizons, lambda: Handler.areas)
+    cdn.watch(cfg, Handler.horizons, lambda: current_area_index(cfg))
     srv.serve_forever()
 
 
