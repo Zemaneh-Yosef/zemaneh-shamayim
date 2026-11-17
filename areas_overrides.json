@@ -62,6 +62,9 @@
   "USA/Jackson_area_NJ": {"point": [40.098, -74.357]},
 
   "_extra": {
+    "UK and Ireland": [
+      {"name": "Gibraltar", "point": [36.1408, -5.3536]}
+    ],
     "USA": [
       {"name": "Hollywood_area_FL", "point": [26.0112, -80.1495]},
       {"name": "Aventura_area_FL", "point": [25.9565, -80.1392]},

@@ -54,7 +54,9 @@ from common import HERE, load_config
 
 log = logging.getLogger("build_areas")
 
-CHAI_URL = "https://raw.githubusercontent.com/Zemaneh-Yosef/royzmanimwebsite/main/_data/chaiTable.json"
+# The site dropped chaiTable.json on 2026-10-15 (8e4a99f); this is the last version it had.
+CHAI_URL = ("https://raw.githubusercontent.com/Zemaneh-Yosef/royzmanimwebsite/"
+            "2ad093b8c5f95aaca8bc608da09f09544a941a39/_data/chaiTable.json")
 GB_URL = ("https://media.githubusercontent.com/media/wmgeolab/geoBoundaries/main/releaseData/gbOpen/"
           "{iso}/ADM{adm}/geoBoundaries-{iso}-ADM{adm}_simplified.geojson")
 TIGER_URL = "https://www2.census.gov/geo/tiger/TIGER{year}/{layer_uc}/tl_{year}_{fips}_{layer}.zip"
@@ -206,7 +208,8 @@ PLANS: dict[str, list[dict]] = {
     "Spain": [gb("ESP", 3, "municipality")],
     "Switzerland": [gb("CHE", 3, "municipality")],
     "Turkey": [gb("TUR", 2, "district")],
-    "UK and Ireland": [gb("GBR", 3, "local authority district"), gb("IRL", 2, "local electoral area")],
+    "UK and Ireland": [gb("GBR", 3, "local authority district"), gb("IRL", 2, "local electoral area"),
+                       gb("GIB", 0, "territory")],         # Gibraltar: one unit, not part of GBR
     "Ukraine": [gb("UKR", 3, "hromada / council")],
     "Uruguay": [gb("URY", 2, "municipality")],
     "Venezuela": [gb("VEN", 2, "municipality")],
