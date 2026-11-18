@@ -40,6 +40,11 @@ from common import Cycle, exclusive, field_names, load_npy, write_json_atomic
 G0, R_DRY = 9.80665, 287.05
 DEPRESSION_M = -20.0                     # as terrain.DEPRESSION_M: below this the low ground is real
 NEAR_FIELD = re.compile(r"^t(\d+)m$")       # t80m: air temperature 80 m above the ground
+# A pressure level this close to the 2 m air or a fixed-height level (t80m, t100m) is left out of the column: it adds
+# nothing there, and in a climatology (each field averaged on its own) the two can disagree by a few metres, which
+# puts the higher of them at the higher pressure (seen: 950 hPa at 582.3 m, the 100 m air at 584.3 m and 950.23 hPa)
+# and makes the browser refuse the whole event.
+NEAR_LEVEL_GAP_M = 15.0
 MID_MONTH_DOY = [15.5, 45, 74.5, 105, 135.5, 166, 196.5, 227.5, 258, 288.5, 319, 349.5]
 GFS_SLOT_HOURS = 3                      # own climatology: 8 slots of 3 h (UTC)
 
@@ -162,9 +167,15 @@ def build_profile(f: dict, levels_mb: list[int], dist_km: float, lat: float, lon
         z, temp = f.get(f"z{p}"), f.get(f"t{p}")
         if z is None or temp is None or not (math.isfinite(z) and math.isfinite(temp)):
             continue
-        if p * 100 < f["psfc"] and z > surface_h + 1 and all(abs(z - lv["h"]) > 1 for lv in near):
+        if p * 100 < f["psfc"] and z > surface_h + NEAR_LEVEL_GAP_M and all(abs(z - lv["h"]) > NEAR_LEVEL_GAP_M for lv in near):
             levels.append({"h": round(z, 1), "t": round(temp - 273.15, 2), "p": float(p)})
     levels.sort(key=lambda lv: lv["h"])
+    # last guard: each level above the ground must be higher and at a lower pressure than the one kept below it
+    kept = levels[:1]
+    for lv in levels[1:]:
+        if lv["h"] > kept[-1]["h"] and lv["p"] < kept[-1]["p"]:
+            kept.append(lv)
+    levels = kept
     water = f["land"] < 0.5
     prof = {"distanceKm": dist_km, "lat": round(lat, 4), "lon": round(lon, 4), "water": bool(water), "levels": levels}
     if water and "tsfc" in f and math.isfinite(f["tsfc"]):
