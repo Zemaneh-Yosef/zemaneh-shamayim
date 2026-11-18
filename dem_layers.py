@@ -6,7 +6,8 @@ SRTM is a surface model - buildings and forest count as terrain and raise the ho
 degree tiles on the server's own grid (1 arc-second, 3601 x 3601, WGS84, like .hgt) where every pixel
 comes from the highest-priority source that has data there, e.g.
 
-    USGS 3DEP (US)  ->  NRCan MRDEM DTM (Canada)  ->  an Israeli DTM, if you have one  ->  FABDEM (read from
+    USGS 3DEP (US)  ->  NRCan MRDEM DTM (Canada)  ->  Israeli DTMs, if you have them  ->  DeltaDTM below 20 m
+    (coasts, a local mirror)  ->  FABDEM (read from
     Bristol's zips over HTTP)  ->  ALOS AW3D30 outside forest (ESA WorldCover)  ->  skadi (SRTM, so in forest)
 
 A source with "if_unavailable": "skip" whose server can't be reached is left out of a tile, which is then
@@ -257,6 +258,32 @@ class Builder:
             return True                                    # can't tell: let the warp decide
         return not (b[2] < ds.bounds.left or b[0] > ds.bounds.right or b[3] < ds.bounds.bottom or b[1] > ds.bounds.top)
 
+    @staticmethod
+    def _below(ds, max_valid: float, bounds):
+        """The part of ds over bounds (plus a margin for the resampling kernel) as a float32 array, NaN where ds
+        has nodata or a value >= max_valid, and the reproject() arguments that place it: (None, None) when ds
+        has nothing there. Done before resampling, so a clipped value (DeltaDTM writes 30.0 wherever the ground
+        is above its 30 m clip) is nodata to the interpolation and can't be blended into a neighbouring pixel."""
+        from rasterio.warp import transform_bounds
+        from rasterio.windows import Window, from_bounds
+        try:
+            b = transform_bounds("EPSG:4326", ds.crs, *bounds, densify_pts=21)
+            w = from_bounds(*b, transform=ds.transform)
+        except Exception:
+            w = Window(0, 0, ds.width, ds.height)
+        c0, r0 = max(0, math.floor(w.col_off) - 3), max(0, math.floor(w.row_off) - 3)
+        c1 = min(ds.width, math.ceil(w.col_off + w.width) + 3)
+        r1 = min(ds.height, math.ceil(w.row_off + w.height) + 3)
+        if c1 <= c0 or r1 <= r0:
+            return None, None
+        win = Window(c0, r0, c1 - c0, r1 - r0)
+        a = ds.read(1, window=win).astype(np.float32)
+        bad = ~np.isfinite(a) | (a >= max_valid)
+        if ds.nodata is not None:
+            bad |= a == np.float32(ds.nodata)
+        a[bad] = np.nan
+        return a, {"src_transform": ds.window_transform(win), "src_crs": ds.crs, "src_nodata": np.nan}
+
     # -- building -----------------------------------------------------------------------------------------
     def _read(self, src: dict, transform, n: int, bounds, label: str, tiles, resampling) -> np.ndarray:
         """One source on the n x n grid: float32, NaN where it has no data (its files' nodata, or no file)."""
@@ -277,9 +304,14 @@ class Builder:
                     continue
                 tmp = np.full((n, n), np.nan, dtype=np.float32)
                 try:
-                    reproject(source=rasterio.band(ds, 1), destination=tmp,
-                              src_nodata=ds.nodata, dst_transform=transform, dst_crs="EPSG:4326",
-                              dst_nodata=np.nan, resampling=resampling)
+                    if src.get("max_valid") is not None:
+                        source, extra = self._below(ds, float(src["max_valid"]), (west, south, east, north))
+                        if source is None:                 # the window is empty: nothing of this file here
+                            continue
+                    else:
+                        source, extra = rasterio.band(ds, 1), {"src_nodata": ds.nodata}
+                    reproject(source=source, destination=tmp, dst_transform=transform, dst_crs="EPSG:4326",
+                              dst_nodata=np.nan, resampling=resampling, **extra)
                 except Exception as e:
                     raise SourceError(f"source {src['name']}: reading {ds.name} for {label} failed: {e}") from e
                 take = np.isnan(out) & np.isfinite(tmp)
@@ -299,8 +331,10 @@ class Builder:
 
         A source with "mask": {"paths": [...], "exclude": [classes]} gives up the pixels where the mask raster
         (e.g. ESA WorldCover, read by majority onto the grid) has one of those classes; they fall through to
-        the next source. With `skipped` (a list), a source with "if_unavailable": "skip" that can't be read is
-        left out and its name appended to it, instead of failing the merge."""
+        the next source. A source with "max_valid" gives up its pixels at or above that height (read as nodata,
+        before resampling), e.g. DeltaDTM's 30 m clip plateau. With `skipped` (a list), a source with
+        "if_unavailable": "skip" that can't be read is left out and its name appended to it, instead of failing
+        the merge."""
         import rasterio
         from rasterio.warp import Resampling
 
@@ -505,11 +539,12 @@ def fine_signature(cfg_fine: dict | None) -> str | None:
 
 
 def _source_key(s: dict) -> list:
-    """What of a source goes into a signature: name and paths, and its open options and mask when it has them
-    (so sources without them keep the signature they had). Not if_unavailable: it doesn't change the heights
-    of a finished tile."""
+    """What of a source goes into a signature: name and paths, and its open options, mask and max_valid when it
+    has them (so sources without them keep the signature they had). Not if_unavailable: it doesn't change the
+    heights of a finished tile."""
     return ([s["name"], s["paths"]] + ([s["open_options"]] if s.get("open_options") else [])
-            + ([{"mask": s["mask"]}] if s.get("mask") else []))
+            + ([{"mask": s["mask"]}] if s.get("mask") else [])
+            + ([{"max_valid": s["max_valid"]}] if s.get("max_valid") is not None else []))
 
 
 class FineTiles:

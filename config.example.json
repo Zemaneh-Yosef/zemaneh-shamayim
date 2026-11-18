@@ -86,10 +86,25 @@
           ]
         },
         {
+          "name": "jerusalem-dtm-10m",
+          "enabled": false,
+          "paths": [
+            "/var/lib/zmanim-sky/israel-dtm/jerusalem_dtm_10m.tif"
+          ]
+        },
+        {
           "name": "israel-dtm",
           "enabled": false,
           "paths": [
             "/var/lib/zmanim-sky/israel-dtm/israel_dtm.tif"
+          ]
+        },
+        {
+          "name": "deltadtm-v1-1",
+          "enabled": false,
+          "max_valid": 20,
+          "paths": [
+            "/var/lib/zmanim-sky/deltadtm-v1-1/DeltaDTM_v1_1_{name}.tif"
           ]
         },
         {
@@ -195,6 +210,13 @@
           "min_valid": -500,
           "paths": [
             "sources/ign-rgealti-5m.xml"
+          ]
+        },
+        {
+          "name": "jerusalem-dtm-10m",
+          "enabled": false,
+          "paths": [
+            "/var/lib/zmanim-sky/israel-dtm/jerusalem_dtm_10m.tif"
           ]
         }
       ]

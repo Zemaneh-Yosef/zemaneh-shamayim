@@ -92,6 +92,39 @@ def write_sources(tmp: Path):
     return tiles
 
 
+def coastal_true(lon):
+    """Ground height for the coastal (DeltaDTM-like) source: 0 m at the west edge of the tile, 60 m at the east."""
+    return 60 * (np.asarray(lon) - LON_I)
+
+
+def write_coastal(tmp: Path):
+    """DeltaDTM-like 1x1 degree tile: the true height below 30 m, 30.0 above (its clip, NOT nodata), nodata at sea."""
+    import rasterio
+    from rasterio.transform import from_origin
+    m = 3600
+    lat_c = LAT_I + 1 - (np.arange(m)[:, None] + 0.5) / 3600
+    lon_c = LON_I + (np.arange(m)[None, :] + 0.5) / 3600
+    a = np.broadcast_to(np.minimum(coastal_true(lon_c), 30.0), (m, m)).astype(np.float32).copy()
+    a[np.broadcast_to(lat_c > SEA_LAT, a.shape)] = -9999
+    d = tmp / "deltadtm"
+    d.mkdir(exist_ok=True)
+    with rasterio.open(d / "DeltaDTM_v1_1_N31E035.tif", "w", driver="GTiff", width=m, height=m, count=1,
+                       dtype="float32", crs="EPSG:4326", nodata=-9999,
+                       transform=from_origin(LON_I, LAT_I + 1, 1 / 3600, 1 / 3600)) as ds:
+        ds.write(a, 1)
+
+
+def build_with(tmp: Path, tiles_dir: Path, base, label: str, sources: list) -> "terrain.Tiles":
+    """N31E035 merged from these sources in a folder of its own; Tiles reading it (with .builder set)."""
+    lay = {"dir": str(tmp / f"layers-{label}"), "auto_build": True, "sources": sources}
+    cfg = {"data_dir": str(tmp), "terrain": {"tiles_dir": str(tiles_dir), "tiles_url": "", "layers": lay,
+                                              "max_km": 150.0}}
+    b = dem_layers.make_builder(cfg, base)
+    b.build(LAT_I, LON_I)
+    t = terrain.Tiles(tiles_dir, None, layered_dir=dem_layers.layers_dir(cfg), builder=b)
+    return t
+
+
 def main():
     ok = True
 
@@ -189,6 +222,45 @@ def main():
         sig2 = dem_layers.signature({**layers, "sources": layers["sources"][1:]})
         check(sig1 != sig2 and dem_layers.signature({"sources": []}) is None,
               "signature follows the source list; none when layering is off")
+
+        # max_valid: a coastal DTM clipped like DeltaDTM (30.0 wherever the ground is above 30 m, not nodata)
+        # ahead of FABDEM. With max_valid 20 its values >= 20 fall through to FABDEM; raw, the plateau wins.
+        write_coastal(tmp)
+        fab_src = layers["sources"][1]
+        coastal = {"name": "deltadtm", "paths": [str(tmp / "deltadtm" / "DeltaDTM_v1_1_{name}.tif")]}
+        raw_t = build_with(tmp, tiles_dir, base, "raw", [coastal, fab_src])
+        cut_t = build_with(tmp, tiles_dir, base, "cut", [{**coastal, "max_valid": 20}, fab_src])
+        land = lat < SEA_LAT - 0.002
+        low = land & (coastal_true(lon) < 19.9)
+        high = land & (coastal_true(lon) > 20.1)
+        plateau = land & (coastal_true(lon) > 30.1)
+        got_raw, got_cut = raw_t.heights(lat, lon), cut_t.heights(lat, lon)
+        check(np.abs(got_raw[plateau] - 30.0).max() < 1e-3,
+              "without max_valid the 30 m clip plateau is taken as terrain (the pitfall)")
+        err_low = np.abs(got_cut[low] - coastal_true(lon[low])).max()
+        err_high = np.abs(got_cut[high] - fabdem_h(lat[high], lon[high])).max()
+        check(err_low < 0.05, f"max_valid 20: below 20 m the coastal DTM is used (max error {err_low:.3f} m)")
+        check(err_high < 0.05, f"max_valid 20: at or above 20 m FABDEM fills in (max error {err_high:.3f} m)")
+        # no clipped value blended into a pixel next to the cut: along a row, every pixel either is the coastal
+        # DTM's own (< 20 m, close to its true height) or FABDEM's (far above)
+        row = np.asarray(cut_t.tile(LAT_I, LON_I))[1800]
+        lons = LON_I + np.arange(row.size) / 3600
+        mine = row < 100
+        check(mine.any() and np.abs(row[mine] - coastal_true(lons[mine])).max() < 0.05 and row[mine].max() < 20,
+              f"next to the cut only values below 20 m from the coastal DTM (max {row[mine].max():.2f} m)")
+        frac_cut = json.loads(cut_t.builder.path(LAT_I, LON_I).with_suffix(".json").read_text())["fraction_by_source"]
+        check(abs(frac_cut["deltadtm"] - 20 / 60 * (SEA_LAT - LAT_I)) < 0.01,
+              f"coastal DTM fills only its land below 20 m ({frac_cut['deltadtm']:.1%})")
+        check(dem_layers.signature({"sources": [{**coastal, "max_valid": 20}, fab_src]})
+              != dem_layers.signature({"sources": [coastal, fab_src]}), "max_valid is part of the signature")
+
+        # no mirror: a per-tile local source whose files aren't there is skipped quietly, and the tile is the
+        # same as one built without that source
+        gone = {**coastal, "paths": [str(tmp / "no-mirror" / "DeltaDTM_v1_1_{name}.tif")], "max_valid": 20}
+        none_t = build_with(tmp, tiles_dir, base, "none", [gone, fab_src])
+        plain_t = build_with(tmp, tiles_dir, base, "plain", [fab_src])
+        check(np.array_equal(np.asarray(none_t.tile(LAT_I, LON_I)), np.asarray(plain_t.tile(LAT_I, LON_I))),
+              "missing coastal mirror: tile built, identical to one without the source")
 
     print("all passed" if ok else "FAILURES")
     sys.exit(0 if ok else 1)
