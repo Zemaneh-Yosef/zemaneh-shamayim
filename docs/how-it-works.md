@@ -303,12 +303,14 @@ in this list that has data there:
 |---|---|---|---|
 | 1 | USGS 3DEP 1 arc-second | US | bare earth, NAVD88; read per 1x1 degree file straight from USGS's bucket |
 | 2 | NRCan MRDEM-30 DTM | Canada | bare earth, 30 m, CGVD2013; read from NRCan's VRT (Open Government Licence - Canada) |
-| 3 | an Israeli DTM | Israel | a file you supply (any projection, e.g. EPSG:2039); `enabled: false` until then. The Survey of Israel and the Geological Survey of Israel (25 m DTM) have one, but neither is openly published: it has to be licensed or requested |
-| 4 | FABDEM V1-2 | world, 60°S–80°N | Copernicus 30 m with forests and buildings removed; each 1×1° tile read from inside Bristol's 10×10° zip over HTTP when its merged tile is built (nothing stored); CC BY-NC-SA 4.0, non-commercial only |
-| 5 | ALOS AW3D30, outside forest | world, 82°S–82°N | JAXA's surface model (2006–11), from OpenTopography's bucket; pixels ESA WorldCover 2021 calls trees are left to the next source. Only where FABDEM has nothing (north of 80°N) or can't be reached |
-| 6 | the default tiles | world | SRTM (2000) outside the US: in forest where 4 has nothing; and open sea |
+| 3 | Jerusalem 10 m DTM | Jerusalem and its surroundings | Chaim Keller's bare-earth DTM (`jerusalem-dtm-10m`, a GeoTIFF in EPSG:28191), from his downloads at chaitables.com; `enabled: false` until you have the file. Also the last fine source (below) |
+| 4 | an Israeli DTM | Israel | a file you supply (any projection, e.g. EPSG:2039); `enabled: false` until then. The Survey of Israel and the Geological Survey of Israel (25 m DTM) have one, but neither is openly published: it has to be licensed or requested |
+| 5 | DeltaDTM v1.1, below 20 m | coasts worldwide, land up to 30 m | Deltares' coastal bare-earth DTM (Pronk et al. 2024; CC BY 4.0), EGM2008, read from a local mirror of its 1×1° tiles (`enabled: false` until you have one: [Terrain data](../README.md#terrain-data)). `"max_valid": 20`: only its heights below 20 m are used, the rest falls through to FABDEM |
+| 6 | FABDEM V1-2 | world, 60°S–80°N | Copernicus 30 m with forests and buildings removed; each 1×1° tile read from inside Bristol's 10×10° zip over HTTP when its merged tile is built (nothing stored); CC BY-NC-SA 4.0, non-commercial only |
+| 7 | ALOS AW3D30, outside forest | world, 82°S–82°N | JAXA's surface model (2006–11), from OpenTopography's bucket; pixels ESA WorldCover 2021 calls trees are left to the next source. Only where FABDEM has nothing (north of 80°N) or can't be reached |
+| 8 | the default tiles | world | SRTM (2000) outside the US: in forest where 6 has nothing; and open sea |
 
-Why 5 and 6 in that order: against lidar (USGS 3DEP 1″ on nine 1×1° tiles from Phoenix and Los Angeles to
+Why 7 and 8 in that order: against lidar (USGS 3DEP 1″ on nine 1×1° tiles from Phoenix and Los Angeles to
 New York and the Smokies), FABDEM was the closest on every tile and land-cover class (median error −1.3 to
 +1.0 m, RMSE 2.9–6.8 m). The two surface models read high: ALOS beat SRTM in open, dry and Mediterranean
 terrain (RMSE 3.8–4.3 m against 4.9–5.7 m in Phoenix and Los Angeles) but was worse in forest (Smokies: 16.5 m
@@ -316,6 +318,25 @@ against 14.0 m, 10–12 m high under trees), so each is used where it does bette
 about 1′ of the better of the two on horizons at every site. On Rabbi Druk's sunrises at Armon HaNatziv the
 far horizon (Moab, 45–60 km) is the same in all three within 0.3′; a hillside 0.5 km away is where they
 differ (summer sunrises over it: SRTM 68 s rms, ALOS 46 s, FABDEM 14 s).
+
+Why DeltaDTM ahead of FABDEM, and only below 20 m: on low coasts, against 71k lidar points below 30 m (Miami,
+Boca Raton, Houston, New York, the Five Towns, Lakewood, Marseille, Nice), DeltaDTM's mean absolute error was
+0.86 m against FABDEM's 1.36 m (NMAD 0.71 against 1.06 m; within 1 m: 75% against 60%), and under trees its
+bias was +0.07 m against +1.05 m; where the two differ with DeltaDTM lower, DeltaDTM was the closer 71–85% of
+the time. By height band (mean absolute error, DeltaDTM / FABDEM): below 10 m 1.16 / 1.77, 10–15 m 1.05 / 1.53,
+15–20 m 1.32 / 1.47, 20–25 m 1.64 / 1.56, 25–30 m 1.86 / 1.83: above 20 m it is no better, so it stops there.
+DeltaDTM stores 30.0 (not nodata) wherever the ground is above its 30 m clip; used as it is, that flattens
+every inland hill near a coast to 30 m. `max_valid` reads such values (and anything at or above it) as nodata
+before resampling, so they neither count nor blend into the pixels around them.
+
+Jerusalem: against 76k ICESat-2 ATL08 ground segments, Keller's DTM has a median error of −0.27 m and NMAD
+1.6 m, FABDEM −1.16 m and 3.1 m (FABDEM is worse on every slope class). The DTM's tails are heavier (95th
+percentile 9.6 against 8.3 m): building since 2000 and the borders between its patches.
+
+Other keyless global models tried against lidar at the same 8 cities did not beat FABDEM as the fallback:
+GEDTM30 (NMAD 2.82 m against FABDEM's 2.19 m); the surface models COP30, ALOS and SRTM read 2–7 m high in
+forest; ASTER GDEM is worse still. CoNED's topobathymetry adds nothing for horizons (the sea is at 0 m on a
+line of sight either way), and FathomDEM is not keyless (access on request, non-commercial).
 
 The line of sight crosses borders (Jerusalem's sunrise is over Jordan), so each source only fills the
 pixels it covers and the next one fills the rest. Differences between vertical datums (NAVD88,
@@ -335,7 +356,9 @@ read, the tile is built from the sources after it and kept, marked provisional (
 first use an hour later it is rebuilt; if the source answers, the provisional mark goes, and the tile's
 revision rises if its heights changed. A source's `"mask"` (`paths` to a land-cover raster, read by
 majority onto the grid, and the classes to `exclude`) gives up those pixels to the next source; it is part
-of the signature.
+of the signature. So is `"max_valid"` (DeltaDTM in the example): the source's values at or above it are read
+as nodata, before resampling, and fall through to the next source. `"min_valid"` does the same below a value
+(sentinels such as ALOS's −9999).
 
 Template fields for per-tile paths: `{name}` (N31E035), `{ns}{lat_top:02d}{ew}{lon_left:03d}` (USGS's
 north-west-corner naming, n32e035), `{NS_sw}{lat_sw:03d}{EW}{lon_left:03d}` (ALOS: N031E035), `{name3}`
@@ -361,7 +384,7 @@ one of its cells (`step_arcsec`, default 1/3″ ≈ 10 m); beyond that, and wher
 data, the 1″ tiles / layers are used as before. At Monsey (sunset over a hillside 1.2 km away) 3DEP 1/3″
 moved the horizon by 1.2′ on average and up to 5.9′ against the 1″ data.
 
-The example config has three fine sources, tried in this order point by point:
+The example config has four fine sources (the last off until you have its file), tried in this order point by point:
 
 * **NRCan HRDEM** (Canada): the 2 m lidar ground model (DTM) mosaic, 56 files of 500 km on NRCan's bucket in
   Canada Atlas Lambert, read at its first overview (4 m, `"open_options": {"OVERVIEW_LEVEL": "0"}`; any GDAL
@@ -379,10 +402,13 @@ The example config has three fine sources, tried in this order point by point:
   through `sources/ign-rgealti-5m.xml`, a GDAL WMS description; a relative path in `paths` is looked up in
   the server's folder. Licence Ouverte Etalab 2.0. ~15–20 s per chunk. If the service is ever too slow or
   refuses, the alternative is IGN's per-département downloads (RGE ALTI 5 m, `.7z`) as a local source.
+* **Jerusalem 10 m DTM** (Jerusalem and its surroundings): Chaim Keller's DTM, the same file as the 1″ layer's
+  `jerusalem-dtm-10m` (EPSG:28191), `enabled: false` until you have it. Sampled at 1/3″ near the observer it
+  keeps the hillsides a 1″ grid smooths over.
 
 Against the 1″ data, the median difference was +0.4 m at Toronto and −1.1 m at Montreal (HRDEM), −1.2 m in
-Paris and +0.5 m at Nice (RGE ALTI against FABDEM). Elsewhere (Israel: no free source finer than the 1″
-layers; the Survey of Israel's DTM would go here, if licensed) the 1″ data is used. Any other
+Paris and +0.5 m at Nice (RGE ALTI against FABDEM). Elsewhere (Israel outside the Jerusalem DTM: the Survey of Israel's
+DTM would go here, if licensed) the 1″ data is used. Any other
 GDAL-readable bare-earth source works too, e.g. a state's lidar DTM.
 
 Data is built on demand (needs rasterio) in 0.1° chunks, ~4.7 MB each at 1/3″, under

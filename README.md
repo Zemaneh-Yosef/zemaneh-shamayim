@@ -48,7 +48,7 @@ horizon, the air the sunlight bends through, and how bright the night sky is.
 | `/v1/cesium-terrain/layer.json`, `/{z}/{x}/{y}.terrain` | the same terrain in Cesium's format (quantized-mesh, with surface normals), for the website's 3D horizon view |
 | `/v1/status` | the live forecast cycle and how much climatology each region holds |
 
-No API keys are needed: every source is free public data (NOAA, USGS, NRCan, IGN, FABDEM, JAXA, ESA,
+No API keys are needed: every source is free public data (NOAA, USGS, NRCan, IGN, FABDEM, Deltares, JAXA, ESA,
 OpenStreetMap, the US Census, the World Atlas, AERONET). It's Python with a small set of dependencies and runs
 on a modest VPS behind nginx. Some of that data is licensed for non-commercial use only; see
 [Licences](#licences).
@@ -327,6 +327,68 @@ sudo chown -R zmanim-sky: /var/lib/zmanim-sky/fabdem && cd ~ && rm -rf ~/fabdem-
 
 </details>
 
+<details>
+<summary>Optional: DeltaDTM on low coasts (local mirror)</summary>
+
+**DeltaDTM v1.1** (Deltares; CC BY 4.0, no key) is a bare-earth DTM of coastal land up to 30 m, 1×1° tiles in
+EGM2008. Below 20 m it is closer to lidar than FABDEM (mean error 0.86 against 1.36 m on 71k points in 8 coastal
+cities; [why](docs/how-it-works.md#bare-earth-layers-terrainlayers-dem_layerspy)), so the example config has it
+(`deltadtm-v1-1`) just before FABDEM with `"max_valid": 20`: DeltaDTM writes 30.0 wherever the ground is above
+its 30 m clip, and without `max_valid` that would flatten the hills behind every coast to 30 m. It is
+`"enabled": false` until you have the files; a tile with no DeltaDTM file is simply left to the next source.
+
+It can't be read over HTTP as FABDEM is: the tiles are inside per-continent zips on 4TU.ResearchData
+(https://data.4tu.nl/datasets/1da2e70f-6c4d-4b03-86bd-b53e789cc629), whose file URLs have no extension (GDAL
+won't range-read them under `CPL_VSIL_CURL_ALLOWED_EXTENSIONS`), and 4TU blocks heavy downloaders (it blocked a
+server after ~30 GB). So mirror it once, gently: `fetch_deltadtm.py` reads only the wanted tiles out of the zips
+with HTTP range requests, one connection at a time (never run several at once), CRC-checks them and resumes when
+run again. By default it skips the 1,512 North American tiles USGS 3DEP 1″ and NRCan MRDEM already cover entirely
+(`sources/deltadtm-na-covered.txt`: every bit of land in the tile, widened ~2 km, is the US with a USGS 1″ tile
+there, or Canada), which come first in the layers so DeltaDTM would never be read there. The rest of the world
+is ~5,900 tiles, ~17 GB:
+
+```sh
+sudo -u zmanim-sky nohup venv/bin/python fetch_deltadtm.py /var/lib/zmanim-sky/deltadtm-v1-1 > deltadtm.log 2>&1 &
+sudo -u zmanim-sky venv/bin/python fetch_deltadtm.py /var/lib/zmanim-sky/deltadtm-v1-1 --continent Europe   # or one zip
+```
+
+Then set `"enabled": true` on `deltadtm-v1-1`. (A mirror rewritten with everything at or above 20 m set to
+nodata, as the production server's `deltadtm-v1-1-below20` is, is equivalent to `"max_valid": 20`.)
+
+**Rebuilding after turning it on.** The new source changes the layers' signature, so a new tile folder starts
+and every horizon is recomputed. Only tiles where DeltaDTM has data need building again: a tile without DeltaDTM
+data built afresh is bit-identical to the old one, so hard-link those (and their `.sea` / `.plain` markers and
+`.rev`) from the old signature folder into the new one (same file system) instead of rebuilding them:
+
+```sh
+cd /var/lib/zmanim-sky/dem-layers
+OLD=<old signature>; NEW=<new signature>        # the folder names; NEW = dem_layers.signature() of the new config
+sudo -u zmanim-sky mkdir -p $NEW
+for t in $(ls $OLD | grep -E '^[NS][0-9]{2}[EW][0-9]{3}\.' | cut -d. -f1 | sort -u); do
+  [ -e /var/lib/zmanim-sky/deltadtm-v1-1/DeltaDTM_v1_1_$t.tif ] && continue     # DeltaDTM there: rebuild
+  [ -e $OLD/$t.provisional ] && continue                                        # provisional: rebuild
+  for x in npy json sea plain rev; do [ -e $OLD/$t.$x ] && sudo ln $OLD/$t.$x $NEW/$t.$x; done
+done
+```
+
+Then build the rest (`dem_layers.py build`, below) and restart the API.
+
+</details>
+
+<details>
+<summary>Optional: Chaim Keller's 10 m Jerusalem DTM</summary>
+
+For Jerusalem and its surroundings, the bare-earth DTM in Chaim Keller's software
+([chaimkeller/software](https://github.com/chaimkeller/software); downloads at
+https://www.chaitables.com/download_eng.php) is much closer to the ground than FABDEM (against 76k ICESat-2
+ground segments: median −0.27 m, NMAD 1.6 m, against FABDEM's −1.16 m and 3.1 m). Converted to a GeoTIFF in
+the Israeli Cassini grid (EPSG:28191, nodata outside its coverage), put it at
+`/var/lib/zmanim-sky/israel-dtm/jerusalem_dtm_10m.tif` and set `"enabled": true` on `jerusalem-dtm-10m` in
+**both** `terrain.layers` (after NRCan) and `terrain.fine` (the last fine source): the 1″ tiles and the fine
+terrain near the observer then both use it.
+
+</details>
+
 **Merged 1″ tiles** are built when a request first needs them (a 150 km horizon touches ~9 tiles, so that
 first request can take minutes); build the cities you serve ahead (`--horizon`: only the tiles its rays cross,
 in the year's sun and moon directions; `--radius-km` for a city's own extent; without terrain.layers sources
@@ -528,7 +590,7 @@ for t in tests/test_*.py; do python3 "$t" > /dev/null 2>&1 || echo "FAILED: $t";
 | `test_profile_levels.py` | every served column rises with falling pressure: a pressure level within 15 m of the 2 m air or of a fixed-height level (80 m, 100 m) left out, as a climatology's separately averaged fields can put the two out of order |
 | `test_ensemble.py` | the representative variations (weights, mean, the modes' spread), the `gfs-moments` store, and GEFS members from `fetch_gefs.py` on synthetic files |
 | `test_weather_guard.py` | the guardrails: record extremes kept, impossible values (units mixed up, a land fraction of 7, levels out of order) refused, a refused run leaving the previous one serving, a run that jumps away from the serving one held back and an ordinary update published |
-| `test_dem_layers.py` (rasterio, pyproj) | merged bare-earth tiles (priority per pixel, reprojection from the Israeli grid, open sea, aborting on unreadable sources) and tile revisions on rebuilds |
+| `test_dem_layers.py` (rasterio, pyproj) | merged bare-earth tiles (priority per pixel, reprojection from the Israeli grid, open sea, aborting on unreadable sources), tile revisions on rebuilds, `max_valid` (a DeltaDTM-like 30 m clip plateau falls through to FABDEM, with nothing blended in at the cut), and a missing local mirror skipped |
 | `test_dem_fallback.py` (rasterio) | FABDEM read from a remote zip (a local HTTP server stands in for Bristol's), a missing file told apart from an outage, provisional tiles kept and retried after the hour (also when read through terrain.Tiles, as the server does), ALOS masked by land cover (forest falls through to the plain tiles), `.plain` markers where no source has data, and `slim` |
 | `test_fine_terrain.py` (rasterio) | near-range fine terrain on a synthetic 1/3″ source (a narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers), per-place versions and cache keys |
 | `test_sun_range.py` | sunrise / sunset ranges widened past high horizons only as far as the terrain hides the solstice Sun (both hemispheres, the tropics, a ridge that ends), and a point's horizon and wins over them; a crest between two distance steps found by the refinement |
@@ -589,7 +651,10 @@ attribution.
   World 3D-30m (AW3D30, © JAXA; via OpenTopography) and ESA WorldCover 2021 (© ESA WorldCover project 2021 /
   Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium; CC BY 4.0). With
   `terrain.fine`: Natural Resources Canada HRDEM (Open Government Licence - Canada), USGS 3DEP 1/3″, and IGN
-  RGE ALTI (Licence Ouverte Etalab 2.0; "IGN - RGE ALTI").
+  RGE ALTI (Licence Ouverte Etalab 2.0; "IGN - RGE ALTI"). Where enabled: DeltaDTM v1.1 (Pronk, M. et al.
+  2024, DeltaDTM: a global coastal digital terrain model, Scientific Data 11, 273; Deltares, via
+  4TU.ResearchData; CC BY 4.0), and the Jerusalem 10 m DTM from Chaim Keller's software
+  (https://www.chaitables.com, https://github.com/chaimkeller/software).
 * **Light pollution:** Falchi, F. et al. (2016), Supplement to: The New World Atlas of Artificial Night Sky
   Brightness, GFZ Data Services, doi:10.5880/GFZ.1.4.2016.001 (CC BY-NC 4.0, non-commercial only), via the
   tiles in [astertaylor/halakhic_calc](https://github.com/astertaylor/halakhic_calc); growth of skyglow:
