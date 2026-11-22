@@ -845,23 +845,25 @@ def horizon_set(tiles: Tiles, lat: float | None = None, lon: float | None = None
 
 
 def add_base(tiles: Tiles, lat: float, lon: float, points: list, base: dict) -> None:
-    """The base level's candidates on every point (terrain_base.py), from one surface for the area."""
+    """The base level's candidates on every point (terrain_base.py): each from its own coordinates, its own
+    override and the world-lattice surface nearest it, so a spot's answer doesn't depend on the area asked."""
     import terrain_base
     s = base["settings"]
-    ov = terrain_base.override_for(s, lat, lon)
-    surf, reason = None, None
-    if not s.get("enabled", True):
-        reason = "disabled"
-    elif ov and ov.get("none"):
-        reason = "override: no base"
-    else:
-        try:
-            surf = terrain_base.surface_for(tiles, lat, lon, s, (ov or {}).get("width_km"), base.get("non_bare"),
-                                            base.get("key", ""))
-        except (OSError, RuntimeError, ValueError) as e:  # never fail the visible horizon over the base:
-            log.warning("no base level at %.4f,%.4f: %s", lat, lon, e)   # the site keeps its last good one
-            reason = f"terrain unavailable: {e}"
     for hz in points:
+        plat, plon = hz.get("lat", lat), hz.get("lon", lon)
+        ov = terrain_base.override_for(s, plat, plon)
+        surf, reason = None, None
+        if not s.get("enabled", True):
+            reason = "disabled"
+        elif ov and ov.get("none"):
+            reason = "override: no base"
+        else:
+            try:
+                surf = terrain_base.surface_for(tiles, plat, plon, s, (ov or {}).get("width_km"),
+                                                base.get("non_bare"), base.get("key", ""))
+            except (OSError, RuntimeError, ValueError) as e:  # never fail the visible horizon over the base:
+                log.warning("no base level at %.4f,%.4f: %s", plat, plon, e)   # the site keeps its last good one
+                reason = f"terrain unavailable: {e}"
         terrain_base.annotate(hz, surf, s, none_reason=reason)
         if ov:
             hz["base"]["override"] = ov
