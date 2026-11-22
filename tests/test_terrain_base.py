@@ -11,7 +11,9 @@ width: a mountain, removed). 60 km to the east a 500 m plateau 200 km wide begin
   - the observer's own ridge is gone from under them: every candidate is far below the eye;
   - an override with "none" sends no candidates, with a status;
   - a tile reported as not bare earth sends no candidates (Decision 3);
-  - the flag: widening to 120 km doesn't touch a 200 km plateau, so this place isn't flagged.
+  - the flag: widening to 120 km doesn't touch a 200 km plateau, so this place isn't flagged;
+  - the surface is on one world lattice: a spot's profiles are the same from the surfaces of the neighbouring
+    lattice nodes, and a spot's candidates are the same asked alone or as one of an area's spots.
 """
 from __future__ import annotations
 
@@ -91,6 +93,36 @@ def main():
     hz3 = terrain.horizon_set(tiles, *OBS, base={"settings": s, "non_bare": lambda i, j: 0.3, "key": "x"})["points"][0]
     check(hz3["base"]["status"] == "no-bare-earth" and not any("baseCandidates" in q for q in hz3["sunrise"]),
           f"not bare earth: no candidates ({hz3['base']['status']})")
+
+    # one world lattice: the same profile from two neighbouring nodes (a terrain that varies both ways)
+    class Bumpy(StubTiles):
+        def heights(self, lat, lon):
+            la, lo = np.asarray(lat, float), np.asarray(lon, float)
+            return (300 + 250 * np.sin(la * 7.3) * np.cos(lo * 5.1) + 120 * np.sin(la * 41) * np.sin(lo * 37)
+                    + 0 * la)
+    spot = (31.137, 35.081)
+    b, r, c = terrain_base.anchor_for(*spot)
+    a1 = terrain_base.Surface(Bumpy(), (b, r, c), s)
+    a2 = terrain_base.Surface(Bumpy(), (b, r + terrain_base.ANCHOR_CELLS, c - terrain_base.ANCHOR_CELLS), s)
+    az = np.arange(0, 360, 7.5)
+    diff = float(np.max(np.abs(a1.profile(*spot, az) - a2.profile(*spot, az))))
+    check(diff < 1e-6, f"same profile from neighbouring lattice nodes (max diff {diff:.2e} m)")
+    terrain_base._CACHE.clear()
+    alone = terrain.horizon_set(Bumpy(), *spot, base={"settings": s, "non_bare": None})["points"][0]
+    terrain_base._CACHE.clear()
+    import copy
+    other = copy.deepcopy(alone)
+    for e in other["sunrise"] + other["sunset"]:
+        e.pop("baseCandidates", None)
+    terrain.add_base(Bumpy(), spot[0] + 0.08, spot[1] - 0.06, [other], {"settings": s, "non_bare": None})
+    same = all(e.get("baseCandidates") == f.get("baseCandidates")
+               for e, f in zip(alone["sunrise"] + alone["sunset"], other["sunrise"] + other["sunset"]))
+    check(same, "a spot's candidates don't depend on the area's centre")
+
+    # below sea level: the Dead Sea's surface is kept, the Mediterranean's floor becomes the sea
+    la = np.array([31.5, 31.5, 32.0]); lo = np.array([35.5, 34.3, 35.6])
+    z = terrain_base.sea_level(np.array([-415.0, -800.0, 120.0]), la, lo, s["depressions"])
+    check(list(z) == [-415.0, 0.0, 120.0], f"Dead Sea kept, sea floor raised, land untouched ({list(z)})")
 
     # the morphology itself: an opening removes a 1-cell spike, keeps a block wider than the disk
     a = np.zeros((41, 41)); a[20, 20] = 9; a[5:15, 5:15] = 4

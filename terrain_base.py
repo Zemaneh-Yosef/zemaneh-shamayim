@@ -5,9 +5,10 @@ horizon lies on (the base level, KosherJava's horizonElevationAtSunrise / AtSuns
 land; the site's calculator does the optics (which point is the horizon in the day's air, its dip, the base).
 
 Definition C of the report "Elevation-adjusted sunrise from the terrain":
-  1. Sample the bare-earth heights on a square grid around the area: GRID_KM cells out to HALF_KM each way
-     (~150 km of view plus half the mountain width and a margin). Open sea is level at 0 m; land below sea
-     level keeps its height (the Dead Sea, the Jordan valley).
+  1. Sample the bare-earth heights on a square grid of GRID_KM cells, far enough that every point of a
+     150 km view is computed as if the grid had no edge (the view plus the reach of steps 2 and 3). Heights
+     below 0 are raised to sea level (the sea is its surface, not the sea floor), except inside the listed
+     depressions (DEPRESSIONS: the Dead Sea and Jordan valley, Death Valley, ...), whose land keeps its height.
   2. Fill dips narrower than fill_km (a grey closing with a disk that wide): a river like the Hudson by Monsey
      doesn't count, the sea, wide bays and broad lowlands do (Decision 2).
   3. Remove hills narrower than width_km (a grey opening with a disk that wide): the ridge under Jerusalem
@@ -19,8 +20,16 @@ Definition C of the report "Elevation-adjusted sunrise from the terrain":
      the ray bends as fast as the Earth and no point wins on height alone; the site then uses its
      standard-air base.
 
-The surface depends only on the terrain and the settings, so it is built once per area (an in-process cache
-here; the horizons that carry its candidates are stored on disk by serve.py). Where the land it is built from
+The surface depends only on the terrain and the settings, never on who asked: its cells lie on one world
+lattice (rows every GRID_KM of latitude; columns every GRID_KM of longitude, measured at the middle of each
+whole degree of latitude), so every spot's candidates depend on its own coordinates alone, like its sunrise
+and sunset, and not on the area it was asked from. Where the cells fall moves a time by up to ~15 s, so a
+grid centred on the area (or on each spot) would give one spot different times from different requests,
+or two neighbouring spots different times. A surface is built around the lattice node (every ANCHOR_CELLS
+cells) nearest the spot and wide enough that any spot within reach of that node sees the same heights as
+from any other node; spots near each other share it (an in-process cache here; the horizons that carry its
+candidates are stored on disk by serve.py). The one seam is at whole degrees of latitude, where the column
+spacing changes (a few seconds at most). Where the land it is built from
 isn't bare earth (a fallback surface model, which raises the land under cities by the buildings), no
 candidates are sent, and the site keeps its last good base (Decision 3).
 
@@ -41,9 +50,9 @@ import numpy as np
 
 import terrain
 
-VERSION = 1                        # bump when the surface or the candidates change for the same settings
+VERSION = 2                        # bump when the surface or the candidates change for the same settings
 GRID_KM = 2.0
-HALF_KM = 220.0
+ANCHOR_CELLS = 10                  # a surface is built around a world-lattice node every this many cells (20 km)
 D_KM = np.arange(1.0, 150.0 + 1e-9, 0.5)
 K_RANGE = np.round(np.arange(-0.5, 0.9 + 1e-9, 0.1), 2)
 NEAR_DEG = 0.02
@@ -52,8 +61,20 @@ AZ_STEP = 0.5                      # candidates on every entry at a multiple of 
 K_STANDARD = terrain.K_SELECT
 DEPRESSION_M = terrain.DEPRESSION_M
 
+# Land below sea level that is land (or a lake's surface), not the sea floor: [south, west, north, east]. Inside
+# these boxes heights below 0 are kept; everywhere else they are the skadi tiles' bathymetry and raised to 0.
+# Each box holds the depression and no sea coast. (Not listed: the Caspian, whose surface is -28 m but whose
+# tiles carry its floor; the Afar, whose depressions touch the Gulf of Tadjoura.)
+DEPRESSIONS = [
+    {"name": "Jordan rift: Dead Sea, Jordan valley, Kinneret", "bbox": [30.6, 35.25, 32.95, 35.75]},
+    {"name": "Death Valley", "bbox": [35.9, -117.4, 36.7, -116.6]},
+    {"name": "Salton Sea and Imperial Valley", "bbox": [32.5, -116.2, 33.7, -115.3]},
+    {"name": "Qattara Depression", "bbox": [28.5, 26.0, 30.5, 29.5]},
+    {"name": "Turpan Depression", "bbox": [42.5, 88.5, 43.2, 90.0]},
+]
+
 DEFAULTS = {"enabled": True, "width_km": 80.0, "fill_km": 5.0, "check_km": 120.0, "flag_s": 30.0,
-            "max_non_bare": 0.01, "overrides": []}
+            "max_non_bare": 0.01, "overrides": [], "depressions": DEPRESSIONS}
 
 
 def settings(cfg_base: dict | None) -> dict:
@@ -64,8 +85,9 @@ def settings(cfg_base: dict | None) -> dict:
 
 def signature(s: dict) -> str:
     """What the candidates depend on besides the terrain: part of serve.py's cache key and /v1/terrain-version."""
-    key = {"v": VERSION, "grid": GRID_KM, "half": HALF_KM, "width": s["width_km"], "fill": s["fill_km"],
-           "check": s["check_km"], "flag": s["flag_s"], "bare": s["max_non_bare"], "over": s["overrides"]}
+    key = {"v": VERSION, "grid": GRID_KM, "anchor": ANCHOR_CELLS, "width": s["width_km"], "fill": s["fill_km"],
+           "check": s["check_km"], "flag": s["flag_s"], "bare": s["max_non_bare"], "over": s["overrides"],
+           "dep": [d["bbox"] for d in s["depressions"]]}
     return hashlib.sha1(json.dumps(key, sort_keys=True).encode()).hexdigest()[:10]
 
 
@@ -104,24 +126,16 @@ def opening(a: np.ndarray, r: int) -> np.ndarray:
     return _rank(_rank(a, r, np.minimum), r, np.maximum)
 
 
-def sea_level(H: np.ndarray) -> np.ndarray:
-    """Open sea level at 0 m: heights below 0 connected to the grid's edge through heights below 0 are the sea
-    (and the skadi tiles' bathymetry under it); closed basins below sea level (the Dead Sea, the Jordan valley,
-    Death Valley) keep their heights. The grid reaches 220 km out, so any sea in view touches its edge."""
-    below = H < 0
-    sea = np.zeros_like(below)
-    sea[0, :], sea[-1, :], sea[:, 0], sea[:, -1] = below[0, :], below[-1, :], below[:, 0], below[:, -1]
-    while True:                                            # flood fill through the 4-neighbours below 0
-        grow = sea.copy()
-        grow[1:, :] |= sea[:-1, :]
-        grow[:-1, :] |= sea[1:, :]
-        grow[:, 1:] |= sea[:, :-1]
-        grow[:, :-1] |= sea[:, 1:]
-        grow &= below
-        if np.array_equal(grow, sea):
-            break
-        sea = grow
-    return np.where(sea, 0.0, H)
+def sea_level(H: np.ndarray, la: np.ndarray, lo: np.ndarray, depressions: list) -> np.ndarray:
+    """Heights below 0 raised to sea level (the sea is its surface, not the skadi tiles' sea floor), except
+    inside the listed depressions, whose land (and lakes' surfaces) below sea level is real. A list, not a
+    test of whether land below 0 reaches the open sea: such a test depends on how far the grid reaches (the
+    Jordan valley meets the edge of some grids and not others), and a spot's answer must not."""
+    keep = np.zeros(H.shape, bool)
+    for d in depressions:
+        s_, w, n, e = d["bbox"]
+        keep |= (la >= s_) & (la <= n) & (lo >= w) & (lo <= e)
+    return np.where(keep, H, np.maximum(H, 0.0))
 
 
 def cells(km: float) -> int:
@@ -129,20 +143,50 @@ def cells(km: float) -> int:
     return max(1, int(round(km / 2 / GRID_KM)))
 
 
-class Surface:
-    """The mountain-free land around (lat0, lon0), on a local grid of GRID_KM cells (north-south rows from the
-    south, east-west columns from the west), at width_km and, for the flag, at check_km."""
+def band_of(lat: float) -> int:
+    """The whole degree of latitude whose middle sets the column spacing."""
+    return int(math.floor(lat))
 
-    def __init__(self, tiles, lat0: float, lon0: float, s: dict, width_km: float | None = None, non_bare=None):
-        self.lat0, self.lon0, self.s = lat0, lon0, s
+
+def lattice(band: int) -> tuple[float, float, float]:
+    """(row step deg, column step deg, km per deg of longitude) of the world lattice in a band."""
+    kx = 111.19 * math.cos(math.radians(band + 0.5))
+    return GRID_KM / 111.19, GRID_KM / kx, kx
+
+
+def anchor_for(lat: float, lon: float) -> tuple[int, int, int]:
+    """(band, row, column) of the lattice node, every ANCHOR_CELLS cells, nearest (lat, lon)."""
+    band = band_of(lat)
+    dlat, dlon, _ = lattice(band)
+    a = ANCHOR_CELLS
+    return band, int(round(lat / dlat / a)) * a, int(round(lon / dlon / a)) * a
+
+
+def half_cells(width_km: float, s: dict) -> int:
+    """Cells each way from the node: the view (D_KM) + the opening's reach (its full width: erosion, then
+    dilation) + the closing's + the farthest a spot can be from its node, so no point of a spot's view
+    feels the grid's edge. (The check surface's wider opening can, at the far end; it only sets the flag.)"""
+    reach = float(D_KM[-1]) + 2 * cells(width_km) * GRID_KM + 2 * cells(s["fill_km"]) * GRID_KM \
+        + ANCHOR_CELLS * GRID_KM * math.sqrt(2) / 2
+    return int(math.ceil(reach / GRID_KM)) + 1
+
+
+class Surface:
+    """The mountain-free land around a world-lattice node (anchor_for), in GRID_KM cells (north-south rows from
+    the south, east-west columns from the west), at width_km and, for the flag, at check_km."""
+
+    def __init__(self, tiles, anchor: tuple[int, int, int], s: dict, width_km: float | None = None, non_bare=None):
+        band, row, col = anchor
+        dlat, dlon, self.kx = lattice(band)
+        self.anchor, self.s = anchor, s
+        self.lat0, self.lon0 = row * dlat, col * dlon
         self.width_km = float(width_km or s["width_km"])
-        n = int(round(2 * HALF_KM / GRID_KM)) + 1
+        n = 2 * half_cells(self.width_km, s) + 1
         self.k = (np.arange(n) - n // 2) * GRID_KM
-        self.kx = 111.19 * math.cos(math.radians(lat0))
-        la = lat0 + self.k[:, None] / 111.19 + 0 * self.k[None, :]
-        lo = lon0 + 0 * self.k[:, None] + self.k[None, :] / self.kx
+        la = self.lat0 + self.k[:, None] / 111.19 + 0 * self.k[None, :]
+        lo = self.lon0 + 0 * self.k[:, None] + self.k[None, :] / self.kx
         H = np.asarray(tiles.heights(la, lo), dtype=float)
-        H = sea_level(H)
+        H = sea_level(H, la, lo, s["depressions"])
         self.status, self.reason = "ok", None
         if non_bare is not None:
             bad = {}
@@ -215,32 +259,35 @@ _CACHE: OrderedDict = OrderedDict()
 _LOCK = threading.Lock()
 
 
-def surface_for(tiles, lat0: float, lon0: float, s: dict, width_km: float | None = None, non_bare=None,
+def surface_for(tiles, lat: float, lon: float, s: dict, width_km: float | None = None, non_bare=None,
                 key_extra: str = "") -> Surface:
-    """The area's surface, from a small in-process cache (an area's spots share it; lat / lon to 0.01 deg)."""
-    key = (round(lat0, 2), round(lon0, 2), signature(s), width_km, key_extra)
+    """The surface a spot's candidates come from: around the lattice node nearest it, from a small in-process
+    cache (spots within ~10 km of each other share it)."""
+    anchor = anchor_for(lat, lon)
+    key = (anchor, signature(s), width_km, key_extra)
     with _LOCK:
         if key in _CACHE:
             _CACHE.move_to_end(key)
             return _CACHE[key]
-    surf = Surface(tiles, round(lat0, 2), round(lon0, 2), s, width_km, non_bare)
+    surf = Surface(tiles, anchor, s, width_km, non_bare)
     with _LOCK:
         _CACHE[key] = surf
-        while len(_CACHE) > 4:
+        while len(_CACHE) > 8:
             _CACHE.popitem(last=False)
     return surf
 
 
 def annotate(hz: dict, surface: Surface | None, s: dict, *, none_reason: str | None = None) -> None:
     """Add the base fields to one horizon_for_point result: the sunrise / sunset entries at every AZ_STEP of
-    azimuth get baseCandidates (the site uses the nearest such entry), and the point a "base" summary ({version, widthKm, fillKm, status, reason?, flagSeconds?, flagged?})."""
+    azimuth get baseCandidates (the site uses the nearest such entry), and the point a "base" summary ({version, widthKm, fillKm, status, anchor?, reason?, flagSeconds?, flagged?}).
+    The profiles start at the point's own lat / lon, on a surface that doesn't depend on the request."""
     base = {"version": VERSION, "fillKm": s["fill_km"]}
     if surface is None or surface.status != "ok":
         base.update(status="none" if surface is None else surface.status,
                     reason=none_reason if surface is None else surface.reason)
         hz["base"] = base
         return
-    base.update(widthKm=surface.width_km, status="ok")
+    base.update(widthKm=surface.width_km, status="ok", anchor=list(surface.anchor))
     eye = float(hz["height"])
     flag = 0.0
     for side in ("sunrise", "sunset"):

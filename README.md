@@ -450,10 +450,16 @@ Visitors get the new horizons at their app's next daily terrain check, only wher
 
 Each horizon also carries the land its sunrise and sunset lie on with the mountains taken out
 ([`terrain_base.py`](terrain_base.py)): the website measures the observer's height for elevated sunrise and sunset
-from that land instead of from the sea. Around each area the server samples the bare-earth heights on a 2 km grid
-out to 220 km, fills dips narrower than `fill_km` (5), removes hills narrower than `width_km` (80), and sends, for
-every half degree of the sunrise and sunset directions, the few points of that surface that can be the horizon in
-some air (`baseCandidates`, `[distance km, height m]`). The website's calculator picks the horizon among them in
+from that land instead of from the sea. The server samples the bare-earth heights on a 2 km grid, raises the
+sea floor to sea level (except in the listed depressions, whose land below sea level is real), fills dips narrower than `fill_km` (5), removes hills narrower than `width_km` (80),
+and sends, for every half degree of the sunrise and sunset directions, the few points of that surface that can be
+the horizon in some air (`baseCandidates`, `[distance km, height m]`), each spot from its own coordinates.
+
+The grid's cells lie on one world lattice (rows every 2 km of latitude; columns every 2 km of longitude at the
+middle of each whole degree of latitude), and each surface reaches far enough that no point of a 150 km view
+feels its edge. So a spot's candidates depend on that spot alone, as its sunrise and sunset do, and not on the
+area it was asked from: a grid centred on the area moved a spot's times by up to ~15 s with where its cells fell.
+Spots near each other share one surface (around the lattice node every 20 km nearest them, `base.anchor`). The website's calculator picks the horizon among them in
 the day's air and turns its dip into the base. Each point says how it went in `base`: `status` `ok`, or `none` /
 `no-bare-earth` with a `reason`, and `flagSeconds` / `flagged` where widening the removal to `check_km` (120) would
 still move the times by `flag_s` (30) seconds or more; such a place is decided by hand.
@@ -467,10 +473,14 @@ Set in `terrain.base`:
   keeps its last good base instead.
 * `overrides`: `[{"lat", "lon", "radius_km", "width_km": 120}]` for a flagged place given another width, or
   `{..., "none": true}` for no base.
+* `depressions`: `[{"name", "bbox": [south, west, north, east]}]`, land below sea level that keeps its height
+  (default: the Jordan rift, Death Valley, the Salton Sea and Imperial Valley, Qattara, Turpan; each box holds no
+  sea coast). Everywhere else heights below 0 are the tiles' sea floor and become sea level. A list rather than
+  a test of whether the low land reaches the sea, because such a test depends on how far the grid reaches.
 * `enabled: false` turns it off.
 
 The settings are part of the stored horizons' key and of `/v1/terrain-version` (`base`), so changing them
-recomputes. The first horizon of a new area reads about 20 tiles more than before (the whole grid, not only the
+recomputes. The first horizon of a new area reads about 30 tiles more than before (the whole grid, not only the
 sun's directions); where they can't be read, the horizon is still served, with `base.status` `none`.
 
 ### Upgrading
@@ -621,7 +631,7 @@ for t in tests/test_*.py; do python3 "$t" > /dev/null 2>&1 || echo "FAILED: $t";
 | `test_dem_fallback.py` (rasterio) | FABDEM read from a remote zip (a local HTTP server stands in for Bristol's), a missing file told apart from an outage, provisional tiles kept and retried after the hour (also when read through terrain.Tiles, as the server does), ALOS masked by land cover (forest falls through to the plain tiles), `.plain` markers where no source has data, and `slim` |
 | `test_fine_terrain.py` (rasterio) | near-range fine terrain on a synthetic 1/3″ source (a narrow ridge the 1″ tiles miss, the max_km cut-off, chunks and markers), per-place versions and cache keys |
 | `test_sun_range.py` | sunrise / sunset ranges widened past high horizons only as far as the terrain hides the solstice Sun (both hemispheres, the tropics, a ridge that ends), and a point's horizon and wins over them; a crest between two distance steps found by the refinement |
-| `test_terrain_base.py` | the base level on a stub terrain: a ridge under the observer removed, a wide plateau kept as land, a narrow river filled, candidates every half degree, the flag, an override with no base, and no candidates where the land isn't bare earth |
+| `test_terrain_base.py` | the base level on a stub terrain: a ridge under the observer removed, a wide plateau kept as land, a narrow river filled, candidates every half degree, the flag, an override with no base, no candidates where the land isn't bare earth, and the world lattice (the same profile from neighbouring nodes; a spot's candidates the same whatever area it was asked from) |
 | `test_terrain_alternates.py` | alternate horizon points on a stub terrain (a near ridge highest in standard refraction, a farther, higher one overtaking it in strong refraction) and `floorM` |
 | `test_moon_horizon.py` | moon horizons on analytic terrain: the Sun's output unchanged by `moon=1`, every moonrise / moonset direction of the 18.6-year cycle covered, the percentile in an area, the cache key |
 | `test_horizon_workers.py` | horizons computed in worker processes: real searches on a synthetic tile outside the API process, one computation per place when 8 ask at once (more than `api.max_threads`), cached answers quick while two vantage searches run, a killed worker reported once and the pool started anew, errors carried back, the search time learned from the worker |
