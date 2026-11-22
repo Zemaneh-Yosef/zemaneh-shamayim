@@ -93,6 +93,7 @@ import dem_layers
 import haze_calibration
 import light_pollution
 import terrain
+import terrain_base
 import terrain_tiles
 import cesium_terrain
 from climatology import ClimGrid, build_profile, clim_dir
@@ -512,6 +513,9 @@ class Horizons:
         # Merged bare-earth tiles (dem_layers.py), when terrain.layers lists sources
         self.dem = dem_layers.signature(t.get("layers"))
         self.dem_sources = [s["name"] for s in dem_layers.enabled_sources(t.get("layers"))]
+        # the base level (terrain_base.py): its settings, and the layer sources that aren't bare earth
+        self.base = terrain_base.settings(t.get("base"))
+        self.surface_sources = {s["name"] for s in dem_layers.enabled_sources(t.get("layers")) if s.get("bare_earth") is False}
         layered_dir, builder = dem_layers.layers_dir(cfg), None
         if self.dem and t["layers"].get("auto_build"):
             try:
@@ -661,7 +665,28 @@ class Horizons:
         A stored horizon whose terrain.fine.version, terrain.layers or terrain.algo (absent: 1) differs is out
         of date."""
         p = self.params(q, max_bbox_km)
-        return {"fine": self.fine_version(p), "layers": self.layers_version(p), "algo": terrain.ALGO_VERSION}
+        return {"fine": self.fine_version(p), "layers": self.layers_version(p), "algo": terrain.ALGO_VERSION,
+                "base": terrain_base.signature(self.base)}
+
+    def non_bare(self, lat_i: int, lon_i: int) -> float | None:
+        """The fraction of a 1x1 degree tile's land that isn't bare earth (the skadi fallback, or a layer source
+        marked "bare_earth": false), for the base level (Decision 3); None for open sea."""
+        name = terrain.tile_name(lat_i, lon_i)
+        d = self.layers_out
+        if d is not None:
+            if (d / f"{name}.sea").exists():
+                return None
+            info = d / f"{name}.json"
+            if info.exists():
+                frac = json.loads(info.read_text()).get("fraction_by_source", {})
+                land = 1.0 - frac.get("sea (no data)", 0.0)
+                bad = sum(v for k, v in frac.items() if k == "skadi (fallback)" or k in self.surface_sources)
+                return bad / land if land > 0 else None
+        a = self.tiles.tile(lat_i, lon_i)               # the plain (skadi) tile: a surface model where it's land
+        if a is None:
+            return None
+        land = float((a > 0).mean())
+        return 1.0 if land > 0 else None
 
     def _reach(self, p: dict, km: float) -> tuple[float, float, float, float]:
         """south, west, north, east of the vantage points plus km around them"""
@@ -718,6 +743,7 @@ class Horizons:
             key_src["fine"] = self.fine
         if terrain.ALGO_VERSION != 1:
             key_src["algo"] = terrain.ALGO_VERSION
+        key_src["base"] = terrain_base.signature(self.base)
         key = hashlib.sha1(json.dumps(key_src, sort_keys=True).encode()).hexdigest()[:20]
         return self.dir / f"{key}.json.gz", layers_v, fine_v, partial
 
@@ -820,7 +846,8 @@ class Horizons:
                                       grid_m=p["grid_m"] or 100.0, eye=p["eye"], height=p["height"],
                                       min_km=p["min_km"], max_km=p["max_km"],
                                       max_candidates=int(self.cfg["max_candidates"]),
-                                      moon=p.get("moon", False), moon_percentile=p.get("moon_percentile", 90.0))
+                                      moon=p.get("moon", False), moon_percentile=p.get("moon_percentile", 90.0),
+                                      base={"settings": self.base, "non_bare": self.non_bare, "key": self.dem or ""})
             if layers_v:
                 res["terrain"] = {"layers": layers_v, "sources": self.dem_sources}
             if fine_v:
@@ -828,6 +855,7 @@ class Horizons:
                                                          "withinKm": self.fine["km"], "sources": self.tiles.fine.names}
             if terrain.ALGO_VERSION != 1:
                 res.setdefault("terrain", {})["algo"] = terrain.ALGO_VERSION
+            res.setdefault("terrain", {})["base"] = terrain_base.signature(self.base)
             body = gzip.compress(json.dumps(res, separators=(",", ":")).encode())
             if partial:
                 return body                  # a chunk failed to build: not kept, so the next request retries

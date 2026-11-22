@@ -67,7 +67,8 @@ log = logging.getLogger("terrain")
 # Bump when a change here alters the horizons computed from the same terrain data (selection, sampling,
 # floors, ...): it is part of serve.py's cache key, so cached horizons are recomputed. Version 1 leaves the
 # key as it always was, so existing caches stay valid.
-ALGO_VERSION = 4                    # 2: alternates; 3: floorM; 4: ranges past high horizons, crests refined
+ALGO_VERSION = 5                    # 2: alternates; 3: floorM; 4: ranges past high horizons, crests refined;
+                                    # 5: groundM, and the base level's candidates (terrain_base.py)
 
 R_EARTH = 6371008.8
 K_SELECT = 0.13
@@ -583,7 +584,8 @@ def horizon_for_point(tiles: Tiles, lat: float, lon: float, *, eye: float = 1.7,
     ground = max(raw, floor)
     h_obs = height if height is not None else ground + eye
     ds = steps_for(tiles, min_km, max_km, fine=True)
-    out = {"lat": round(lat, 6), "lon": round(lon, 6), "ground": round(ground, 1), "height": round(h_obs, 1)}
+    out = {"lat": round(lat, 6), "lon": round(lon, 6), "ground": round(ground, 1), "height": round(h_obs, 1),
+           "groundM": round(raw, 1)}
     ranges = az_ranges or azimuth_ranges(lat)
     for side in sides:
         lo, hi = ranges[side]
@@ -802,10 +804,12 @@ def _ranges(azs: list[float], step: float):
 def horizon_set(tiles: Tiles, lat: float | None = None, lon: float | None = None, *, radius_km: float = 0.0,
                 bbox=None, grid_m: float = 100.0, eye: float = 1.7, height: float | None = None,
                 min_km: float = 1.0, max_km: float = 150.0, max_candidates: int | None = None,
-                moon: bool = False, moon_percentile: float = 90.0) -> dict:
+                moon: bool = False, moon_percentile: float = 90.0, base: dict | None = None) -> dict:
     """What the API returns: the exact point, or the vantage winners within radius_km of it or inside
     bbox (south, west, north, east; lat / lon then default to the box centre). With moon, also the
-    moonrise / moonset sides (vantage mode: the spots at moon_percentile of horizon height)."""
+    moonrise / moonset sides (vantage mode: the spots at moon_percentile of horizon height).
+    With base ({"settings": terrain_base.settings(...), "non_bare": fn(lat_i, lon_i) -> fraction or None,
+    "key": str}), every point also gets the base level's candidates (terrain_base.annotate)."""
     if bbox is not None:
         s_, w, n, e = bbox
         if not (s_ < n and w < e):
@@ -833,6 +837,31 @@ def horizon_set(tiles: Tiles, lat: float | None = None, lon: float | None = None
         res = {"mode": "vantage", **vantage_search(tiles, lat, lon, radius_km, bbox=bbox, grid_m=grid_m, eye=eye,
                                                    min_km=min_km, max_km=max_km, max_candidates=max_candidates,
                                                    moon=moon, moon_percentile=moon_percentile)}
+    if base is not None:
+        add_base(tiles, lat, lon, res["points"], base)
     res["params"] = params
     res["seaTiles"] = sorted(tiles.sea_tiles)
     return res
+
+
+def add_base(tiles: Tiles, lat: float, lon: float, points: list, base: dict) -> None:
+    """The base level's candidates on every point (terrain_base.py), from one surface for the area."""
+    import terrain_base
+    s = base["settings"]
+    ov = terrain_base.override_for(s, lat, lon)
+    surf, reason = None, None
+    if not s.get("enabled", True):
+        reason = "disabled"
+    elif ov and ov.get("none"):
+        reason = "override: no base"
+    else:
+        try:
+            surf = terrain_base.surface_for(tiles, lat, lon, s, (ov or {}).get("width_km"), base.get("non_bare"),
+                                            base.get("key", ""))
+        except (OSError, RuntimeError, ValueError) as e:  # never fail the visible horizon over the base:
+            log.warning("no base level at %.4f,%.4f: %s", lat, lon, e)   # the site keeps its last good one
+            reason = f"terrain unavailable: {e}"
+    for hz in points:
+        terrain_base.annotate(hz, surf, s, none_reason=reason)
+        if ov:
+            hz["base"]["override"] = ov

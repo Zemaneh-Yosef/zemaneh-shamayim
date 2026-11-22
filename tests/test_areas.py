@@ -590,7 +590,7 @@ def check_server(tmp: Path, path: Path):
     assert tvo["area"] == nta and {k: v for k, v in tvo.items() if k != "area"} == tv, tvo
     # without area: the plain answer (this once failed with a 500 for every place)
     tvp = get("/v1/terrain-version?lat=40.72&lon=-73.85")
-    assert set(tvp) == {"fine", "layers", "algo"}, tvp
+    assert set(tvp) == {"fine", "layers", "algo", "base"}, tvp
     assert status("/v1/horizon?lat=40.72&lon=-73.85&area=nearest") == 400
     # Jerusalem: one area by the city rule; sub-quarter 12 (9 km from centre to corner) by area=finest, over
     # the user-bbox cap (3 km) but within the area cap
