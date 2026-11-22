@@ -527,6 +527,7 @@ class Horizons:
             log.info("bare-earth layers %s (%s): %s", self.dem, layered_dir, ", ".join(self.dem_sources))
         self.tiles = terrain.Tiles(folder, url, user_agent=ua, layered_dir=layered_dir, builder=builder)
         self.layers_out = layered_dir
+        self.base_store = data / "base-surfaces"       # the base level's built surfaces (terrain_base.py)
         # finer terrain for the near range (terrain.fine), e.g. USGS 3DEP 1/3"
         self.tiles.fine = dem_layers.make_fine(cfg)
         self.fine = self.tiles.fine and {"sig": self.tiles.fine.sig, "km": self.tiles.fine.max_km}
@@ -667,6 +668,15 @@ class Horizons:
         p = self.params(q, max_bbox_km)
         return {"fine": self.fine_version(p), "layers": self.layers_version(p), "algo": terrain.ALGO_VERSION,
                 "base": terrain_base.signature(self.base)}
+
+    def base_revs(self, tiles) -> str:
+        """Which merged tiles a base surface was built from, and their revisions (dem_layers.py build --force): a
+        stored surface is rebuilt when a tile under it was merged or rebuilt since."""
+        if not self.dem or self.layers_out is None:
+            return ""
+        d = self.layers_out
+        return json.dumps({f"{i},{j}": dem_layers.tile_rev(d, i, j) for i, j in tiles
+                           if (d / f"{terrain.tile_name(i, j)}.json").exists()}, sort_keys=True)
 
     def non_bare(self, lat_i: int, lon_i: int) -> float | None:
         """The fraction of a 1x1 degree tile's land that isn't bare earth (the skadi fallback, or a layer source
@@ -847,7 +857,8 @@ class Horizons:
                                       min_km=p["min_km"], max_km=p["max_km"],
                                       max_candidates=int(self.cfg["max_candidates"]),
                                       moon=p.get("moon", False), moon_percentile=p.get("moon_percentile", 90.0),
-                                      base={"settings": self.base, "non_bare": self.non_bare, "key": self.dem or ""})
+                                      base={"settings": self.base, "non_bare": self.non_bare, "key": self.dem or "",
+                                            "store": self.base_store, "revs": self.base_revs})
             if layers_v:
                 res["terrain"] = {"layers": layers_v, "sources": self.dem_sources}
             if fine_v:

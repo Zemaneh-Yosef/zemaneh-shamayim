@@ -11,6 +11,7 @@
 #   sudo -u zmanim-sky deploy/prebuild-fine.sh --tiles-only --only "Los Angeles"             # only the 1" tiles
 #   sudo -u zmanim-sky nohup deploy/prebuild-fine.sh --tiles --3d > prebuild-fine.log 2>&1 &  # and the 3D view's
 #   sudo -u zmanim-sky deploy/prebuild-fine.sh --3d-only --only "Los Angeles"                 # only the 3D view's
+#   sudo -u zmanim-sky nohup deploy/prebuild-fine.sh --base-only > prebuild-base.log 2>&1 &   # only the base level's
 #
 # --tiles also prepares each place's 1" tiles (dem_layers.py build --horizon): the merged bare-earth tiles where
 # terrain.layers has sources, else the plain downloaded ones. Only those its horizons' rays cross (the year's
@@ -26,6 +27,13 @@
 # fetched first, as a visit would), ~10-40 KB each. Run it again after changing terrain sources (the tiles are kept
 # per terrain signature).
 #
+# --base also builds the base level's surfaces (terrain_base.py build: the land the horizon lies on, without the
+# mountains, for elevated sunrise and sunset), for every place below and for the whole of the regions in
+# BASE_REGIONS (Israel: ~260 surfaces). Each reads ~30 1x1 degree tiles once and takes 5-10 s; ~50-100 KB on disk
+# (<data_dir>/base-surfaces); Israel ~30-40 min and ~20 MB, each place below 2-15 surfaces. Without it the first
+# horizon near a node builds its surface itself. They follow the terrain: a merged tile rebuilt under one
+# (dem_layers.py build --force) rebuilds it at the next request, or run this again.
+#
 # Each line: name, latitude, longitude, km (the community's own radius + terrain.fine.max_km, 10). ~4.7 MB a
 # chunk on disk; the whole list is roughly 900 chunks (~4 GB): about 45 min for the US and Canada (USGS and
 # NRCan answer in a few seconds a chunk), about 45 more for France (IGN: ~15-20 s a chunk).
@@ -37,6 +45,7 @@ ONLY=""
 TILES=0
 FINE=1
 CESIUM=0
+BASE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --only) ONLY="$2"; shift 2 ;;
@@ -44,6 +53,8 @@ while [ $# -gt 0 ]; do
     --tiles-only) TILES=1; FINE=0; shift ;;
     --3d) CESIUM=1; shift ;;
     --3d-only) CESIUM=1; FINE=0; TILES=0; shift ;;
+    --base) BASE=1; shift ;;
+    --base-only) BASE=1; FINE=0; TILES=0; CESIUM=0; shift ;;
     *) EXTRA+=("$1"); shift ;;
   esac
 done
@@ -88,7 +99,20 @@ Nice|43.70|7.27|15
 Strasbourg|48.58|7.75|15
 "
 
+# whole regions for the base level (--base): name|south,west,north,east
+BASE_REGIONS="
+Israel|29.4,34.2,33.4,35.95
+"
+
 failed=()
+if [ "$BASE" = 1 ]; then
+  while IFS='|' read -r name bbox; do
+    [ -z "$name" ] && continue
+    [ -n "$ONLY" ] && [[ "$name" != *"$ONLY"* ]] && continue
+    echo "=== $name (base level)"
+    venv/bin/python terrain_base.py build --bbox "$bbox" || failed+=("$name (base level)")
+  done <<< "$BASE_REGIONS"
+fi
 while IFS='|' read -r name lat lon km; do
   [ -z "$name" ] && continue
   [ -n "$ONLY" ] && [[ "$name" != *"$ONLY"* ]] && continue
@@ -100,6 +124,10 @@ while IFS='|' read -r name lat lon km; do
   if [ "$TILES" = 1 ] && ! venv/bin/python dem_layers.py build --around "$lat" "$lon" --horizon \
        --radius-km "$(awk -v k="$km" 'BEGIN { r = k - 10; print (r > 0 ? r : 0) }')"; then
     failed+=("$name (1\" tiles)")
+  fi
+  if [ "$BASE" = 1 ] && ! venv/bin/python terrain_base.py build --around "$lat" "$lon" \
+       --radius-km "$(awk -v k="$km" 'BEGIN { r = k - 10; print (r > 0 ? r : 0) }')"; then
+    failed+=("$name (base level)")
   fi
   if [ "$CESIUM" = 1 ] && ! venv/bin/python cesium_terrain.py build --around "$lat" "$lon" \
        --radius-km "$(awk -v k="$km" 'BEGIN { r = k - 10; print (r > 0 ? r : 0) }')"; then
