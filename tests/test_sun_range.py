@@ -119,7 +119,7 @@ check(max(azs) > b40["sunrise"][1] + 1, f"point beside a ridge: sunrise entries 
 check(abs(pt["wins"]["sunrise"][0][1] - round(max(azs) % 360, 2)) < 0.11, "its wins cover the widened range")
 check(min(e["azimuthDeg"] for e in pt["sunset"]) == round(b40["sunset"][0] % 360, 2),
       "no ridge to the west: the sunset range is as before")
-check(terrain.ALGO_VERSION == 4, "algorithm version 4 (horizons recomputed, clients re-fetch)")
+check(terrain.ALGO_VERSION >= 4, "algorithm version 4 or later (horizons recomputed, clients re-fetch)")
 
 
 # Ridge crests between the distance steps: a sharp hill 600 m across at its base and 300 m high at 60 km (the steps

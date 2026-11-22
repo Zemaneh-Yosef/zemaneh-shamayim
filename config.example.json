@@ -69,6 +69,15 @@
     "answer_within_s": 45.0,
     "max_candidates": 1200,
     "moon_percentile": 90.0,
+    "base": {
+      "enabled": true,
+      "width_km": 80.0,
+      "fill_km": 5.0,
+      "check_km": 120.0,
+      "flag_s": 30.0,
+      "max_non_bare": 0.01,
+      "overrides": []
+    },
     "layers": {
       "dir": "",
       "auto_build": true,
@@ -116,6 +125,7 @@
         },
         {
           "name": "alos-aw3d30-outside-forest",
+          "bare_earth": false,
           "if_unavailable": "skip",
           "min_valid": -1000,
           "paths": [
