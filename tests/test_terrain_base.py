@@ -119,10 +119,54 @@ def main():
                for e, f in zip(alone["sunrise"] + alone["sunset"], other["sunrise"] + other["sunset"]))
     check(same, "a spot's candidates don't depend on the area's centre")
 
+    # the seam at 32 N: continuous across it, the mix ends at BLEND_DEG
+    terrain_base._CACHE.clear()
+    az = np.arange(0, 360, 7.5)
+    lo_, eps = 35.081, 1e-7
+    below = terrain_base.surface_for(Bumpy(), 32 - eps, lo_, s).profile(32 - eps, lo_, az)
+    above = terrain_base.surface_for(Bumpy(), 32 + eps, lo_, s).profile(32 + eps, lo_, az)
+    edge = terrain_base.anchors_for(32 + terrain_base.BLEND_DEG + 1e-9, lo_)
+    mid = terrain_base.anchors_for(32 + terrain_base.BLEND_DEG / 2, lo_)
+    check(float(np.max(np.abs(above - below))) < 1e-3 and len(edge) == 1
+          and [round(w, 2) for _, w in mid] == [0.75, 0.25],
+          f"seam: the same profile either side ({float(np.max(np.abs(above - below))):.1e} m), mix 3:1 halfway, "
+          f"one band at {terrain_base.BLEND_DEG} deg")
+
     # below sea level: the Dead Sea's surface is kept, the Mediterranean's floor becomes the sea
     la = np.array([31.5, 31.5, 32.0]); lo = np.array([35.5, 34.3, 35.6])
     z = terrain_base.sea_level(np.array([-415.0, -800.0, 120.0]), la, lo, s["depressions"])
     check(list(z) == [-415.0, 0.0, 120.0], f"Dead Sea kept, sea floor raised, land untouched ({list(z)})")
+
+    # the store: built once, then loaded (no terrain read), rebuilt when the tiles' revisions change
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        reads = {"n": 0}
+
+        class Counting(Bumpy):
+            def heights(self, lat, lon):
+                reads["n"] += 1
+                return super().heights(lat, lon)
+        revs = {"v": "a"}
+        base = {"settings": s, "non_bare": None, "store": Path(d), "revs": lambda tl: revs["v"]}
+        terrain_base._CACHE.clear()
+        first = terrain.horizon_set(Counting(), *spot, base=base)["points"][0]
+        n1 = reads["n"]
+        terrain_base._CACHE.clear()
+        again = terrain.horizon_set(Counting(), *spot, base=base)["points"][0]
+        cand = lambda h: [e.get("baseCandidates") for e in h["sunrise"] + h["sunset"]]
+        surf_reads = reads["n"] - n1
+        terrain_base._CACHE.clear()
+        reads["n"] = 0
+        terrain_base.surface_for(Counting(), *spot, s, store=Path(d), revs_fn=lambda tl: "a")
+        loaded_reads = reads["n"]
+        terrain_base._CACHE.clear()
+        terrain_base.surface_for(Counting(), *spot, s, store=Path(d), revs_fn=lambda tl: "b")
+        check(cand(first) == cand(again) and loaded_reads == 0 and reads["n"] == 1,
+              f"stored surface: same candidates, loaded without reading the terrain, rebuilt on new revisions "
+              f"({loaded_reads} reads loaded, {reads['n']} after)")
+    nodes = terrain_base.nodes_for(s, *spot, radius_km=15)
+    check(2 <= len(nodes) <= 14 and terrain_base.anchor_for(*spot) in [n for n, _ in nodes],
+          f"build: the nodes a 15 km place uses, with the band below 31 N it reaches ({len(nodes)})")
 
     # the morphology itself: an opening removes a 1-cell spike, keeps a block wider than the disk
     a = np.zeros((41, 41)); a[20, 20] = 9; a[5:15, 5:15] = 4

@@ -28,8 +28,9 @@ grid centred on the area (or on each spot) would give one spot different times f
 or two neighbouring spots different times. A surface is built around the lattice node (every ANCHOR_CELLS
 cells) nearest the spot and wide enough that any spot within reach of that node sees the same heights as
 from any other node; spots near each other share it (an in-process cache here; the horizons that carry its
-candidates are stored on disk by serve.py). The one seam is at whole degrees of latitude, where the column
-spacing changes (a few seconds at most). Where the land it is built from
+candidates are stored on disk by serve.py). At whole degrees of latitude, where the column spacing changes,
+the two bands' surfaces are mixed by distance within BLEND_DEG of the line (anchors_for), so the times change
+smoothly there instead of jumping. Where the land it is built from
 isn't bare earth (a fallback surface model, which raises the land under cities by the buildings), no
 candidates are sent, and the site keeps its last good base (Decision 3).
 
@@ -44,7 +45,9 @@ import hashlib
 import json
 import math
 import threading
+import time
 from collections import OrderedDict
+from pathlib import Path
 
 import numpy as np
 
@@ -53,6 +56,7 @@ import terrain
 VERSION = 2                        # bump when the surface or the candidates change for the same settings
 GRID_KM = 2.0
 ANCHOR_CELLS = 10                  # a surface is built around a world-lattice node every this many cells (20 km)
+BLEND_DEG = 0.05                   # within this of a whole degree of latitude, both bands' surfaces are mixed
 D_KM = np.arange(1.0, 150.0 + 1e-9, 0.5)
 K_RANGE = np.round(np.arange(-0.5, 0.9 + 1e-9, 0.1), 2)
 NEAR_DEG = 0.02
@@ -154,12 +158,49 @@ def lattice(band: int) -> tuple[float, float, float]:
     return GRID_KM / 111.19, GRID_KM / kx, kx
 
 
-def anchor_for(lat: float, lon: float) -> tuple[int, int, int]:
-    """(band, row, column) of the lattice node, every ANCHOR_CELLS cells, nearest (lat, lon)."""
-    band = band_of(lat)
+def anchor_for(lat: float, lon: float, band: int | None = None) -> tuple[int, int, int]:
+    """(band, row, column) of the lattice node, every ANCHOR_CELLS cells, nearest (lat, lon) (in its own band,
+    or in `band`)."""
+    band = band_of(lat) if band is None else band
     dlat, dlon, _ = lattice(band)
     a = ANCHOR_CELLS
     return band, int(round(lat / dlat / a)) * a, int(round(lon / dlon / a)) * a
+
+
+def anchors_for(lat: float, lon: float) -> list[tuple[tuple[int, int, int], float]]:
+    """[(node, weight), ...] whose surfaces a spot's profiles mix. One node, except within BLEND_DEG of a whole
+    degree of latitude, where the column spacing changes: there the nearest node of each band, weighted from
+    1/2 each on the line to all its own at BLEND_DEG, so the times change smoothly across the line instead of
+    jumping (the 2 km cells' phase moves a time by up to ~30 s: 34 s measured at Philadelphia, 40 N)."""
+    band = band_of(lat)
+    f = lat - band
+    if f < BLEND_DEG:
+        other, near = band - 1, f
+    elif f > 1 - BLEND_DEG:
+        other, near = band + 1, 1 - f
+    else:
+        return [(anchor_for(lat, lon), 1.0)]
+    w = 0.5 + near / (2 * BLEND_DEG)
+    return [(anchor_for(lat, lon), w), (anchor_for(lat, lon, other), 1.0 - w)]
+
+
+class Blend:
+    """Surfaces mixed by weight (anchors_for), with a Surface's profile() and summary fields."""
+
+    def __init__(self, parts: list[tuple["Surface", float]]):
+        self.parts = parts
+        bad = [p for p, _ in parts if p.status != "ok"]
+        self.status = bad[0].status if bad else "ok"
+        self.reason = bad[0].reason if bad else None
+        self.width_km = parts[0][0].width_km
+        self.z_check = None if any(p.z_check is None for p, _ in parts) else True
+
+    def profile(self, lat: float, lon: float, az: np.ndarray, which: str = "z") -> np.ndarray:
+        return sum(w * p.profile(lat, lon, az, which) for p, w in self.parts)
+
+    @property
+    def anchors(self) -> list[list]:
+        return [[*p.anchor, round(w, 3)] for p, w in self.parts]
 
 
 def half_cells(width_km: float, s: dict) -> int:
@@ -198,9 +239,14 @@ class Surface:
             if bad:
                 self.status = "no-bare-earth"
                 self.reason = {"tiles": bad, "maxNonBare": s["max_non_bare"]}
+        self.tiles_used = tiles_under(la, lo)
         filled = closing(H, cells(s["fill_km"]))
         self.z = opening(filled, cells(self.width_km))
         self.z_check = opening(filled, cells(s["check_km"])) if s.get("check_km") else None
+
+    @property
+    def anchors(self) -> list[list]:
+        return [[*self.anchor, 1.0]]
 
     def profile(self, lat: float, lon: float, az: np.ndarray, which: str = "z") -> np.ndarray:
         """Heights of the surface along each azimuth at D_KM: shape (len(az), len(D_KM))."""
@@ -259,27 +305,100 @@ _CACHE: OrderedDict = OrderedDict()
 _LOCK = threading.Lock()
 
 
+def tiles_under(la: np.ndarray, lo: np.ndarray) -> list[tuple[int, int]]:
+    """The 1x1 degree tiles (south-west corners) a grid's cells fall in."""
+    return sorted({(int(math.floor(a)), int(math.floor(b))) for a, b in
+                   zip(la[::5, ::5].ravel(), lo[::5, ::5].ravel())} |
+                  {(int(math.floor(a)), int(math.floor(b))) for a, b in
+                   zip(np.r_[la[0], la[-1], la[:, 0], la[:, -1]], np.r_[lo[0], lo[-1], lo[:, 0], lo[:, -1]])})
+
+
+# Built surfaces on disk (serve.py: <data_dir>/base-surfaces; `terrain_base.py build` fills it ahead of time for
+# the places listed in deploy/prebuild-fine.sh, as the fine terrain is). A surface reads ~30 1x1 degree tiles
+# and takes 5-10 s to build; a stored one is ~50-100 KB and loads in milliseconds. One folder per settings
+# signature and terrain key; each file keeps the revisions of the merged tiles it was built from (dem_layers.py
+# build --force), and is rebuilt when one changed.
+
+def _store_path(store: Path, anchor, s: dict, width_km: float | None, key_extra: str) -> Path:
+    b, r, c = anchor
+    w = float(width_km or s["width_km"])
+    return Path(store) / f"{signature(s)}-{key_extra or 'srtm'}" / f"{b}_{r}_{c}_w{w:g}.npz"
+
+
+def _save(path: Path, surf: "Surface", revs: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    meta = {"status": surf.status, "reason": surf.reason, "tiles": surf.tiles_used, "revs": revs}
+    tmp = path.with_name(path.name + ".tmp.npz")
+    arrays = {"z": surf.z.astype(np.float32)}
+    if surf.z_check is not None:
+        arrays["z_check"] = surf.z_check.astype(np.float32)
+    np.savez_compressed(tmp, meta=np.array(json.dumps(meta)), **arrays)
+    tmp.replace(path)
+
+
+def _load(path: Path, anchor, s: dict, width_km: float | None, revs_fn) -> "Surface | None":
+    try:
+        with np.load(path) as f:
+            meta = json.loads(str(f["meta"]))
+            if revs_fn is not None and revs_fn([tuple(x) for x in meta["tiles"]]) != meta["revs"]:
+                return None
+            z = f["z"].astype(float)
+            zc = f["z_check"].astype(float) if "z_check" in f.files else None
+    except (OSError, ValueError, KeyError):
+        return None
+    surf = Surface.__new__(Surface)
+    band, row, col = anchor
+    dlat, dlon, surf.kx = lattice(band)
+    surf.anchor, surf.s = anchor, s
+    surf.lat0, surf.lon0 = row * dlat, col * dlon
+    surf.width_km = float(width_km or s["width_km"])
+    n = z.shape[0]
+    surf.k = (np.arange(n) - n // 2) * GRID_KM
+    surf.z, surf.z_check = z, zc
+    surf.status, surf.reason = meta["status"], meta["reason"]
+    surf.tiles_used = [tuple(x) for x in meta["tiles"]]
+    return surf
+
+
 def surface_for(tiles, lat: float, lon: float, s: dict, width_km: float | None = None, non_bare=None,
-                key_extra: str = "") -> Surface:
-    """The surface a spot's candidates come from: around the lattice node nearest it, from a small in-process
-    cache (spots within ~10 km of each other share it)."""
-    anchor = anchor_for(lat, lon)
+                key_extra: str = "", store: Path | None = None, revs_fn=None) -> "Surface | Blend":
+    """The surface a spot's candidates come from: around the lattice node nearest it (two, mixed, near a whole
+    degree of latitude: anchors_for), each from a small in-process cache (spots within ~10 km of each other
+    share it), then from `store` on disk, else built (and stored). revs_fn(tiles) -> str: the merged tiles'
+    revisions, so a stored surface is rebuilt when one changed."""
+    parts = [(surface_at(tiles, a, s, width_km, non_bare, key_extra, store, revs_fn), w)
+             for a, w in anchors_for(lat, lon)]
+    return parts[0][0] if len(parts) == 1 else Blend(parts)
+
+
+def surface_at(tiles, anchor, s: dict, width_km: float | None = None, non_bare=None, key_extra: str = "",
+               store: Path | None = None, revs_fn=None) -> Surface:
+    """The surface around one lattice node: cache, store, else built."""
     key = (anchor, signature(s), width_km, key_extra)
     with _LOCK:
         if key in _CACHE:
             _CACHE.move_to_end(key)
             return _CACHE[key]
-    surf = Surface(tiles, anchor, s, width_km, non_bare)
+    path = _store_path(store, anchor, s, width_km, key_extra) if store else None
+    surf = _load(path, anchor, s, width_km, revs_fn) if path and path.exists() else None
+    if surf is None:
+        surf = Surface(tiles, anchor, s, width_km, non_bare)
+        if path is not None:
+            try:
+                _save(path, surf, revs_fn(surf.tiles_used) if revs_fn else "")
+            except OSError as e:                          # a full disk costs only the next request's time
+                import logging
+                logging.getLogger("terrain_base").warning("could not store the base surface %s: %s", path, e)
     with _LOCK:
         _CACHE[key] = surf
-        while len(_CACHE) > 8:
+        while len(_CACHE) > 12:
             _CACHE.popitem(last=False)
     return surf
 
 
 def annotate(hz: dict, surface: Surface | None, s: dict, *, none_reason: str | None = None) -> None:
     """Add the base fields to one horizon_for_point result: the sunrise / sunset entries at every AZ_STEP of
-    azimuth get baseCandidates (the site uses the nearest such entry), and the point a "base" summary ({version, widthKm, fillKm, status, anchor?, reason?, flagSeconds?, flagged?}).
+    azimuth get baseCandidates (the site uses the nearest such entry), and the point a "base" summary ({version, widthKm, fillKm, status, anchors?, reason?, flagSeconds?, flagged?}).
     The profiles start at the point's own lat / lon, on a surface that doesn't depend on the request."""
     base = {"version": VERSION, "fillKm": s["fill_km"]}
     if surface is None or surface.status != "ok":
@@ -287,7 +406,7 @@ def annotate(hz: dict, surface: Surface | None, s: dict, *, none_reason: str | N
                     reason=none_reason if surface is None else surface.reason)
         hz["base"] = base
         return
-    base.update(widthKm=surface.width_km, status="ok", anchor=list(surface.anchor))
+    base.update(widthKm=surface.width_km, status="ok", anchors=surface.anchors)
     eye = float(hz["height"])
     flag = 0.0
     for side in ("sunrise", "sunset"):
@@ -310,3 +429,74 @@ def annotate(hz: dict, surface: Surface | None, s: dict, *, none_reason: str | N
         base["flagSeconds"] = round(flag, 1)
         base["flagged"] = flag >= s["flag_s"]
     hz["base"] = base
+
+
+def nodes_for(s: dict, lat: float, lon: float, radius_km: float = 0.0, bbox=None) -> list[tuple[tuple, float | None]]:
+    """The (lattice node, width) pairs the spots of a place (a circle, or a bbox) use: every node nearest one of
+    them, at the width of the override that holds it."""
+    if bbox:
+        s_, w, n, e = bbox
+    else:
+        dlat = radius_km / 111.19
+        dlon = radius_km / (111.19 * max(0.05, math.cos(math.radians(lat))))
+        s_, w, n, e = lat - dlat, lon - dlon, lat + dlat, lon + dlon
+    step = 1.0                                            # km: well under the 20 km between nodes
+    out = set()
+    for a in np.arange(s_, n + 1e-9, step / 111.19) if n > s_ else [s_]:
+        kx = 111.19 * max(0.05, math.cos(math.radians(a)))
+        for b in np.arange(w, e + 1e-9, step / kx) if e > w else [w]:
+            if not bbox and math.hypot((a - lat) * 111.19, (b - lon) * kx) > radius_km + step:
+                continue
+            ov = override_for(s, float(a), float(b))
+            if ov and ov.get("none"):
+                continue
+            for node, _ in anchors_for(float(a), float(b)):
+                out.add((node, (ov or {}).get("width_km")))
+    return sorted(out, key=lambda x: (x[0], x[1] or 0))
+
+
+def main(argv=None) -> int:
+    import argparse
+    import logging
+    ap = argparse.ArgumentParser(description="The base level's surfaces (see this module's docstring).")
+    ap.add_argument("--config", default=None, help="config.json (default: next to this script)")
+    sub = ap.add_subparsers(dest="cmd", required=True)
+    b = sub.add_parser("build", help="build and store the surfaces a place's horizons use, ahead of time")
+    g = b.add_mutually_exclusive_group(required=True)
+    g.add_argument("--around", nargs=2, type=float, metavar=("LAT", "LON"))
+    g.add_argument("--bbox", type=lambda v: [float(x) for x in v.split(",")], metavar="S,W,N,E",
+                   help="a region (a whole country: Israel is 29.4,34.2,33.4,35.95)")
+    b.add_argument("--radius-km", type=float, default=0.0, help="the place's own radius around the point")
+    b.add_argument("--count", action="store_true", help="only say how many surfaces that is")
+    a = ap.parse_args(argv)
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    import serve                                          # noqa: PLC0415 (the server's tiles and settings)
+    from common import load_config                        # noqa: PLC0415
+    cfg = load_config(a.config)
+    h = serve.Horizons(cfg, worker=True)
+    s = h.base
+    lat, lon = a.around if a.around else ((a.bbox[0] + a.bbox[2]) / 2, (a.bbox[1] + a.bbox[3]) / 2)
+    todo = nodes_for(s, lat, lon, a.radius_km, a.bbox)
+    print(f"{len(todo)} surfaces")
+    if a.count or not s.get("enabled", True):
+        return 0
+    failed = 0
+    for i, (anchor, width) in enumerate(todo, 1):
+        path = _store_path(h.base_store, anchor, s, width, h.dem or "")
+        if path.exists() and _load(path, anchor, s, width, h.base_revs) is not None:
+            continue
+        t0 = time.monotonic()
+        try:
+            surface_at(h.tiles, anchor, s, width, h.non_bare, h.dem or "", h.base_store, h.base_revs)
+        except (OSError, RuntimeError, ValueError) as e:
+            failed += 1
+            print(f"  {anchor}: failed: {e}")
+            continue
+        print(f"  {i}/{len(todo)} {anchor} width {width or s['width_km']:g} km: {time.monotonic() - t0:.1f} s")
+    if failed:
+        print(f"{failed} failed - run this again to retry them")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

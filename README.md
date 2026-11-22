@@ -459,7 +459,10 @@ The grid's cells lie on one world lattice (rows every 2 km of latitude; columns 
 middle of each whole degree of latitude), and each surface reaches far enough that no point of a 150 km view
 feels its edge. So a spot's candidates depend on that spot alone, as its sunrise and sunset do, and not on the
 area it was asked from: a grid centred on the area moved a spot's times by up to ~15 s with where its cells fell.
-Spots near each other share one surface (around the lattice node every 20 km nearest them, `base.anchor`). The website's calculator picks the horizon among them in
+Spots near each other share one surface (around the lattice node every 20 km nearest them, `base.anchors`:
+`[band, row, column, weight]`). Within 0.05° of a whole degree of latitude, where the column spacing changes, the
+surfaces of both bands are mixed by distance (half each on the line), so the times change smoothly across it:
+on one grid alone they jumped by up to 34 s there (Philadelphia, 40° N). The website's calculator picks the horizon among them in
 the day's air and turns its dip into the base. Each point says how it went in `base`: `status` `ok`, or `none` /
 `no-bare-earth` with a `reason`, and `flagSeconds` / `flagged` where widening the removal to `check_km` (120) would
 still move the times by `flag_s` (30) seconds or more; such a place is decided by hand.
@@ -480,8 +483,12 @@ Set in `terrain.base`:
 * `enabled: false` turns it off.
 
 The settings are part of the stored horizons' key and of `/v1/terrain-version` (`base`), so changing them
-recomputes. The first horizon of a new area reads about 30 tiles more than before (the whole grid, not only the
-sun's directions); where they can't be read, the horizon is still served, with `base.status` `none`.
+recomputes. A surface reads about 30 1° tiles and takes 5-10 s to build. It is kept on disk
+(`<data_dir>/base-surfaces`, ~50-100 KB each) and rebuilt only when a merged tile under it is first built or
+rebuilt. Build them ahead of time, as for the fine terrain: `deploy/prebuild-fine.sh --base-only` does all of
+Israel (~260 surfaces, ~30-40 min, ~20 MB) and each place in its list, or one place with
+`venv/bin/python terrain_base.py build --around LAT LON --radius-km R` (`--bbox S,W,N,E` for a region, `--count`
+to only count). Where the tiles can't be read, the horizon is still served, with `base.status` `none`.
 
 ### Upgrading
 

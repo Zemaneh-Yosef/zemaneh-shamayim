@@ -809,7 +809,7 @@ def horizon_set(tiles: Tiles, lat: float | None = None, lon: float | None = None
     bbox (south, west, north, east; lat / lon then default to the box centre). With moon, also the
     moonrise / moonset sides (vantage mode: the spots at moon_percentile of horizon height).
     With base ({"settings": terrain_base.settings(...), "non_bare": fn(lat_i, lon_i) -> fraction or None,
-    "key": str}), every point also gets the base level's candidates (terrain_base.annotate)."""
+    "key": str, "store": folder of built surfaces, "revs": fn(tiles) -> str}), every point also gets the base level's candidates (terrain_base.annotate)."""
     if bbox is not None:
         s_, w, n, e = bbox
         if not (s_ < n and w < e):
@@ -860,7 +860,8 @@ def add_base(tiles: Tiles, lat: float, lon: float, points: list, base: dict) -> 
         else:
             try:
                 surf = terrain_base.surface_for(tiles, plat, plon, s, (ov or {}).get("width_km"),
-                                                base.get("non_bare"), base.get("key", ""))
+                                                base.get("non_bare"), base.get("key", ""),
+                                                base.get("store"), base.get("revs"))
             except (OSError, RuntimeError, ValueError) as e:  # never fail the visible horizon over the base:
                 log.warning("no base level at %.4f,%.4f: %s", plat, plon, e)   # the site keeps its last good one
                 reason = f"terrain unavailable: {e}"
