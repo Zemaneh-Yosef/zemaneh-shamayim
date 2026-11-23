@@ -314,7 +314,7 @@ def tiles_under(la: np.ndarray, lo: np.ndarray) -> list[tuple[int, int]]:
 
 
 # Built surfaces on disk (serve.py: <data_dir>/base-surfaces; `terrain_base.py build` fills it ahead of time for
-# the places listed in deploy/prebuild-fine.sh, as the fine terrain is). A surface reads ~30 1x1 degree tiles
+# prebuild.py: the regions, the listed places, and every place in the horizon cache). A surface reads ~30 1x1 degree tiles
 # and takes 5-10 s to build; a stored one is ~50-100 KB and loads in milliseconds. One folder per settings
 # signature and terrain key; each file keeps the revisions of the merged tiles it was built from (dem_layers.py
 # build --force), and is rebuilt when one changed.

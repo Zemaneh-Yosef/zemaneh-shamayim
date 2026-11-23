@@ -714,7 +714,7 @@ heights first. Tiles are kept gzipped in
 starts a new folder and new tile URLs; delete old ones).
 
 A tile is made when first asked for, so a first visit to a place waits for its tiles (~10 s or more). To make a
-place's ahead of time, with `deploy/prebuild-fine.sh --3d` (all the listed places, after their other terrain) or:
+place's ahead of time, with `deploy/prebuild.sh --3d` (all the listed places) or:
 
 ```sh
 cd /opt/zmanim-sky-server
