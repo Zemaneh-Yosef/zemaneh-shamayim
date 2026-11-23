@@ -2,11 +2,11 @@
 
     python3 tests/test_prebuild.py
 
-1. a cached horizon's params give back a query with the same params (so the same cache key): a small box, a
-   point, a radius, a point at a given height, the moon's
-2. the demand: every cached horizon once, the same place under two keys once, an unreadable file skipped; an
-   official area's (its box, too large to ask for directly) asked for as area=auto inside it, giving the same
-   params again, or skipped when areas.sqlite no longer has it
+1. real horizons computed by the API (on a synthetic slope) and kept in its cache: a point, a point at a height
+   with its own eye, a radius, a small box, the moon's, an official area's as the website asks for it
+2. read back from the cache files as the API wrote them (terrain.horizon_set's params), and asked for again:
+   every one the same cache entry, nothing new computed (an official area's box, too large to ask for directly,
+   asked for as area=auto inside it); an unreadable file skipped
 3. the warmer: a 503 "computing" asked again after its retryAfterS (plain or gzipped), a 400 given up, and an
    API that isn't running reported
 4. the regions' official areas: one horizon per area the city rule picks (a small city's neighbourhoods are the
@@ -39,47 +39,57 @@ def check(cond, msg):
     print("  ok:", msg)
 
 
-def params_part(cfg):
-    print("1. a cached horizon's params give back the same params")
-    stub = SimpleNamespace(cfg=cfg["terrain"])
-    queries = {
-        "a small box": {"bbox": ["31.77000,35.21000,31.79000,35.23000"], "grid_m": ["100"]},
-        "a point": {"lat": ["40.6093"], "lon": ["-73.9683"]},
-        "a radius": {"lat": ["31.7486"], "lon": ["35.2374"], "radius_km": ["0.8"], "grid_m": ["150"]},
-        "a point at a height": {"lat": ["31.7486"], "lon": ["35.2374"], "height": ["812.5"], "eye": ["2"]},
-        "the moon's": {"bbox": ["40.60,-73.99,40.62,-73.97"], "moon": ["1"], "min_km": ["0.5"]},
-    }
-    for name, q in queries.items():
-        p = serve.Horizons.params(stub, q)
-        again = serve.Horizons.params(stub, {k: [v] for k, v in prebuild.query_from_params(p).items()})
-        check(again == p, f"{name}: the same params")
+def api_part(tmp: Path):
+    print("1-2. real horizons in the API's cache, read back and asked for again")
+    import urllib.request
 
-
-def demand_part(cfg, tmp: Path):
-    print("2. the demand")
-    cfg = {**cfg, "data_dir": str(tmp)}
-    stub = SimpleNamespace(cfg=cfg["terrain"])
-    cap = float(cfg["terrain"]["max_area_radius_km"])
+    import numpy as np
+    tiles = tmp / "tiles"
+    tiles.mkdir()
+    # a gentle slope on one tile (the rest is sea): enough for real horizons, quick to compute
+    z = (np.add.outer(np.arange(3601), np.arange(3601)) // 40).astype(">i2")
+    (tiles / "N31E035.hgt").write_bytes(z.tobytes())
+    cfgp = tmp / "config.json"
+    cfgp.write_text(json.dumps({"data_dir": str(tmp / "data"), "terrain": {
+        "tiles_dir": str(tiles), "tiles_url": "", "worker_processes": False, "answer_within_s": 600,
+        "max_km": 20, "base": {"enabled": False}}}))
+    cfg = load_config(str(cfgp))
     city = {"id": "city", "name": "city", "kind": "x", "level": 2, "source": "test", "country": "ISR",
-            "bbox": [31.74, 35.17, 31.82, 35.25], "radiusKm": 6.0, "polygons": square(31.74, 35.17, 31.82, 35.25)}
-    areas.write_areas(tmp / "areas.sqlite", [city], {"built": "test"})
-    d = tmp / "horizons"
-    d.mkdir()
-    # an area's horizon as resolve_area runs it: its box, with the request's own options
-    p1 = serve.Horizons.params(stub, {"bbox": ["31.74000,35.17000,31.82000,35.25000"], "eye": ["2"]}, cap)
-    p2 = serve.Horizons.params(stub, {"lat": ["40.6093"], "lon": ["-73.9683"]})
-    p3 = serve.Horizons.params(stub, {"bbox": ["32.00000,35.00000,32.09000,35.09000"]}, cap)   # no such area now
-    for name, p in (("old-key", p1), ("new-key", p1), ("point", p2), ("gone", p3)):
-        (d / f"{name}.json.gz").write_bytes(gzip.compress(json.dumps({"points": [], "params": p}).encode()))
-    (d / "broken.json.gz").write_bytes(b"not gzip")
-    qs = prebuild.demand(d, cfg)
-    check(len(qs) == 2, "two places: the same one under two keys once, the broken file and the gone area skipped")
-    aq = next(q for q in qs if q.get("area"))
-    check(aq["area"] == "auto" and aq["eye"] == "2", "the area asked for as area=auto inside it, with its own eye")
-    index = areas.AreaIndex(tmp / "areas.sqlite")
-    run, _, rcap = serve.resolve_area(index, cfg, {k: [v] for k, v in aq.items()})
-    check(serve.Horizons.params(stub, run, rcap) == p1, "which the server runs with the same params (same cache key)")
-    check(any(q.get("lat") == "40.60930" and "area" not in q for q in qs), "the point by its point")
+            "bbox": [31.60, 35.40, 31.66, 35.46], "radiusKm": 4.4, "polygons": square(31.60, 35.40, 31.66, 35.46)}
+    (tmp / "data").mkdir()
+    areas.write_areas(tmp / "data" / "areas.sqlite", [city], {"built": "test"})
+    serve.Handler.store = serve.Store(cfg)
+    serve.Handler.horizons = serve.Horizons(cfg)
+    serve.Handler.areas = areas.AreaIndex(serve.areas_path(cfg))
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), serve.Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    api = f"http://127.0.0.1:{srv.server_address[1]}"
+    asked = {
+        "a point": "lat=31.5&lon=35.5",
+        "a point at a height, its own eye": "lat=31.52&lon=35.52&height=812.5&eye=2",
+        "a radius": "lat=31.55&lon=35.55&radius_km=0.4&grid_m=400",
+        "a small box": "bbox=31.40,35.60,31.41,35.61&grid_m=500&min_km=0.5",
+        "the moon's": "lat=31.45&lon=35.45&moon=1",
+        "an official area (as the website asks)": "lat=31.63&lon=35.43&area=auto&grid_m=1500",
+    }
+    try:
+        for name, q in asked.items():
+            with urllib.request.urlopen(f"{api}/v1/horizon?{q}", timeout=600) as r:
+                r.read()
+        hdir = tmp / "data" / "horizons"
+        before = {f.name: f.stat().st_mtime_ns for f in hdir.glob("*.json.gz")}
+        check(len(before) == len(asked), f"{len(asked)} horizons in the cache")
+        (hdir / "broken.json.gz").write_bytes(b"not gzip")
+        qs = prebuild.demand(hdir, cfg)
+        check(len(qs) == len(asked), "every one read back (the broken file skipped)")
+        aq = [q for q in qs if q.get("area")]
+        check(len(aq) == 1 and aq[0]["area"] == "auto" and aq[0]["grid_m"] == "1500",
+              "the area's horizon asked for as the area, with its own grid")
+        failed = prebuild.Warmer(api, 2, 600).all(qs, "again")
+        after = {f.name: f.stat().st_mtime_ns for f in hdir.glob("*.json.gz") if f.name != "broken.json.gz"}
+        check(failed == 0 and after == before, "asked for again, each is the same cache entry (nothing new computed)")
+    finally:
+        srv.shutdown()
 
 
 class FakeAPI(BaseHTTPRequestHandler):
@@ -167,9 +177,8 @@ def dry_run_part(tmp: Path):
 
 def main():
     cfg = load_config(str(HERE / "does-not-exist.json"))
-    params_part(cfg)
     with tempfile.TemporaryDirectory() as d:
-        demand_part(cfg, Path(d))
+        api_part(Path(d))
     warmer_part()
     with tempfile.TemporaryDirectory() as d:
         areas_part(cfg, Path(d))
