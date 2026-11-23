@@ -148,6 +148,15 @@ def state_part(tmp: Path):
     (H.layers_out / "N31E035.rev").write_text("1")
     check(cdn.terrain_state(H) != s0, "a tile's new revision changes the terrain state")
 
+    # and the base level's settings (their candidates are in every horizon)
+    import terrain_base
+    H.base = terrain_base.settings({})
+    s1 = cdn.terrain_state(H)
+    check(s1 != cdn.terrain_state(type("H2", (), {"dem": H.dem, "fine": None, "layers_out": H.layers_out})),
+          "the base level's settings are part of the terrain state")
+    H.base = terrain_base.settings({"width_km": 60.0})
+    check(cdn.terrain_state(H) != s1, "changing the base level's settings changes the terrain state")
+
 
 def main():
     headers_part()

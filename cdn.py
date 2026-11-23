@@ -126,11 +126,15 @@ def terrain_state(horizons) -> str:
     """One hash of everything a horizon or terrain tile is made from that can change under the same URL."""
     import dem_layers
     import terrain
+    import terrain_base
     revs = {}
     if horizons.layers_out is not None and Path(horizons.layers_out).is_dir():
         revs = {f.stem: f.read_text().strip() for f in sorted(Path(horizons.layers_out).glob("*.rev"))}
     blob = {"layers": horizons.dem, "fine": horizons.fine and horizons.fine["sig"], "algo": terrain.ALGO_VERSION,
             "fine_v": dem_layers.FINE_VERSION, "revs": revs}
+    base = getattr(horizons, "base", None)     # the base level's settings: its candidates are in every horizon
+    if base is not None:
+        blob["base"] = terrain_base.signature(base)
     return hashlib.sha1(json.dumps(blob, sort_keys=True).encode()).hexdigest()[:12]
 
 
