@@ -101,10 +101,22 @@ def regions(only: str | None = None) -> list[dict]:
     return out
 
 
+def stored_params(stored: dict) -> dict:
+    """A cached horizon's "params" (terrain.horizon_set's: lat, lon, radiusKm, bbox, gridM, eyeM, heightM, minKm,
+    maxKm, moon) as Horizons.params gives them, the request's (radius_km, grid_m, eye, height, min_km, moon): what
+    the query is made from. grid_m only counts with a radius or a box (horizon_set is given 100 otherwise)."""
+    p = {"lat": stored["lat"], "lon": stored["lon"], "bbox": stored.get("bbox"),
+         "radius_km": stored.get("radiusKm") or 0.0, "grid_m": stored.get("gridM"), "eye": stored["eyeM"],
+         "height": stored.get("heightM"), "min_km": stored["minKm"]}
+    if stored.get("moon"):
+        p["moon"] = True
+    return p
+
+
 def query_from_params(p: dict) -> dict[str, str]:
-    """The /v1/horizon query that gives a cached horizon's params again (Horizons.params), so the same cache key.
-    An area's horizon is stored under its box (serve.resolve_area runs it as bbox=...); requery asks for a box
-    too large to be asked for directly as its area."""
+    """The /v1/horizon query that gives a cached horizon's params again (Horizons.params, from stored_params), so
+    the same cache key. An area's horizon is stored under its box (serve.resolve_area runs it as bbox=...);
+    requery asks for a box too large to be asked for directly as its area."""
     q: dict[str, str] = {}
     if p.get("bbox"):
         q["bbox"] = ",".join(f"{v:.5f}" for v in p["bbox"])
@@ -177,10 +189,12 @@ def demand(horizons_dir: Path, cfg: dict) -> list[dict[str, str]]:
     seen, out, bad, gone = set(), [], 0, 0
     for f in sorted(horizons_dir.glob("*.json.gz")):
         try:
-            p = json.loads(gzip.decompress(f.read_bytes()))["params"]
+            p = stored_params(json.loads(gzip.decompress(f.read_bytes()))["params"])
             q = requery(p, cfg, index)
-        except (OSError, ValueError, KeyError, TypeError):
+        except (OSError, ValueError, KeyError, TypeError) as e:
             bad += 1
+            if bad <= 3:                                  # the reason, for the first few
+                log.info("couldn't read %s: %s: %s", f.name, type(e).__name__, e)
             continue
         if q is None:
             gone += 1
