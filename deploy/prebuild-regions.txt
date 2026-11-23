@@ -1,0 +1,4 @@
+# Whole regions, for prebuild.py: name|south,west,north,east
+# --regions builds their base-level surfaces (Israel: ~260, ~30-40 min, ~20 MB), so a first visitor anywhere in
+# them doesn't wait for one; --region-areas also computes the horizon of every official area in them.
+Israel|29.4,34.2,33.4,35.95

@@ -148,7 +148,8 @@ All the Python files sit at the top level and share `config.json` (or the file i
 | **Validation only** | |
 | `era5_profiles.py`, `sonde_profiles.py`, `observations.py`, `ims_dawn.py` | past air (ERA5, radiosondes, IMS stations) and observed sunrises, for [Validation](docs/validation.md) |
 | **Folders** | |
-| `deploy/` | systemd units and timers, the nginx location, `prebuild-fine.sh` |
+| `prebuild.py` | terrain and horizons ahead of requests ([Building ahead](#building-ahead)) |
+| `deploy/` | systemd units and timers, the nginx location, `prebuild.sh` and its lists of places and regions |
 | `sources/` | GDAL descriptions of remote elevation sources (IGN's WMS) |
 | `tests/` | the test suite ([Tests](#tests)) |
 | `docs/` | [How it works](docs/how-it-works.md) and [Validation](docs/validation.md) |
@@ -257,7 +258,7 @@ Then, as you need them:
 | `build_prior.py` | by the fetcher, when the NOAA reanalysis climatology is missing or its 10-year window moved (each March) | the fetcher's |
 | `climate_envelope.py` | by the fetcher, once (when `<data_dir>/climate-envelope.npz` is missing) | the fetcher's |
 | `backfill_gfs.py` | by hand, once (and again after upgrades that add climatology fields) | its own (`nohup`) |
-| `dem_layers.py build` / `build-fine`, `deploy/prebuild-fine.sh` | by hand, to prepare terrain ahead of requests | its own |
+| `deploy/prebuild.sh` (`prebuild.py`) | by hand, after every deploy (and to prepare terrain ahead of requests) | its own (`nohup`) |
 | `build_areas.py`, `haze_calibration.py` | by hand, about once a year | its own |
 
 Only one `fetch_gfs.py` (and one `fetch_gefs.py`) runs at a time: one started by hand while the timer's is
@@ -416,7 +417,7 @@ sources. Try a source at a place first (nothing is kept), then build the places 
 
 ```sh
 sudo -u zmanim-sky venv/bin/python dem_layers.py test-fine 48.8566 2.3522 --example    # Paris, with the example's sources
-sudo -u zmanim-sky nohup deploy/prebuild-fine.sh --example > prebuild-fine.log 2>&1 &   # the main communities (~750 chunks, ~3.5 GB)
+sudo -u zmanim-sky nohup deploy/prebuild.sh --fine --example > prebuild.log 2>&1 &   # the main communities (~750 chunks, ~3.5 GB)
 sudo -u zmanim-sky venv/bin/python dem_layers.py build-fine --around 48.8566 2.3522 --km 25 --example   # or one place
 sudo cp config.json config.json.bak
 sudo -u zmanim-sky venv/bin/python -c "
@@ -438,11 +439,12 @@ sudo systemctl restart zmanim-sky-api
 * **`build-fine`** skips chunks already built and lists failed ones (run it again). `--km` is the radius to
   cover: the area's own radius plus `terrain.fine.max_km` (10). `--example` uses the example config's
   sources before `config.json` has them; the chunks go where the server will look once it has the same ones.
-* **`deploy/prebuild-fine.sh`** runs `build-fine` for a list of communities (New York, Monsey, Lakewood, Los
-  Angeles, Baltimore, Chicago, Toronto, Paris, ...; `--only NAME` for one; edit its list for your own
-  places). With `--tiles` it also prepares each place's 1″ tiles (`dem_layers.py build --horizon`;
-  `--tiles-only` for those alone): about 330 for the whole list, many of them sea; up to ~15 GB as merged
-  tiles, so check the disk first or use `--only`.
+* **`deploy/prebuild.sh --fine`** runs `build-fine` for the listed communities (`deploy/prebuild-places.txt`:
+  New York, Monsey, Lakewood, Los Angeles, Baltimore, Chicago, Toronto, Paris, ...; `--only NAME` for one; edit
+  the list for your own places), each over its official area where that is wider than its listed radius. With
+  `--tiles` it also prepares each place's 1″ tiles (`dem_layers.py build --horizon`): about 330 for the whole
+  list, many of them sea; up to ~15 GB as merged tiles, so check the disk first or use `--only`. See
+  [Building ahead](#building-ahead) for the rest of what it does.
 
 Visitors get the new horizons at their app's next daily terrain check, only where fine data exists.
 
@@ -485,10 +487,47 @@ Set in `terrain.base`:
 The settings are part of the stored horizons' key and of `/v1/terrain-version` (`base`), so changing them
 recomputes. A surface reads about 30 1° tiles and takes 5-10 s to build. It is kept on disk
 (`<data_dir>/base-surfaces`, ~50-100 KB each) and rebuilt only when a merged tile under it is first built or
-rebuilt. Build them ahead of time, as for the fine terrain: `deploy/prebuild-fine.sh --base-only` does all of
-Israel (~260 surfaces, ~30-40 min, ~20 MB) and each place in its list, or one place with
-`venv/bin/python terrain_base.py build --around LAT LON --radius-km R` (`--bbox S,W,N,E` for a region, `--count`
-to only count). Where the tiles can't be read, the horizon is still served, with `base.status` `none`.
+rebuilt. `deploy/prebuild.sh` builds them ahead of time ([Building ahead](#building-ahead)): all of Israel
+(`deploy/prebuild-regions.txt`; ~260 surfaces, ~30-40 min, ~20 MB) and, through the horizons it asks for, every
+place visitors use; or one place with `venv/bin/python terrain_base.py build --around LAT LON --radius-km R`
+(`--bbox S,W,N,E` for a region, `--count` to only count). A surface reads the 1″ tiles alone, not the fine
+terrain, out to ~245 km (150 km of view plus the 80 km it removes), so building one far from the places
+already served downloads tiles past their horizons' 150 km. Where the tiles can't be read, the horizon is still
+served, with `base.status` `none`.
+
+#### Building ahead
+
+`deploy/prebuild.sh` (`prebuild.py`; `--help` for all of it) prepares terrain and horizons before visitors
+ask, so they don't wait for them. Run it after every deploy that changes the horizons' cache key (a new
+algorithm version, terrain sources or base settings: every horizon is then computed again on its first request),
+and now and then to cover new places:
+
+```sh
+sudo -u zmanim-sky nohup deploy/prebuild.sh > prebuild.log 2>&1 &                  # what a deploy needs
+sudo -u zmanim-sky nohup deploy/prebuild.sh --region-areas > prebuild.log 2>&1 &   # and every area in Israel
+sudo -u zmanim-sky deploy/prebuild.sh --dry-run                                    # only say what it would do
+```
+
+* **Where**: the *demand*, every horizon in the API's cache (`<data_dir>/horizons`), so the places visitors
+  actually asked for, anywhere; the *places*, `deploy/prebuild-places.txt`, the main communities, for a first
+  visitor there; the *regions*, `deploy/prebuild-regions.txt`, whole regions (Israel).
+* **What**, with no option: every horizon of the demand and of the places' official areas, asked of the running
+  API `terrain.max_parallel` at a time (a 503 "computing" is asked again when it says, as the website does).
+  The API builds what each needs, tiles, fine chunks and base surfaces, as for a request, and the answer is then
+  in its cache; for a place visitors use, that alone does everything below. And the regions' base surfaces
+  (`--regions`), for a first visit anywhere there.
+* **After a deploy that changed the cache key**, the old files are still in `<data_dir>/horizons` under their old
+  keys: they are the demand. Keep them until this has run once; the old ones can then be removed (they are no
+  longer read).
+* `--region-areas` also asks for the horizon of every official area in the regions (Israel: a few thousand, hours
+  of CPU), one per area the city rule picks.
+* For the listed places only: `--tiles` (1″ tiles), `--fine` (fine terrain, only where its sources have data:
+  the US, Canada, France), `--base` (base surfaces) and `--3d` (the 3D view's tiles, 15-80 min a city, so never
+  by default). Each covers the place's official area where that is wider than its listed radius.
+* `--only NAME` limits it to the listed places and regions whose name has NAME (no demand); `--api URL` and
+  `--parallel N` if the API isn't on `api.port` or should be asked more at a time. `deploy/prebuild-fine.sh`,
+  the old name, still takes its old options (`--tiles`, `--tiles-only`, `--3d`, `--3d-only`, `--base`,
+  `--base-only`) and passes them on.
 
 ### Upgrading
 
@@ -584,7 +623,7 @@ A modest VPS is enough: the server mostly needs disk and bandwidth, not CPU.
 * Backfill: roughly 80–100 GB download from 2021 at the default spacing, once (+ ~40 GB for the 80 m /
   100 m air and `gfs-moments`); no lasting disk use beyond the climatology itself.
 * Terrain: default tiles 2–8 MB each; merged 1″ tiles ~52 MB per land tile; fine terrain ~4.7 MB per 0.1°
-  chunk (`prebuild-fine.sh`'s list: ~3.5 GB).
+  chunk (`deploy/prebuild-places.txt`'s list: ~3.5 GB).
 * GEFS (optional): ~1250 requests per region per run, ~0.7 GB stored for the US box.
 * CPU / RAM: negligible; arrays are memory-mapped. While first horizons are computed, up to
   `terrain.max_parallel` worker processes use a core and ~0.3–0.5 GB each (their own tiles in memory).
@@ -652,6 +691,7 @@ for t in tests/test_*.py; do python3 "$t" > /dev/null 2>&1 || echo "FAILED: $t";
 | `test_terrain_tiles.py` | `/v1/terrain-tiles` on a synthetic 1″ tile (heights at the pixel centres, the Terrarium encoding, the disk cache, 404 for low zooms without the data) |
 | `test_cesium_terrain.py` | `/v1/cesium-terrain` on a synthetic 1″ tile, decoded independently: vertex heights, edges, winding, normals against the slope, `layer.json`, AWS's heights for coarse levels and missing data (kept apart until the server has the data), the disk cache, `build` ahead of time (each level within its reach, out to the earth's curve, with parents) |
 | `test_cdn.py` | the caching headers (browsers a day, the CDN the full lifetime, stale-if-error, tags; a partial horizon 10 minutes), purge requests as Cloudflare's API takes them, and purging only what changed (a tile revision, a new areas.sqlite), a refused purge retried |
+| `test_prebuild.py` | `prebuild.py`: a cached horizon's params asked for again give the same params (a box, a point, a radius, a height, the moon's), an official area's horizon asked for as the area (its box is too large to ask for), the same place under two keys once, a 503 asked again after its `retryAfterS`, one horizon per area the city rule picks in a region, and a dry run doing nothing |
 | `test_era5.py` | ERA5 profiles for past dates on synthetic NetCDF files in both CDS layouts (what is requested, time interpolation, ground-following, the command line) |
 | `test_sonde.py` | radiosonde profiles on a synthetic IGRA file (missing heights and values IGRA's quality control removed, the three versions, which sounding a date gets) |
 
