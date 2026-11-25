@@ -57,7 +57,8 @@ equivalent, from NOAA's 1991-2020 reanalysis): the website's guardrails refuse a
 place's monthly normals did not download. Built by climate_envelope.py (fetch_gfs.py runs it once); 503 until then.
 
 /v1/terrain-tiles serves the ground the horizons are computed from as web-map tiles (terrain_tiles.py), so the
-website's 3D view shows the same terrain; 404 where the server doesn't have it (the view then uses AWS's tiles).
+website's 3D view and the app's sunrise countdown show the same terrain; 404 where the server doesn't have it (the
+clients then use AWS's tiles), with "pending": true where it will once horizons nearby bring the data.
 
 Run behind nginx (or any reverse proxy) for TLS. Standard library only, plus numpy (and rasterio for
 /v1/light-pollution).
@@ -547,7 +548,7 @@ class Horizons:
         local.fine = self.tiles.fine
         self.map_tiles = terrain_tiles.TerrainTiles(
             self.tiles, local, data / "terrain-tiles",
-            f"{self.dem or 'srtm'}-{self.fine['sig'] if self.fine else 'nofine'}")
+            f"{self.dem or 'srtm'}-{self.fine['sig'] if self.fine else 'nofine'}", layered_dir if self.dem else None)
         # and in Cesium's own format (quantized-mesh) for the 3D view; its fine data only where it is on disk
         own = terrain.Tiles(folder, None, max_in_memory=4, user_agent=ua, layered_dir=layered_dir)
         self.cesium = cesium_terrain.CesiumTerrain(
@@ -1113,15 +1114,20 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"/v1/terrain-tiles/(\d+)/(\d+)/(\d+)\.png", path)
         if not m:
             return self.send_json(404, {"error": "not found"})
+        # A ?v= (the terrain version of the horizon the tiles are drawn with) is not read here: it only gives each
+        # terrain release its own URLs in the CDN and the clients' caches.
         try:
-            body = self.horizons.map_tiles.get(*map(int, m.groups()))
-        except (ValueError, LookupError) as e:
+            body, final = self.horizons.map_tiles.get_ex(*map(int, m.groups()))
+        except terrain_tiles.NotYet as e:
             # short cache: a missing tile appears once horizons nearby bring its data
-            return self.send_json(404, {"error": str(e)}, cache_s=3600, tags=("terrain",))
+            return self.send_json(404, {"error": str(e), "pending": True}, cache_s=3600, tags=("terrain",))
+        except (ValueError, LookupError) as e:
+            return self.send_json(404, {"error": str(e), "pending": False}, cache_s=86400, tags=("terrain",))
         self.send_response(200)
         self.send_header("Content-Type", "image/png")
         self.send_header("Access-Control-Allow-Origin", self.store.cfg["api"]["allow_origin"])
-        self.send_cache(2592000, ("terrain",))
+        # made while some of its fine data was missing (not kept): not for long, like the horizons there
+        self.send_cache(2592000 if final else 600, ("terrain",))
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

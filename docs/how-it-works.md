@@ -691,12 +691,18 @@ policy asks that its use acknowledge the AERONET network and the station PIs.
 `GET /v1/terrain-tiles/{z}/{x}/{y}.png` serves the heights the horizons are computed from (the fine near-range
 data, else the bare-earth layers, else the 1″ tiles) as web-Mercator tiles in the Terrarium encoding (height =
 R × 256 + G + B / 256 − 32768 m, the format of the open AWS Terrain Tiles), so the website's 3D horizon view
-shows the ground the horizon was found on. Zooms 8–14 only. A tile below zoom 11 spans several 1° tiles, so it
-is made only from data already on the server (computing a horizon nearby brings it) and is otherwise a 404;
-the website then shows the AWS tiles there. Each tile is made once and kept in
-`<data_dir>/terrain-tiles/<terrain signature>/` (a new signature, from changing `terrain.layers` or
-`terrain.fine`, starts a new folder; delete old ones). Tiles of a merged 1° tile rebuilt with `--force` are not
-renewed by themselves: delete the folder to remake them.
+shows the ground the horizon was found on; the app's sunrise countdown draws its panorama from them too. Heights
+are rounded to a quarter metre and the rows Paeth-filtered, which makes a tile about a third of the size
+(~45 KB rather than ~140 KB) and is read by any PNG decoder. Zooms 8–14 only. A tile below zoom 11 spans several
+1° tiles, so it is made only from data already on the server (computing a horizon nearby brings it) and is
+otherwise a 404 with `"pending": true` (other 404s say `false`: the server will never have that tile); the
+clients then use the AWS tiles there. Each tile is made once and kept in
+`<data_dir>/terrain-tiles/v2-<terrain signature>/` (a new signature, from changing `terrain.layers` or
+`terrain.fine`, starts a new folder; delete old ones; a tile of the previous, unfiltered format is re-encoded
+on first use). A tile's file name carries the revisions of the merged 1° tiles under it, so rebuilding one with
+`--force` remakes its map tiles too. A tile made while a fine chunk under it failed to build is not kept and is
+cached for 10 minutes only. The app adds `?v=<the horizon's terrain version>`, which the server ignores: it
+gives each terrain release its own URLs in the CDN and on the phone.
 
 ## Terrain for the 3D view in Cesium's format (`/v1/cesium-terrain`)
 
