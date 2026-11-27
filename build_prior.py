@@ -41,22 +41,22 @@ from common import load_config, replace_dir, write_json_atomic
 
 log = logging.getLogger("build_prior")
 
-PSL = "https://downloads.psl.noaa.gov/Datasets/ncep.reanalysis"
+PSL = "https://downloads.psl.noaa.gov/Datasets"
 STATIC_FILES = {
-    "orog": "surface/hgt.sfc.nc",
-    "land": "surface/land.nc",
+    "orog": "ncep.reanalysis/surface/hgt.sfc.nc",
+    "land": "ncep.reanalysis/surface/land.nc",
 }
-LTM_FILES = {   # role -> path under PSL (NOAA's fixed 1991-2020 long-term means)
-    "air": "Monthlies/pressure/air.4Xday.ltm.1991-2020.nc",
-    "hgt": "Monthlies/pressure/hgt.4Xday.ltm.1991-2020.nc",
-    "t_near": "Monthlies/surface/air.sig995.4Xday.ltm.1991-2020.nc",
-    "psfc": "Monthlies/surface/pres.sfc.4Xday.ltm.1991-2020.nc",
+LTM_FILES = {   # role -> path under PSL (NOAA's fixed 1991-2020 long-term means; ncep.reanalysis/Monthlies/ until 2026)
+    "air": "ncep.reanalysis.derived/pressure/air.4Xday.ltm.1991-2020.nc",
+    "hgt": "ncep.reanalysis.derived/pressure/hgt.4Xday.ltm.1991-2020.nc",
+    "t_near": "ncep.reanalysis.derived/surface/air.sig995.4Xday.ltm.1991-2020.nc",
+    "psfc": "ncep.reanalysis.derived/surface/pres.sfc.4Xday.ltm.1991-2020.nc",
 }
 YEAR_FILES = {  # role -> path under PSL for one year of 4x-daily data
-    "air": "pressure/air.{year}.nc",
-    "hgt": "pressure/hgt.{year}.nc",
-    "t_near": "surface/air.sig995.{year}.nc",
-    "psfc": "surface/pres.sfc.{year}.nc",
+    "air": "ncep.reanalysis/pressure/air.{year}.nc",
+    "hgt": "ncep.reanalysis/pressure/hgt.{year}.nc",
+    "t_near": "ncep.reanalysis/surface/air.sig995.{year}.nc",
+    "psfc": "ncep.reanalysis/surface/pres.sfc.{year}.nc",
 }
 TIME_ROLES = ("air", "hgt", "t_near", "psfc")
 LEVELS = [1000, 925, 850, 700, 600, 500]     # Reanalysis 1 levels up to 500 mb
